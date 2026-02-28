@@ -1,0 +1,8 @@
+PROMOTION_PLAN.local.md
+target/
+dist/
+node_modules/
+pkg/
+*.wasm
+!src/**/*.wasm
+.DS_Store

@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+//! static-agent: semantic search and simple Q&A for static sites.
+//!
+//! This library provides the shared core used by both the CLI indexer
+//! and the browser WASM module.
+
+pub mod chunk;
+pub mod embed;
+pub mod index;
+pub mod search;
