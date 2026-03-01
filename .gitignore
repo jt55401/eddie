@@ -6,3 +6,4 @@ pkg/
 *.wasm
 !src/**/*.wasm
 .DS_Store
+.worktrees/
