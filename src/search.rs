@@ -62,7 +62,7 @@ mod tests {
         let dummy_texts: Vec<String> = (0..n).map(|i| format!("doc {}", i)).collect();
         let text_refs: Vec<&str> = dummy_texts.iter().map(|s| s.as_str()).collect();
         let bm25 = Bm25Index::build(&text_refs);
-        SearchIndex::new("test".to_string(), dim, metadata, flat, bm25)
+        SearchIndex::new("test".to_string(), dim, metadata, flat, bm25, dummy_texts)
     }
 
     #[test]

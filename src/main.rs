@@ -154,12 +154,14 @@ fn cmd_index(
 
     // Build and write index
     let metadata: Vec<_> = all_chunks.iter().map(|c| c.meta.clone()).collect();
+    let chunk_texts: Vec<String> = all_chunks.iter().map(|c| c.text.clone()).collect();
     let index = SearchIndex::new(
         model_id.to_string(),
         embedder.dim(),
         metadata,
         all_embeddings,
         bm25,
+        chunk_texts,
     );
 
     eprintln!("Writing index to {}...", output.display());

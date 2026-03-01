@@ -2,9 +2,9 @@
 
 //! Index format: serialize and deserialize the vector index + metadata.
 //!
-//! Binary format (v2):
+//! Binary format (v3):
 //! - `SAGI` magic (4 bytes)
-//! - version: u32 LE (2)
+//! - version: u32 LE (3)
 //! - dim: u32 LE (embedding dimensionality)
 //! - num_chunks: u32 LE
 //! - model_id_len: u32 LE
@@ -13,6 +13,8 @@
 //! - metadata: JSON-encoded `Vec<ChunkMeta>` bytes
 //! - embeddings: `num_chunks * dim` f32 values (LE)
 //! - bm25_index: length-prefixed JSON (u32 LE length + JSON bytes)
+//! - text_count: u32 LE (v3 only)
+//! - texts: for each text, u32 LE length + UTF-8 bytes (v3 only)
 
 use std::io::{Read, Write};
 
@@ -22,9 +24,9 @@ use crate::bm25::Bm25Index;
 use crate::chunk::ChunkMeta;
 
 const MAGIC: &[u8; 4] = b"SAGI";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
-/// A search index containing chunk metadata, embedding vectors, and BM25 index.
+/// A search index containing chunk metadata, embedding vectors, BM25 index, and chunk texts.
 #[derive(Debug)]
 pub struct SearchIndex {
     pub model_id: String,
@@ -33,24 +35,29 @@ pub struct SearchIndex {
     /// Flat matrix: `metadata.len() * dim` f32 values, row-major.
     pub embeddings: Vec<f32>,
     pub bm25: Bm25Index,
+    /// Chunk texts for result snippets. Empty if loaded from a v2 index.
+    pub texts: Vec<String>,
 }
 
 impl SearchIndex {
-    /// Create a new index from chunks, their embeddings, and a BM25 index.
+    /// Create a new index from chunks, their embeddings, BM25 index, and chunk texts.
     pub fn new(
         model_id: String,
         dim: usize,
         metadata: Vec<ChunkMeta>,
         embeddings: Vec<f32>,
         bm25: Bm25Index,
+        texts: Vec<String>,
     ) -> Self {
         debug_assert_eq!(embeddings.len(), metadata.len() * dim);
+        debug_assert!(texts.is_empty() || texts.len() == metadata.len());
         Self {
             model_id,
             dim,
             metadata,
             embeddings,
             bm25,
+            texts,
         }
     }
 
@@ -76,10 +83,18 @@ impl SearchIndex {
         // BM25 index trailer
         self.bm25.write_to(&mut w)?;
 
+        // Chunk texts trailer (v3)
+        w.write_all(&(self.texts.len() as u32).to_le_bytes())?;
+        for text in &self.texts {
+            let bytes = text.as_bytes();
+            w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            w.write_all(bytes)?;
+        }
+
         Ok(())
     }
 
-    /// Deserialize an index from a reader.
+    /// Deserialize an index from a reader. Accepts v2 (texts will be empty) and v3.
     pub fn read_from<R: Read>(mut r: R) -> Result<Self> {
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic).context("reading magic bytes")?;
@@ -91,8 +106,8 @@ impl SearchIndex {
         }
 
         let version = read_u32(&mut r).context("reading version")?;
-        if version != VERSION {
-            bail!("unsupported index version: {} (expected {})", version, VERSION);
+        if version != 2 && version != 3 {
+            bail!("unsupported index version: {} (expected 2 or 3)", version);
         }
 
         let dim = read_u32(&mut r).context("reading dim")? as usize;
@@ -133,13 +148,40 @@ impl SearchIndex {
         // BM25 index trailer
         let bm25 = Bm25Index::read_from(&mut r).context("reading BM25 index")?;
 
+        // Chunk texts trailer (v3 only)
+        let texts = if version >= 3 {
+            let text_count = read_u32(&mut r).context("reading text count")? as usize;
+            let mut texts = Vec::with_capacity(text_count);
+            for i in 0..text_count {
+                let len = read_u32(&mut r)
+                    .with_context(|| format!("reading text length for chunk {}", i))?
+                    as usize;
+                let mut text_bytes = vec![0u8; len];
+                r.read_exact(&mut text_bytes)
+                    .with_context(|| format!("reading text for chunk {}", i))?;
+                texts.push(
+                    String::from_utf8(text_bytes)
+                        .with_context(|| format!("chunk {} text is not valid UTF-8", i))?,
+                );
+            }
+            texts
+        } else {
+            Vec::new()
+        };
+
         Ok(Self {
             model_id,
             dim,
             metadata,
             embeddings,
             bm25,
+            texts,
         })
+    }
+
+    /// Deserialize an index from a byte slice.
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Self::read_from(std::io::Cursor::new(data))
     }
 
     /// Get the embedding vector for chunk at the given index.
@@ -176,8 +218,19 @@ mod tests {
             },
         ];
         let embeddings = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 chunks * 3 dims
+        let texts = vec![
+            "intro text here".to_string(),
+            "body content here".to_string(),
+        ];
         let bm25 = Bm25Index::build(&["intro text here", "body content here"]);
-        SearchIndex::new("test-model".to_string(), 3, metadata, embeddings, bm25)
+        SearchIndex::new(
+            "test-model".to_string(),
+            3,
+            metadata,
+            embeddings,
+            bm25,
+            texts,
+        )
     }
 
     #[test]
@@ -195,6 +248,20 @@ mod tests {
         assert_eq!(restored.metadata[1].chunk_index, 1);
         assert_eq!(restored.embeddings, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(restored.bm25.num_docs, 2);
+        assert_eq!(restored.texts.len(), 2);
+        assert_eq!(restored.texts[0], "intro text here");
+        assert_eq!(restored.texts[1], "body content here");
+    }
+
+    #[test]
+    fn test_round_trip_from_bytes() {
+        let index = sample_index();
+        let mut buf = Vec::new();
+        index.write_to(&mut buf).unwrap();
+
+        let restored = SearchIndex::from_bytes(&buf).unwrap();
+        assert_eq!(restored.model_id, "test-model");
+        assert_eq!(restored.texts.len(), 2);
     }
 
     #[test]
@@ -214,7 +281,14 @@ mod tests {
     #[test]
     fn test_empty_index() {
         let bm25 = Bm25Index::build(&[]);
-        let index = SearchIndex::new("model".to_string(), 384, Vec::new(), Vec::new(), bm25);
+        let index = SearchIndex::new(
+            "model".to_string(),
+            384,
+            Vec::new(),
+            Vec::new(),
+            bm25,
+            Vec::new(),
+        );
         let mut buf = Vec::new();
         index.write_to(&mut buf).unwrap();
 
@@ -223,6 +297,7 @@ mod tests {
         assert_eq!(restored.metadata.len(), 0);
         assert_eq!(restored.embeddings.len(), 0);
         assert_eq!(restored.bm25.num_docs, 0);
+        assert_eq!(restored.texts.len(), 0);
     }
 
     #[test]
