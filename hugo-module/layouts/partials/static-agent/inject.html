@@ -1,0 +1,12 @@
+{{- $cfg := .Site.Params.staticAgent | default dict -}}
+{{- $enabled := $cfg.enabled | default true -}}
+{{- if $enabled -}}
+{{- $indexUrl := $cfg.indexUrl | default "/static-agent/index.bin" -}}
+{{- $position := $cfg.position | default "bottom-right" -}}
+{{- $theme := $cfg.theme | default "auto" -}}
+<script src="{{ "static-agent/static-agent-widget.js" | relURL }}"
+        data-index-url="{{ $indexUrl }}"
+        data-position="{{ $position }}"
+        data-theme="{{ $theme }}"
+        defer></script>
+{{- end -}}
