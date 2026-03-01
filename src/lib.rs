@@ -5,6 +5,7 @@
 //! This library provides the shared core used by both the CLI indexer
 //! and the browser WASM module.
 
+pub mod bm25;
 pub mod chunk;
 pub mod embed;
 pub mod index;

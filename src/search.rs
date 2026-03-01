@@ -43,9 +43,11 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bm25::Bm25Index;
 
     fn make_index(embeddings: Vec<Vec<f32>>) -> SearchIndex {
         let dim = embeddings[0].len();
+        let n = embeddings.len();
         let metadata: Vec<ChunkMeta> = embeddings
             .iter()
             .enumerate()
@@ -57,7 +59,10 @@ mod tests {
             })
             .collect();
         let flat: Vec<f32> = embeddings.into_iter().flatten().collect();
-        SearchIndex::new("test".to_string(), dim, metadata, flat)
+        let dummy_texts: Vec<String> = (0..n).map(|i| format!("doc {}", i)).collect();
+        let text_refs: Vec<&str> = dummy_texts.iter().map(|s| s.as_str()).collect();
+        let bm25 = Bm25Index::build(&text_refs);
+        SearchIndex::new("test".to_string(), dim, metadata, flat, bm25)
     }
 
     #[test]
