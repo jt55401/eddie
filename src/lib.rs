@@ -12,3 +12,5 @@ pub mod index;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parse;
 pub mod search;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
