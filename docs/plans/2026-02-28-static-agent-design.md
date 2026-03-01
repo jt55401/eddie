@@ -39,13 +39,13 @@ The WASM module loads the same embedding model used at index time (fetched from 
 ### Two tiers
 
 1. **Search** (CPU/WASM, works everywhere): MiniLM embeddings + vector search → ranked results with page titles, snippets, and links.
-2. **Q&A** (WebGPU, when available): Small LLM synthesizes a 1-2 sentence answer from retrieved chunks. Falls back to search-only when no WebGPU.
+2. **Q&A** (WebGPU, when available): Small LLM via WebLLM synthesizes a 1-3 sentence answer from retrieved chunks, streamed token-by-token. "Ask" button next to search input (Shift+Enter shortcut). Falls back to search-only when no WebGPU — Ask button simply not rendered.
 
 ### Model delivery
 
 Models are **not redistributed** in the project or site assets. They are fetched from HuggingFace CDN at runtime, on demand:
 - Embedding model (~23MB): downloaded on first search
-- LLM (~1-2GB quantized): downloaded on first Q&A use
+- LLM (~350MB default, configurable up to ~900MB+): downloaded on first Ask use
 
 Both are cached in the browser (IndexedDB/Cache API) after first download.
 
@@ -57,8 +57,8 @@ Both are cached in the browser (IndexedDB/Cache API) after first download.
 | ML framework | Candle (HuggingFace) | Proven BERT WASM examples. Native Rust. HuggingFace ecosystem. |
 | Tokenizer | `tokenizers` crate | WASM-compatible. Same tokenizer for CLI and browser. |
 | Default embedding model | all-MiniLM-L6-v2 | Small (~22M params), fast, well-known. Configurable. |
-| LLM runtime (browser) | WebLLM or wllama | WebGPU acceleration. Configurable. |
-| Default LLM | SmolLM2-1.7B-Instruct | Apache 2.0, small, good quality/size ratio. |
+| LLM runtime (browser) | WebLLM (`@mlc-ai/web-llm`) | Purpose-built WebGPU LLM inference. TVM-compiled shaders, OpenAI-compatible streaming API, built-in caching. |
+| Default LLM | Qwen2.5-0.5B-Instruct-q4f16_1-MLC | ~350MB, Apache 2.0, configurable up to 1.5B+. |
 | Vector search | Brute-force cosine | Sufficient for <10k chunks. No ANN index needed. |
 | Widget | Vanilla JS + CSS | No framework dependency. Embeddable anywhere. |
 
@@ -72,11 +72,10 @@ Floating button in the bottom-right corner → expands to a modal panel.
 2. **Open (cold)** — modal open, search field visible, no model loaded
 3. **Downloading search model** — progress bar ("Loading search... 12/23 MB")
 4. **Searching** — embedding query, computing similarity
-5. **Results** — ranked list of pages with titles, snippets, links
-6. **Q&A: check WebGPU** — detect GPU support
-7. **Q&A: unavailable** — "requires a modern browser with WebGPU"
-8. **Q&A: downloading LLM** — progress bar ("Loading Q&A model... 400/1200 MB")
-9. **Q&A: ready** — generated answer with source citations
+5. **Results** — ranked list of pages with titles, snippets, links. If WebGPU available, "Ask" button visible next to search input.
+6. **Ask: downloading LLM** — progress bar in answer card above results ("Loading AI model... 120/350 MB")
+7. **Ask: generating** — streaming answer tokens with pulsing cursor, above results
+8. **Ask: complete** — full answer + "Sources:" with clickable links, results still visible below
 
 ### Caching
 
@@ -92,8 +91,7 @@ model = "sentence-transformers/all-MiniLM-L6-v2"
 
 [qa]
 enabled = true
-runtime = "webllm"  # or "wllama"
-model = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+model = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC"  # WebLLM model ID
 
 [widget]
 theme = "auto"  # "light", "dark", "auto"
