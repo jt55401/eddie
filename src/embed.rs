@@ -62,6 +62,36 @@ impl Embedder {
         })
     }
 
+    /// Construct an embedder from raw model file bytes.
+    ///
+    /// Accepts the contents of `config.json`, `tokenizer.json`, and
+    /// `model.safetensors` as byte slices. Works on all targets including WASM.
+    pub fn from_bytes(
+        config_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        weights_bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let device = Device::Cpu;
+
+        let config: Config =
+            serde_json::from_slice(config_bytes).context("parsing config.json")?;
+
+        let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
+            .map_err(|e| anyhow::anyhow!("tokenizer error: {}", e))?;
+
+        let vb = VarBuilder::from_buffered_safetensors(weights_bytes, DType::F32, &device)
+            .context("loading model weights")?;
+
+        let model = BertModel::load(vb, &config).context("building BertModel")?;
+
+        Ok(Self {
+            model,
+            tokenizer,
+            config,
+            device,
+        })
+    }
+
     /// Embed a batch of texts, returning one L2-normalized vector per text.
     /// Each vector has `self.dim()` dimensions.
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
