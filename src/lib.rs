@@ -9,5 +9,6 @@ pub mod bm25;
 pub mod chunk;
 pub mod embed;
 pub mod index;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod parse;
 pub mod search;

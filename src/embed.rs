@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
+#[cfg(not(target_arch = "wasm32"))]
 use hf_hub::api::sync::Api;
 use tokenizers::Tokenizer;
 
@@ -22,6 +23,7 @@ impl Embedder {
     ///
     /// Downloads `config.json`, `tokenizer.json`, and `model.safetensors`
     /// for the given model ID (e.g. `sentence-transformers/all-MiniLM-L6-v2`).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(model_id: &str) -> Result<Self> {
         let device = Device::Cpu;
         let api = Api::new().context("creating HuggingFace Hub API client")?;
