@@ -42,7 +42,7 @@ jobs:
           fi
 
           TAG="${GITHUB_REF#refs/tags/}"
-          git clone "https://x-access-token:${EDDIE_HUGO_PAT}@github.com/jt55401/eddie-hugo.git" /tmp/eddie-hugo
+          git clone "https://jt55401:${EDDIE_HUGO_PAT}@github.com/jt55401/eddie-hugo.git" /tmp/eddie-hugo
           rsync -av --delete hugo-module/ /tmp/eddie-hugo/
 
           cd /tmp/eddie-hugo
