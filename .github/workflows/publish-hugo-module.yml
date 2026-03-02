@@ -16,6 +16,11 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
 
+      - name: Load deploy key for eddie-hugo
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.EDDIE_HUGO_DEPLOY_KEY }}
+
       - name: Install Rust + wasm target
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -31,18 +36,11 @@ jobs:
         run: bash scripts/publish-hugo-module.sh
 
       - name: Sync and publish to jt55401/eddie-hugo
-        env:
-          EDDIE_HUGO_PAT: ${{ secrets.EDDIE_HUGO_PAT }}
         run: |
           set -euo pipefail
 
-          if [[ -z "${EDDIE_HUGO_PAT:-}" ]]; then
-            echo "EDDIE_HUGO_PAT is not configured; skipping publish to jt55401/eddie-hugo."
-            exit 0
-          fi
-
           TAG="${GITHUB_REF#refs/tags/}"
-          git clone "https://jt55401:${EDDIE_HUGO_PAT}@github.com/jt55401/eddie-hugo.git" /tmp/eddie-hugo
+          git clone "git@github.com:jt55401/eddie-hugo.git" /tmp/eddie-hugo
           rsync -av --delete hugo-module/ /tmp/eddie-hugo/
 
           cd /tmp/eddie-hugo
