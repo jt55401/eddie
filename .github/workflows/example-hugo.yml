@@ -1,0 +1,36 @@
+name: Example Hugo Site Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-example:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout site
+        uses: actions/checkout@v4
+
+      - name: Install Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: latest
+          extended: true
+
+      - name: Download Eddie CLI (latest release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo jt55401/eddie --pattern 'eddie-linux-amd64' --output eddie
+          chmod +x eddie
+
+      - name: Generate Eddie index into Hugo static/
+        run: ./eddie index --content-dir content/ --output static/eddie-index.bin
+
+      - name: Build Hugo site
+        run: hugo --minify
+
+      - name: Upload built site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hugo-public
+          path: public/

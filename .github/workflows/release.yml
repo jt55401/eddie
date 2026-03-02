@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Build CLI binary
+        run: cargo build --release --locked --bin eddie
+
+      - name: Build widget and assemble Hugo module
+        run: bash scripts/publish-hugo-module.sh
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-assets
+          cp target/release/eddie release-assets/eddie-linux-amd64
+          cp dist/eddie.wasm release-assets/
+          cp dist/eddie-wasm.js release-assets/
+          cp dist/eddie-worker.js release-assets/
+          cp dist/eddie-widget.js release-assets/
+          tar -czf release-assets/eddie-hugo-module.tar.gz -C hugo-module .
+          (cd release-assets && sha256sum * > SHA256SUMS)
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/*
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/eddie-linux-amd64
+            release-assets/eddie.wasm
+            release-assets/eddie-wasm.js
+            release-assets/eddie-worker.js
+            release-assets/eddie-widget.js
+            release-assets/eddie-hugo-module.tar.gz
+            release-assets/SHA256SUMS

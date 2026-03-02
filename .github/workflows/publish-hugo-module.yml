@@ -1,0 +1,60 @@
+name: Publish Hugo Module Repo
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+
+      - name: Assemble hugo-module/
+        run: bash scripts/publish-hugo-module.sh
+
+      - name: Skip publish (missing token)
+        if: ${{ secrets.EDDIE_HUGO_PAT == '' }}
+        run: echo "EDDIE_HUGO_PAT is not configured; skipping publish to jt55401/eddie-hugo."
+
+      - name: Sync and publish to jt55401/eddie-hugo
+        if: ${{ secrets.EDDIE_HUGO_PAT != '' }}
+        env:
+          EDDIE_HUGO_PAT: ${{ secrets.EDDIE_HUGO_PAT }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          git clone "https://x-access-token:${EDDIE_HUGO_PAT}@github.com/jt55401/eddie-hugo.git" /tmp/eddie-hugo
+          rsync -av --delete hugo-module/ /tmp/eddie-hugo/
+
+          cd /tmp/eddie-hugo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B main
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No hugo module changes to commit."
+          else
+            git commit -m "Publish Hugo module from ${GITHUB_SHA}"
+          fi
+          git push origin main
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            git tag -a "${TAG}" -m "Release ${TAG}" || true
+            git push origin "${TAG}" || true
+          fi
