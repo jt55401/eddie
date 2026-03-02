@@ -17,7 +17,7 @@ Phase 1 is complete and merged to `main`. The widget has a search modal with ins
 **Key files:**
 - `src/wasm.rs` — WASM exports: `init_engine()`, `search_query()`
 - `widget/src/worker.js` — Web Worker: loads WASM, downloads embedding model, handles search
-- `widget/src/static-agent-widget.js` — Shadow DOM widget: trigger button, modal, search results
+- `widget/src/eddie-widget.js` — Shadow DOM widget: trigger button, modal, search results
 - `widget/build.sh` — Builds WASM, copies files to `dist/`
 
 **Design doc:** `docs/plans/2026-03-01-phase2-qa-design.md`
@@ -132,7 +132,7 @@ git commit -m "feat(wasm): add get_context_chunks export for RAG context"
 ## Task 1: Widget — WebGPU detection, configuration, and Ask button
 
 **Files:**
-- Modify: `widget/src/static-agent-widget.js`
+- Modify: `widget/src/eddie-widget.js`
 
 **Step 1: Add configuration for Q&A**
 
@@ -140,7 +140,7 @@ In the `config` object (line 15-19), add Q&A settings:
 
 ```javascript
 const config = {
-    indexUrl: scriptEl.getAttribute("data-index-url") || "/static-agent-index.bin",
+    indexUrl: scriptEl.getAttribute("data-index-url") || "/eddie-index.bin",
     position: scriptEl.getAttribute("data-position") || "bottom-right",
     theme: scriptEl.getAttribute("data-theme") || "auto",
     qaEnabled: scriptEl.getAttribute("data-qa-enabled") !== "false",
@@ -317,7 +317,7 @@ Open the widget test page in a WebGPU-capable browser. Confirm:
 **Step 10: Commit**
 
 ```bash
-git add widget/src/static-agent-widget.js
+git add widget/src/eddie-widget.js
 git commit -m "feat(widget): add Ask button with WebGPU detection and Shift+Enter shortcut"
 ```
 
@@ -326,7 +326,7 @@ git commit -m "feat(widget): add Ask button with WebGPU detection and Shift+Ente
 ## Task 2: Widget — Answer card DOM and styles
 
 **Files:**
-- Modify: `widget/src/static-agent-widget.js`
+- Modify: `widget/src/eddie-widget.js`
 
 **Step 1: Add answer card DOM elements**
 
@@ -562,7 +562,7 @@ Open widget in browser, confirm:
 **Step 6: Commit**
 
 ```bash
-git add widget/src/static-agent-widget.js
+git add widget/src/eddie-widget.js
 git commit -m "feat(widget): add answer card DOM and styles for Q&A display"
 ```
 
@@ -778,7 +778,7 @@ git commit -m "feat(worker): add WebLLM integration with streaming answer genera
 ## Task 4: Widget — Ask flow orchestration
 
 **Files:**
-- Modify: `widget/src/static-agent-widget.js`
+- Modify: `widget/src/eddie-widget.js`
 
 **Step 1: Replace the stub `doAsk` function**
 
@@ -870,7 +870,7 @@ function handleAnswerError(msg) {
 **Step 4: Verify syntax**
 
 ```bash
-node --check widget/src/static-agent-widget.js
+node --check widget/src/eddie-widget.js
 ```
 
 Expected: no syntax errors
@@ -878,7 +878,7 @@ Expected: no syntax errors
 **Step 5: Commit**
 
 ```bash
-git add widget/src/static-agent-widget.js
+git add widget/src/eddie-widget.js
 git commit -m "feat(widget): wire up Ask button to worker LLM generation with streaming"
 ```
 
@@ -904,7 +904,7 @@ Expected: builds successfully, all 4 files in `dist/`
 **Step 2: Copy dist files to test directory**
 
 ```bash
-cp dist/* /tmp/static-agent-test/
+cp dist/* /tmp/eddie-test/
 ```
 
 **Step 3: Commit (if any build.sh changes were needed)**
@@ -923,19 +923,19 @@ git commit -m "chore: update build pipeline for Q&A support"
 ```bash
 cargo run -- index \
   --content-dir /home/jason/Documents/Personal/jasongrey-com-hugo/jasongrey/content \
-  --output /tmp/static-agent-test/static-agent-index.bin
+  --output /tmp/eddie-test/eddie-index.bin
 ```
 
 **Step 2: Copy dist files to test directory**
 
 ```bash
-cp dist/* /tmp/static-agent-test/
+cp dist/* /tmp/eddie-test/
 ```
 
 **Step 3: Serve locally**
 
 ```bash
-python3 -m http.server 8765 --directory /tmp/static-agent-test --bind 0.0.0.0
+python3 -m http.server 8765 --directory /tmp/eddie-test --bind 0.0.0.0
 ```
 
 **Step 4: Test in a WebGPU-capable browser**
@@ -967,8 +967,8 @@ Open in a browser without WebGPU (or use Chrome with `--disable-gpu`):
 
 Modify the test HTML:
 ```html
-<script src="/static-agent-widget.js"
-        data-index-url="/static-agent-index.bin"
+<script src="/eddie-widget.js"
+        data-index-url="/eddie-index.bin"
         data-qa-enabled="false"
         defer></script>
 ```

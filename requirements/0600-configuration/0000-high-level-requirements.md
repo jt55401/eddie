@@ -2,7 +2,7 @@
 
 [Requirements Home](../0000-README.md)
 
-All behavior is configurable via a `static-agent.toml` file, CLI flags, or JS widget options. Sensible defaults mean zero config works out of the box.
+All behavior is configurable via a `eddie.toml` file, CLI flags, or JS widget options. Sensible defaults mean zero config works out of the box.
 
 ## Story Index
 

@@ -1,0 +1,12 @@
+{{- $cfg := .Site.Params.eddie | default dict -}}
+{{- $enabled := $cfg.enabled | default true -}}
+{{- if $enabled -}}
+{{- $indexUrl := $cfg.indexUrl | default "/eddie/index.bin" -}}
+{{- $position := $cfg.position | default "bottom-right" -}}
+{{- $theme := $cfg.theme | default "auto" -}}
+<script src="{{ "eddie/eddie-widget.js" | relURL }}"
+        data-index-url="{{ $indexUrl }}"
+        data-position="{{ $position }}"
+        data-theme="{{ $theme }}"
+        defer></script>
+{{- end -}}

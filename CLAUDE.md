@@ -1,4 +1,4 @@
-# static-agent
+# Eddie
 
 Semantic search and simple Q&A for static sites. Rust codebase compiling to native CLI + browser WASM.
 
@@ -14,7 +14,7 @@ python3 .claude/scripts/check_requirements_conflicts.py --root requirements  # V
 ## Architecture
 
 - `src/lib.rs` — shared core (chunk, embed, index, search)
-- `src/main.rs` — CLI indexer (`static-agent-cli`)
+- `src/main.rs` — CLI indexer (`eddie`)
 - `src/chunk.rs` — content chunking
 - `src/embed.rs` — sentence-transformer inference via Candle
 - `src/index.rs` — binary index format (serialize/deserialize)

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for improving this project.
+Thanks for improving Eddie.
 
 ## Contribution Flow
 

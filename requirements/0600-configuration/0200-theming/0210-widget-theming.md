@@ -11,7 +11,7 @@ As a site owner, I can customize the widget's appearance to match my site's desi
 - config: CSS custom properties (variables) for colors, fonts, border-radius
 - options: `theme: "light" | "dark" | "auto"` (auto follows `prefers-color-scheme`)
 - options: `position: "bottom-right" | "bottom-left"`
-- override: site owners can target `.static-agent-*` CSS classes
+- override: site owners can target `.eddie-*` CSS classes
 
 ## Acceptance Criteria
 

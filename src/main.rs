@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! static-agent-cli: build-time indexer for static site content.
+//! Eddie CLI: build-time indexer for static site content.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -9,17 +9,17 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use static_agent::bm25::{hybrid_rrf, Bm25Index};
-use static_agent::chunk::chunk_document;
-use static_agent::embed::Embedder;
-use static_agent::index::SearchIndex;
-use static_agent::parse::{parse_content_dir, HugoParser};
-use static_agent::search::search;
+use eddie::bm25::{hybrid_rrf, Bm25Index};
+use eddie::chunk::chunk_document;
+use eddie::embed::Embedder;
+use eddie::index::SearchIndex;
+use eddie::parse::{parse_content_dir, HugoParser};
+use eddie::search::search;
 
 const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
 
 #[derive(Parser)]
-#[command(name = "static-agent-cli", about = "Semantic search indexer for static sites")]
+#[command(name = "eddie", about = "Semantic search indexer for static sites")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

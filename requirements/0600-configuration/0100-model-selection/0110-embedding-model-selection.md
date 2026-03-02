@@ -8,7 +8,7 @@ As a site owner, I can choose which sentence-transformer model to use for embedd
 
 ## Key Fields/Parameters
 
-- config key: `embedding.model` in `static-agent.toml`
+- config key: `embedding.model` in `eddie.toml`
 - CLI flag: `--model <huggingface-model-id>`
 - default: `sentence-transformers/all-MiniLM-L6-v2`
 - the same model ID is used by both the CLI indexer and the browser WASM module

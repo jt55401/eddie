@@ -1,3 +1,3 @@
-module github.com/jt55401/static-agent-hugo
+module github.com/jt55401/eddie-hugo
 
 go 1.21

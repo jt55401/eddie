@@ -566,6 +566,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
+name = "eddie"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "clap",
+ "getrandom 0.2.17",
+ "hf-hub",
+ "js-sys",
+ "regex",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "tokenizers",
+ "toml",
+ "walkdir",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2348,29 +2371,6 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
-
-[[package]]
-name = "static-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "clap",
- "getrandom 0.2.17",
- "hf-hub",
- "js-sys",
- "regex",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "tokenizers",
- "toml",
- "walkdir",
- "wasm-bindgen",
- "web-sys",
-]
 
 [[package]]
 name = "static_assertions"

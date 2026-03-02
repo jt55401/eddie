@@ -8,9 +8,9 @@ As a site owner using GitHub Pages, I can add a GitHub Action that indexes my co
 
 ## Key Fields/Parameters
 
-- action: `static-agent/index-action@v1` (or inline step using the CLI binary)
+- action: `eddie/index-action@v1` (or inline step using the CLI binary)
 - inputs: `content-dir`, `output-path`, `model` (optional)
-- artifacts: `static-agent-index.bin`, `static-agent-widget.js`, `static-agent.wasm`
+- artifacts: `eddie-index.bin`, `eddie-widget.js`, `eddie.wasm`
 - integration point: runs after site build, before deploy
 
 ## Acceptance Criteria

@@ -8,7 +8,7 @@ As a site owner, I can point the indexer at a Hugo `public/` output directory an
 
 ## Key Fields/Parameters
 
-- `static-agent-cli index --content-dir <path> --format html --output <index.bin>`
+- `eddie index --content-dir <path> --format html --output <index.bin>`
 - reads: `*.html` files recursively
 - extracts: `<title>`, `<meta>` tags, main content area text
 - strips: HTML tags, nav/footer boilerplate, scripts, styles

@@ -4,14 +4,14 @@
 
 ## User Story
 
-As a Hugo site owner, I can add static-agent to my build process and embed the widget in my theme with minimal configuration.
+As a Hugo site owner, I can add eddie to my build process and embed the widget in my theme with minimal configuration.
 
 ## Key Fields/Parameters
 
 - indexer input: Hugo `content/` directory (markdown) or `public/` (rendered HTML)
-- indexer output: `static/static-agent-index.bin` (served as a static asset)
-- widget embed: `<script src="/static-agent-widget.js"></script>` in the theme's `baseof.html`
-- config: `static-agent.toml` in the site root
+- indexer output: `static/eddie-index.bin` (served as a static asset)
+- widget embed: `<script src="/eddie-widget.js"></script>` in the theme's `baseof.html`
+- config: `eddie.toml` in the site root
 
 ## Acceptance Criteria
 

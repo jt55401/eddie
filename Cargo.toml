@@ -1,17 +1,17 @@
 [package]
-name = "static-agent"
+name = "eddie"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Semantic search and simple Q&A for static sites — index at build time, query in the browser via WASM"
-repository = "https://github.com/jt55401/static-agent"
+repository = "https://github.com/jt55401/eddie"
 authors = ["Jason Grey"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "static-agent-cli"
+name = "eddie"
 path = "src/main.rs"
 
 # --- Shared dependencies (all targets) ---

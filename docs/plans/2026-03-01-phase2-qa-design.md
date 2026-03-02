@@ -138,8 +138,8 @@ Question: What is Rust used for?
 Via `<script>` data attributes (same pattern as Phase 1):
 
 ```html
-<script src="/static-agent-widget.js"
-        data-index-url="/static-agent-index.bin"
+<script src="/eddie-widget.js"
+        data-index-url="/eddie-index.bin"
         data-qa-enabled="true"
         data-qa-model="Qwen2.5-0.5B-Instruct-q4f16_1-MLC"
         defer></script>
@@ -163,7 +163,7 @@ Via `<script>` data attributes (same pattern as Phase 1):
 | File | Change | Effort |
 |------|--------|--------|
 | `widget/src/worker.js` | Add WebLLM import, model download, `generate_answer` handler, streaming | Medium |
-| `widget/src/static-agent-widget.js` | Add Ask button, answer card, Shift+Enter, streaming UI, WebGPU detection | Medium |
+| `widget/src/eddie-widget.js` | Add Ask button, answer card, Shift+Enter, streaming UI, WebGPU detection | Medium |
 | `widget/build.sh` | Copy WebLLM JS to dist/ or reference from CDN | Low |
 | No Rust changes | — | Zero |
 

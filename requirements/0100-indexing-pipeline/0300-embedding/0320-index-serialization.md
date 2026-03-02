@@ -9,7 +9,7 @@ As the CLI indexer, I serialize chunks, embeddings, and metadata into a compact 
 ## Key Fields/Parameters
 
 - output format: custom binary (header + metadata JSON + embedding matrix)
-- file: `static-agent-index.bin` (configurable)
+- file: `eddie-index.bin` (configurable)
 - contains: chunk texts, per-chunk metadata, embedding vectors, model ID
 
 ## Acceptance Criteria

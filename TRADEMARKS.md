@@ -1,6 +1,6 @@
 # Trademark And Naming Policy
 
-This project name and related branding identify the original upstream project maintained by Jason Grey.
+The name "Eddie" and related branding identify the original upstream project maintained by Jason Grey.
 
 ## You May
 

@@ -1,4 +1,4 @@
-# static-agent Design
+# eddie Design
 
 **Date:** 2026-02-28
 **Author:** Jason Grey
@@ -16,8 +16,8 @@ A Rust library that compiles to both a native CLI (for build-time indexing) and 
 
 ### Three compilation targets from one Rust codebase
 
-1. **`static-agent-cli`** — native binary, runs at build time in CI
-2. **`static-agent-wasm`** — browser module for embeddings + vector search (CPU/WASM)
+1. **`eddie`** — native binary, runs at build time in CI
+2. **`eddie-wasm`** — browser module for embeddings + vector search (CPU/WASM)
 3. **JS widget** — thin UI layer, handles model download progress, optional LLM integration
 
 ### Build time (CI)
@@ -83,7 +83,7 @@ After first download, models are cached in the browser. Subsequent visits skip t
 
 ## Configuration
 
-`static-agent.toml` in the site root:
+`eddie.toml` in the site root:
 
 ```toml
 [embedding]
@@ -102,18 +102,18 @@ position = "bottom-right"  # or "bottom-left"
 
 ### Hugo
 
-1. Add `static-agent.toml` to site root
-2. Run `static-agent-cli index --content-dir content/ --output static/static-agent-index.bin`
-3. Add `<script src="/static-agent-widget.js"></script>` to `layouts/_default/baseof.html`
+1. Add `eddie.toml` to site root
+2. Run `eddie index --content-dir content/ --output static/eddie-index.bin`
+3. Add `<script src="/eddie-widget.js"></script>` to `layouts/_default/baseof.html`
 
 ### GitHub Actions
 
 ```yaml
 - name: Index content
   run: |
-    curl -L https://github.com/jt55401/static-agent/releases/latest/download/static-agent-cli-linux-amd64 -o static-agent-cli
-    chmod +x static-agent-cli
-    ./static-agent-cli index --content-dir content/ --output public/static-agent-index.bin
+    curl -L https://github.com/jt55401/eddie/releases/latest/download/eddie-linux-amd64 -o eddie
+    chmod +x eddie
+    ./eddie index --content-dir content/ --output public/eddie-index.bin
 ```
 
 ## Licensing

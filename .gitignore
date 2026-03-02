@@ -7,5 +7,5 @@ pkg/
 !src/**/*.wasm
 .DS_Store
 .worktrees/
-hugo-module/static/static-agent/*.js
-hugo-module/static/static-agent/*.wasm
+hugo-module/static/eddie/*.js
+hugo-module/static/eddie/*.wasm

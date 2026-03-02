@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-// static-agent Web Worker
+// Eddie Web Worker
 //
 // Loads WASM module, downloads and caches the ML model in IndexedDB,
 // and handles search queries from the main thread.
@@ -10,7 +10,7 @@
 // -- Configuration --
 const HF_CDN = "https://huggingface.co";
 const MODEL_FILES = ["config.json", "tokenizer.json", "model.safetensors"];
-const IDB_NAME = "static-agent-models";
+const IDB_NAME = "eddie-models";
 const IDB_STORE = "files";
 
 // -- State --
@@ -57,9 +57,9 @@ async function initialize(indexUrl, workerBaseUrl) {
 
   // 1. Load WASM glue + instantiate
   postStatus("loading_wasm");
-  const wasmGlueUrl = resolveUrl("static-agent-wasm.js");
+  const wasmGlueUrl = resolveUrl("eddie-wasm.js");
   importScripts(wasmGlueUrl);
-  const wasmBinaryUrl = resolveUrl("static-agent.wasm");
+  const wasmBinaryUrl = resolveUrl("eddie.wasm");
   await wasm_bindgen(wasmBinaryUrl);
 
   // 2. Fetch index

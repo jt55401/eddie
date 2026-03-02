@@ -6,20 +6,20 @@
 
 **Your site's shipboard computer.**
 
-Semantic search and Q&A for static sites — fully client-side, no server required. Runs entirely in your visitor's browser via WebAssembly, which is a bit like using a starship computer to find your keys, but honestly, it works brilliantly.
+Hybrid semantic + keyword search for static sites, with optional experimental Q&A — fully client-side, no server required. Runs entirely in your visitor's browser via WebAssembly.
 
 > *"I'm just so happy to be doing this for you."*
 > — Eddie, the Heart of Gold's shipboard computer
 
 ## Don't Panic
 
-Eddie does three things, and does them with a Genuine People Personality:
+Eddie does three things:
 
 1. **Build time:** A CLI reads your markdown/HTML content, chunks it, and generates embeddings using a sentence-transformer model. The result is a compact binary index shipped as a static asset. Simple, elegant, like a fjord.
 
 2. **Runtime:** A WASM module in the browser downloads the same embedding model (from HuggingFace CDN, cached after first use), embeds the visitor's query, and performs hybrid semantic + keyword search against the pre-built index.
 
-3. **Optional Q&A:** On browsers with WebGPU support, a small language model synthesizes a short answer from retrieved content — like having a Babel Fish for your documentation, except it translates *meaning* instead of languages. Falls back gracefully to search-only on browsers without WebGPU.
+3. **Optional Q&A (experimental):** On browsers with WebGPU support, a small language model can synthesize a short answer from retrieved content. This is still experimental and falls back gracefully to search-only on browsers without WebGPU.
 
 ## Quick Start
 
@@ -41,11 +41,11 @@ Visitors see a floating search button. First search triggers a one-time model do
 
 ## How It Compares
 
-Every tool with Q&A requires a server. Every client-side tool is keyword-only. Eddie does both.
+Eddie is built around fast hybrid retrieval (semantic + BM25) with snippets and ranking. Q&A is included as an optional experimental layer on top.
 
 | Tool | Deployment | Search | Q&A | Server | Cost |
 |------|-----------|--------|-----|--------|------|
-| **Eddie** | Client (WASM) | Hybrid semantic + BM25 | Yes (WebGPU) | No | Free |
+| **Eddie** | Client (WASM) | Hybrid semantic + BM25 | Experimental (WebGPU) | No | Free |
 | Pagefind | Client (WASM) | Keyword | No | No | Free |
 | Algolia DocSearch | Cloud | Keyword + neural | No | Yes | Free for OSS |
 | kapa.ai | Cloud | Semantic (RAG) | Yes | Yes | Enterprise |
@@ -100,6 +100,52 @@ Query → download model (first use) → embed query → cosine similarity + BM2
 
 ML inference uses [Candle](https://github.com/huggingface/candle) (HuggingFace's Rust ML framework), which compiles to WASM without complaint. This is neural network inference running in a browser to search a blog — far more intelligent than the task demands, which Eddie would tell you is *exactly how he likes it*.
 
+## Q&A Status (Experimental)
+
+The core product value today is hybrid retrieval and result summaries/snippets. Q&A is a best-effort experimental mode and quality is highly dependent on your corpus and client hardware.
+
+What this means in practice:
+
+1. Smaller browser models can produce useful summaries, but factual precision can drift.
+2. Broader or inconsistent corpora increase hallucination and contradiction risk.
+3. On weaker devices, latency can be too high for a good UX.
+
+Suggested model range to try (if supported by your chosen runtime/toolchain):
+
+- `HuggingFaceTB/SmolLM2-1.7B-Instruct` (current default)
+- `Qwen/Qwen2.5-1.5B-Instruct`
+- `microsoft/Phi-3.5-mini-instruct`
+
+Corpus strategies that generally improve answer quality:
+
+- Keep content focused by domain/use-case rather than mixing unrelated material.
+- Prefer explicit, factual writing with clear headings and stable terminology.
+- Add canonical FAQ and glossary pages for key entities, policies, and definitions.
+- Keep time-sensitive pages date-stamped and archive/redirect stale copies.
+- Avoid indexing low-signal pages (thin marketing copy, duplicate boilerplate).
+
+Likely future direction:
+
+1. Use larger LLMs at index/build time (offline) to generate structured QA artifacts.
+2. Produce question-answer pairs grounded in source chunks.
+3. Build entity/fact cards with citations and claim-to-source maps.
+4. Keep browser runtime lightweight for retrieval and synthesis over precomputed evidence.
+
+This should improve factual reliability without requiring large on-device models for every query, while browser hardware catches up for stronger local Q&A.
+
+## Papers and References
+
+Foundational reading and implementation references behind the current approach:
+
+- [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://arxiv.org/abs/1810.04805)
+- [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](https://arxiv.org/abs/1908.10084)
+- [MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers](https://arxiv.org/abs/2002.10957)
+- [Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+- [The Probabilistic Relevance Framework: BM25 and Beyond](https://www.nowpublishers.com/article/Details/INR-019)
+- [WebAssembly](https://webassembly.org/)
+- [WebGPU](https://www.w3.org/TR/webgpu/)
+- [Hugging Face Candle](https://github.com/huggingface/candle)
+
 ## GitHub Actions
 
 ```yaml
@@ -140,6 +186,6 @@ For commercial integration or support, [Improbability Engineers](https://improba
 
 ---
 
-*Eddie is the Heart of Gold's shipboard computer from The Hitchhiker's Guide to the Galaxy. He has a Genuine People Personality and is enthusiastic about absolutely everything, especially helping you find things. The Heart of Gold is powered by the Infinite Improbability Drive. [Improbability Engineers](https://improbabilityengineers.com) builds the ship's computer.*
+*Eddie is the [Heart of Gold](https://en.wikipedia.org/wiki/Heart_of_Gold_(The_Hitchhiker%27s_Guide_to_the_Galaxy)) shipboard computer from The Hitchhiker's Guide to the Galaxy. The Heart of Gold is powered by the Infinite Improbability Drive. [Improbability Engineers](https://improbabilityengineers.com) builds the ship's computer.*
 
 *So long, and thanks for all the search results.*

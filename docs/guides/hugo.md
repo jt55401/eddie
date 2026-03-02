@@ -1,6 +1,6 @@
 # Hugo Integration Guide
 
-This guide covers installing `static-agent-cli`, indexing your Hugo site content, and searching from the command line.
+This guide covers installing `eddie`, indexing your Hugo site content, and searching from the command line.
 
 > The browser widget (WASM + search UI) is not yet implemented. This guide covers the CLI indexer only.
 
@@ -14,17 +14,17 @@ This guide covers installing `static-agent-cli`, indexing your Hugo site content
 ### From source
 
 ```bash
-git clone https://github.com/jt55401/static-agent.git
-cd static-agent
+git clone https://github.com/jt55401/eddie.git
+cd eddie
 cargo build --release
 ```
 
-The binary is at `target/release/static-agent-cli`.
+The binary is at `target/release/eddie`.
 
 Optionally copy it somewhere on your `$PATH`:
 
 ```bash
-cp target/release/static-agent-cli ~/.local/bin/
+cp target/release/eddie ~/.local/bin/
 ```
 
 ## Indexing your site
@@ -32,9 +32,9 @@ cp target/release/static-agent-cli ~/.local/bin/
 Run the indexer against your Hugo `content/` directory:
 
 ```bash
-static-agent-cli index \
+eddie index \
   --content-dir /path/to/your-hugo-site/content/ \
-  --output static-agent-index.bin
+  --output eddie-index.bin
 ```
 
 This will:
@@ -64,17 +64,17 @@ This will:
 To index as part of your Hugo build:
 
 ```bash
-hugo && static-agent-cli index \
+hugo && eddie index \
   --content-dir content/ \
-  --output public/static-agent-index.bin
+  --output public/eddie-index.bin
 ```
 
 Or place the index in Hugo's `static/` directory so it's included automatically:
 
 ```bash
-static-agent-cli index \
+eddie index \
   --content-dir content/ \
-  --output static/static-agent-index.bin
+  --output static/eddie-index.bin
 
 hugo  # copies static/ contents to public/
 ```
@@ -91,14 +91,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-action/setup@v1
 
-      - name: Build static-agent-cli
+      - name: Build eddie
         run: |
-          git clone https://github.com/jt55401/static-agent.git /tmp/static-agent
-          cd /tmp/static-agent && cargo build --release
-          cp target/release/static-agent-cli /usr/local/bin/
+          git clone https://github.com/jt55401/eddie.git /tmp/eddie
+          cd /tmp/eddie && cargo build --release
+          cp target/release/eddie /usr/local/bin/
 
       - name: Index content
-        run: static-agent-cli index --content-dir content/ --output static/static-agent-index.bin
+        run: eddie index --content-dir content/ --output static/eddie-index.bin
 
       - name: Build Hugo site
         run: hugo
@@ -114,8 +114,8 @@ jobs:
 Combines semantic similarity with BM25 keyword matching using reciprocal rank fusion:
 
 ```bash
-static-agent-cli search \
-  --index static-agent-index.bin \
+eddie search \
+  --index eddie-index.bin \
   --query "What programming languages does Jason know?" \
   --top-k 5
 ```
@@ -125,8 +125,8 @@ static-agent-cli search \
 Uses embedding cosine similarity — good for meaning-based queries:
 
 ```bash
-static-agent-cli search \
-  --index static-agent-index.bin \
+eddie search \
+  --index eddie-index.bin \
   --query "enterprise web development" \
   --mode semantic
 ```
@@ -136,8 +136,8 @@ static-agent-cli search \
 Uses BM25 scoring — good for exact term matching:
 
 ```bash
-static-agent-cli search \
-  --index static-agent-index.bin \
+eddie search \
+  --index eddie-index.bin \
   --query "Azure certifications" \
   --mode keyword
 ```
@@ -183,10 +183,10 @@ The default model works well for general English content. For different needs:
 To use a different model, pass `--model` to both `index` and `search`:
 
 ```bash
-static-agent-cli index --content-dir content/ --output index.bin \
+eddie index --content-dir content/ --output index.bin \
   --model BAAI/bge-small-en-v1.5
 
-static-agent-cli search --index index.bin --query "test" \
+eddie search --index index.bin --query "test" \
   --model BAAI/bge-small-en-v1.5
 ```
 

@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 HUGO_MODULE_DIR="$PROJECT_ROOT/hugo-module"
-STATIC_DIR="$HUGO_MODULE_DIR/static/static-agent"
+STATIC_DIR="$HUGO_MODULE_DIR/static/eddie"
 
 TAG=""
 TARGET_REPO=""
@@ -29,13 +29,13 @@ done
 echo "==> Building WASM widget..."
 bash "$PROJECT_ROOT/widget/build.sh"
 
-# 2. Copy dist/ into hugo-module/static/static-agent/
+# 2. Copy dist/ into hugo-module/static/eddie/
 echo "==> Assembling Hugo module..."
 mkdir -p "$STATIC_DIR"
-cp "$PROJECT_ROOT/dist/static-agent.wasm"       "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/static-agent-wasm.js"    "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/static-agent-worker.js"  "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/static-agent-widget.js"  "$STATIC_DIR/"
+cp "$PROJECT_ROOT/dist/eddie.wasm"       "$STATIC_DIR/"
+cp "$PROJECT_ROOT/dist/eddie-wasm.js"    "$STATIC_DIR/"
+cp "$PROJECT_ROOT/dist/eddie-worker.js"  "$STATIC_DIR/"
+cp "$PROJECT_ROOT/dist/eddie-widget.js"  "$STATIC_DIR/"
 
 echo "==> Hugo module assembled at: $HUGO_MODULE_DIR"
 ls -lh "$STATIC_DIR/"
@@ -53,12 +53,12 @@ if [[ -n "$TARGET_REPO" ]]; then
   cp "$HUGO_MODULE_DIR/go.mod"    "$TARGET_REPO/go.mod"
   cp "$HUGO_MODULE_DIR/hugo.toml" "$TARGET_REPO/hugo.toml"
 
-  mkdir -p "$TARGET_REPO/layouts/partials/static-agent"
-  cp "$HUGO_MODULE_DIR/layouts/partials/static-agent/inject.html" \
-     "$TARGET_REPO/layouts/partials/static-agent/inject.html"
+  mkdir -p "$TARGET_REPO/layouts/partials/eddie"
+  cp "$HUGO_MODULE_DIR/layouts/partials/eddie/inject.html" \
+     "$TARGET_REPO/layouts/partials/eddie/inject.html"
 
-  mkdir -p "$TARGET_REPO/static/static-agent"
-  cp "$STATIC_DIR"/* "$TARGET_REPO/static/static-agent/"
+  mkdir -p "$TARGET_REPO/static/eddie"
+  cp "$STATIC_DIR"/* "$TARGET_REPO/static/eddie/"
 
   echo "==> Files synced to $TARGET_REPO"
 
@@ -71,7 +71,7 @@ if [[ -n "$TARGET_REPO" ]]; then
     else
       git commit -m "Release $TAG
 
-Built from static-agent $(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
+Built from eddie $(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
       echo "==> Committed release $TAG"
     fi
 

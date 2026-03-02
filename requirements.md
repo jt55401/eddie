@@ -22,4 +22,4 @@ Detailed per-area requirements live in [requirements/0000-README.md](requirement
 | QA-REQ-001 | Optional LLM synthesis from retrieved chunks via WebGPU | `tests/integration/test_qa.js` | — | Proposed |
 | WIDGET-REQ-001 | Floating button + modal with search and Q&A modes | `tests/integration/test_widget.js` | — | Proposed |
 | INTEG-REQ-001 | GitHub Action indexes Hugo content at build time | `.github/workflows/index.yml` | — | Proposed |
-| CONFIG-REQ-001 | Embedding model, LLM, and UI are configurable | `static-agent.toml` | — | Proposed |
+| CONFIG-REQ-001 | Embedding model, LLM, and UI are configurable | `eddie.toml` | — | Proposed |

@@ -1,10 +1,10 @@
-# Default configuration for the static-agent Hugo module.
+# Default configuration for the Eddie Hugo module.
 # Site owners can override any of these in their own hugo.toml
-# under [params.staticAgent].
+# under [params.eddie].
 
-[params.staticAgent]
+[params.eddie]
   enabled = true
-  indexUrl = "/static-agent/index.bin"
+  indexUrl = "/eddie/index.bin"
   position = "bottom-right"
   theme = "auto"
 

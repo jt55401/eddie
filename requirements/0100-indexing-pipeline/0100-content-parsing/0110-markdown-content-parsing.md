@@ -8,7 +8,7 @@ As a site owner, I can point the indexer at a directory of markdown files and it
 
 ## Key Fields/Parameters
 
-- `static-agent-cli index --content-dir <path> --output <index.bin>`
+- `eddie index --content-dir <path> --output <index.bin>`
 - reads: `*.md` files recursively
 - extracts: YAML/TOML frontmatter (`title`, `slug`, `url`, `date`, `description`)
 - strips: markdown syntax, producing plain text segments
