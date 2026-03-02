@@ -41,7 +41,7 @@ jobs:
 
           TAG="${GITHUB_REF#refs/tags/}"
           git clone "git@github.com:jt55401/eddie-hugo.git" /tmp/eddie-hugo
-          rsync -av --delete hugo-module/ /tmp/eddie-hugo/
+          rsync -av --delete --exclude='.git/' hugo-module/ /tmp/eddie-hugo/
 
           cd /tmp/eddie-hugo
           git config user.name "github-actions[bot]"
