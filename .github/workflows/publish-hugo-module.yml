@@ -6,6 +6,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -27,16 +30,17 @@ jobs:
       - name: Assemble hugo-module/
         run: bash scripts/publish-hugo-module.sh
 
-      - name: Skip publish (missing token)
-        if: ${{ secrets.EDDIE_HUGO_PAT == '' }}
-        run: echo "EDDIE_HUGO_PAT is not configured; skipping publish to jt55401/eddie-hugo."
-
       - name: Sync and publish to jt55401/eddie-hugo
-        if: ${{ secrets.EDDIE_HUGO_PAT != '' }}
         env:
           EDDIE_HUGO_PAT: ${{ secrets.EDDIE_HUGO_PAT }}
         run: |
           set -euo pipefail
+
+          if [[ -z "${EDDIE_HUGO_PAT:-}" ]]; then
+            echo "EDDIE_HUGO_PAT is not configured; skipping publish to jt55401/eddie-hugo."
+            exit 0
+          fi
+
           TAG="${GITHUB_REF#refs/tags/}"
           git clone "https://x-access-token:${EDDIE_HUGO_PAT}@github.com/jt55401/eddie-hugo.git" /tmp/eddie-hugo
           rsync -av --delete hugo-module/ /tmp/eddie-hugo/
