@@ -67,7 +67,12 @@ model = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
 [widget]
 theme = "auto"
 position = "bottom-right"
+offsetX = 0
+offsetY = 0
 ```
+
+`position` accepts `"top-left"`, `"top-right"`, `"bottom-left"`, or `"bottom-right"`.
+Use `offsetX`/`offsetY` (pixels, can be negative) to nudge the launcher away from theme toggles or other fixed UI.
 
 ### Embedding Model Alternatives
 

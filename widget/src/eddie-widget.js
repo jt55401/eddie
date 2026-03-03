@@ -12,10 +12,44 @@
   const scriptEl = document.currentScript;
   if (!scriptEl) return;
 
+  function parseOffsetPx(attrName) {
+    const raw = scriptEl.getAttribute(attrName);
+    if (raw == null || raw === "") return 0;
+    const value = Number(raw);
+    return Number.isFinite(value) ? Math.trunc(value) : 0;
+  }
+
+  function normalizePosition(raw) {
+    const value = (raw || "").toLowerCase();
+    const allowed = new Set([
+      "top-left",
+      "top-right",
+      "bottom-left",
+      "bottom-right",
+    ]);
+    return allowed.has(value) ? value : "bottom-right";
+  }
+
   const config = {
     indexUrl: scriptEl.getAttribute("data-index-url") || "/eddie-index.bin",
-    position: scriptEl.getAttribute("data-position") || "bottom-right",
+    position: normalizePosition(scriptEl.getAttribute("data-position")),
     theme: scriptEl.getAttribute("data-theme") || "auto",
+    offsetY: parseOffsetPx("data-offset-y"),
+    offsetX: parseOffsetPx("data-offset-x"),
+  };
+
+  const HEART_SPRITES = [
+    [".11111.", "1222221", "1222221", ".12221."], // solid
+    [".11111.", "12.2.21", "1222221", ".12.21."], // circuit
+    [".13331.", "1344431", "1244421", ".12221."], // beveled
+    [".13131.", "1344431", "12.4.21", ".12221."], // gear-ish
+  ];
+
+  const HEART_PALETTE = {
+    "1": "#f2c94c",
+    "2": "#e0b63f",
+    "3": "#f8dda1",
+    "4": "#b78e28",
   };
 
   // Resolve asset URLs relative to this script's location
@@ -33,6 +67,7 @@
   let selectedIndex = -1;
   let currentResults = [];
   let engineState = "idle"; // idle | loading | ready | error
+  let lastHeartIndex = -1;
 
   // -- DOM setup --
   const host = document.createElement("div");
@@ -116,8 +151,10 @@
       stroke-linejoin: round;
     }
 
-    .sa-pos-bottom-right { bottom: 24px; right: 24px; }
-    .sa-pos-bottom-left  { bottom: 24px; left: 24px; }
+    .sa-pos-bottom-right { right: 24px; bottom: 24px; }
+    .sa-pos-bottom-left  { left: 24px; bottom: 24px; }
+    .sa-pos-top-right    { right: 24px; top: 24px; }
+    .sa-pos-top-left     { left: 24px; top: 24px; }
 
     .sa-backdrop {
       position: fixed;
@@ -201,6 +238,16 @@
     }
     .sa-close:hover {
       border-color: var(--sa-text-muted);
+    }
+
+    .sa-heart {
+      flex-shrink: 0;
+      width: 14px;
+      height: 8px;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      opacity: 0.95;
+      display: block;
     }
 
     .sa-status {
@@ -321,6 +368,32 @@
       margin: 0 2px;
     }
 
+    .sa-brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+
+    .sa-brand-link {
+      color: var(--sa-text-muted);
+      text-decoration: none;
+      border: 1px solid var(--sa-border);
+      border-radius: 999px;
+      padding: 2px 8px;
+      transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
+    }
+    .sa-brand-link:hover {
+      border-color: var(--sa-text-muted);
+      color: var(--sa-text);
+      background: var(--sa-bg-elevated);
+    }
+    .sa-brand-link:focus-visible {
+      outline: 1px solid var(--sa-accent);
+      outline-offset: 2px;
+    }
+
     /* Mobile: bottom sheet */
     @media (max-width: 640px) {
       .sa-backdrop {
@@ -367,6 +440,7 @@
   trigger.setAttribute("aria-label", "Search");
   trigger.appendChild(createSearchSvg());
   trigger.addEventListener("click", openModal);
+  applyTriggerOffsets();
   shadow.appendChild(trigger);
 
   // -- Backdrop --
@@ -404,6 +478,13 @@
   closeBtn.setAttribute("aria-label", "Close");
   closeBtn.textContent = "esc";
   closeBtn.addEventListener("click", closeModal);
+
+  const heart = document.createElement("canvas");
+  heart.className = "sa-heart";
+  heart.width = 7;
+  heart.height = 4;
+  heart.setAttribute("aria-hidden", "true");
+  drawHeartSprite(0);
   header.appendChild(closeBtn);
 
   // Status bar
@@ -450,9 +531,19 @@
   });
   footer.appendChild(footerNav);
 
+  const footerBrandLink = document.createElement("a");
+  footerBrandLink.className = "sa-brand-link";
+  footerBrandLink.href = "https://github.com/jt55401/eddie";
+  footerBrandLink.target = "_blank";
+  footerBrandLink.rel = "noopener noreferrer";
+  footerBrandLink.setAttribute("aria-label", "Eddie on GitHub (opens in a new tab)");
+
   const footerBrand = document.createElement("span");
-  footerBrand.textContent = "Eddie";
-  footer.appendChild(footerBrand);
+  footerBrand.className = "sa-brand";
+  footerBrand.appendChild(document.createTextNode("EDDIE"));
+  footerBrand.appendChild(heart);
+  footerBrandLink.appendChild(footerBrand);
+  footer.appendChild(footerBrandLink);
 
   modal.appendChild(footer);
 
@@ -688,9 +779,40 @@
     resultsList.textContent = "";
   }
 
+  function applyTriggerOffsets() {
+    const baseInset = 24;
+    const vertical = `${baseInset + config.offsetY}px`;
+    const horizontal = `${baseInset + config.offsetX}px`;
+
+    trigger.style.top = "";
+    trigger.style.bottom = "";
+    trigger.style.left = "";
+    trigger.style.right = "";
+
+    switch (config.position) {
+      case "top-left":
+        trigger.style.top = vertical;
+        trigger.style.left = horizontal;
+        break;
+      case "top-right":
+        trigger.style.top = vertical;
+        trigger.style.right = horizontal;
+        break;
+      case "bottom-left":
+        trigger.style.bottom = vertical;
+        trigger.style.left = horizontal;
+        break;
+      default:
+        trigger.style.bottom = vertical;
+        trigger.style.right = horizontal;
+        break;
+    }
+  }
+
   // -- Modal open/close --
   function openModal() {
     isOpen = true;
+    rotateHeartSprite();
     backdrop.classList.add("sa-open");
     trigger.style.display = "none";
     input.value = "";
@@ -705,6 +827,35 @@
     backdrop.classList.remove("sa-open");
     trigger.style.display = "";
     trigger.focus();
+  }
+
+  function rotateHeartSprite() {
+    if (HEART_SPRITES.length === 0) return;
+    let idx = Math.floor(Math.random() * HEART_SPRITES.length);
+    if (HEART_SPRITES.length > 1 && idx === lastHeartIndex) {
+      idx = (idx + 1) % HEART_SPRITES.length;
+    }
+    lastHeartIndex = idx;
+    drawHeartSprite(idx);
+  }
+
+  function drawHeartSprite(idx) {
+    const sprite = HEART_SPRITES[idx];
+    const ctx = heart.getContext("2d");
+    if (!sprite || !ctx) return;
+    ctx.clearRect(0, 0, heart.width, heart.height);
+
+    for (let y = 0; y < sprite.length; y++) {
+      const row = sprite[y];
+      for (let x = 0; x < row.length; x++) {
+        const key = row[x];
+        if (key === ".") continue;
+        const color = HEART_PALETTE[key];
+        if (!color) continue;
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
   }
 
   // -- Helpers --

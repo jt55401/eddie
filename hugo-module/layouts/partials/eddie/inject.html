@@ -4,9 +4,13 @@
 {{- $indexUrl := $cfg.indexUrl | default "/eddie/index.bin" -}}
 {{- $position := $cfg.position | default "bottom-right" -}}
 {{- $theme := $cfg.theme | default "auto" -}}
+{{- $offsetY := $cfg.offsetY | default 0 -}}
+{{- $offsetX := $cfg.offsetX | default 0 -}}
 <script src="{{ "eddie/eddie-widget.js" | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
         data-theme="{{ $theme }}"
+        data-offset-y="{{ $offsetY }}"
+        data-offset-x="{{ $offsetX }}"
         defer></script>
 {{- end -}}
