@@ -27,11 +27,19 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 
+      - name: Install binaryen + brotli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen brotli
+
       - name: Build CLI binary
         run: cargo build --release --locked --bin eddie
 
       - name: Build widget and assemble Hugo module
         run: bash scripts/publish-hugo-module.sh
+
+      - name: Report artifact sizes
+        run: bash scripts/report-asset-sizes.sh
 
       - name: Collect release files
         run: |
@@ -41,6 +49,8 @@ jobs:
           cp dist/eddie-wasm.js release-assets/
           cp dist/eddie-worker.js release-assets/
           cp dist/eddie-widget.js release-assets/
+          cp dist/ASSET_SIZES.md release-assets/
+          cp dist/asset-sizes.csv release-assets/
           tar -czf release-assets/eddie-hugo-module.tar.gz -C hugo-module .
           (cd release-assets && sha256sum * > SHA256SUMS)
 
@@ -60,5 +70,7 @@ jobs:
             release-assets/eddie-wasm.js
             release-assets/eddie-worker.js
             release-assets/eddie-widget.js
+            release-assets/ASSET_SIZES.md
+            release-assets/asset-sizes.csv
             release-assets/eddie-hugo-module.tar.gz
             release-assets/SHA256SUMS

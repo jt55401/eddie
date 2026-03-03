@@ -8,15 +8,29 @@ This repository ships three workflows:
 
 ## Release artifacts
 
-When you push a tag like `v0.1.0`, `release.yml` produces and uploads:
+When you push a tag like `v0.2.1`, `release.yml` produces and uploads:
 
 - `eddie-linux-amd64`
 - `eddie.wasm`
 - `eddie-wasm.js`
 - `eddie-worker.js`
 - `eddie-widget.js`
+- `ASSET_SIZES.md`
+- `asset-sizes.csv`
 - `eddie-hugo-module.tar.gz`
 - `SHA256SUMS`
+
+The build installs `binaryen` and runs `wasm-opt -Oz` on the generated WASM
+artifact before packaging release assets.
+
+## Size budgets
+
+`ci.yml` runs `scripts/report-asset-sizes.sh`, which reports raw/gzip/brotli
+sizes and enforces budgets for `eddie.wasm`:
+
+- `WASM_RAW_BUDGET_BYTES` (default `3400000`)
+- `WASM_GZIP_BUDGET_BYTES` (default `1100000`)
+- `WASM_BROTLI_BUDGET_BYTES` (default `800000`)
 
 ## Hugo module publishing
 

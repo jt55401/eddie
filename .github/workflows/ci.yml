@@ -38,8 +38,20 @@ jobs:
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 
+      - name: Install binaryen + brotli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binaryen brotli
+
       - name: Build widget dist
         run: bash widget/build.sh
+
+      - name: Report artifact sizes and enforce budgets
+        env:
+          WASM_RAW_BUDGET_BYTES: "3400000"
+          WASM_GZIP_BUDGET_BYTES: "1100000"
+          WASM_BROTLI_BUDGET_BYTES: "800000"
+        run: bash scripts/report-asset-sizes.sh
 
       - name: Verify widget artifacts
         run: |
@@ -47,3 +59,11 @@ jobs:
           test -f dist/eddie-wasm.js
           test -f dist/eddie-worker.js
           test -f dist/eddie-widget.js
+
+      - name: Upload size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: widget-size-report
+          path: |
+            dist/ASSET_SIZES.md
+            dist/asset-sizes.csv
