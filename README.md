@@ -26,7 +26,7 @@ Eddie does three things:
 ### 1. Index your content
 
 ```bash
-eddie index --content-dir content/ --output static/eddie-index.bin
+eddie index --content-dir content/ --output static/eddie/index.ed
 ```
 
 ### 2. Embed the widget
@@ -94,7 +94,7 @@ Eddie is a single Rust codebase that compiles to two targets — one might say i
 The indexing pipeline:
 
 ```
-Markdown/HTML → parse → chunk → embed (MiniLM, 384-dim) → BM25 index → serialize → index.bin
+Markdown/HTML → parse → chunk → embed (MiniLM, 384-dim) → BM25 index → serialize → Brotli pack (.ed)
 ```
 
 The search pipeline (browser):
@@ -158,7 +158,7 @@ Foundational reading and implementation references behind the current approach:
   run: |
     curl -L https://github.com/jt55401/eddie/releases/latest/download/eddie-linux-amd64 -o eddie
     chmod +x eddie
-    ./eddie index --content-dir content/ --output public/eddie-index.bin
+    ./eddie index --content-dir content/ --output public/eddie/index.ed
 ```
 
 ## Project Layout

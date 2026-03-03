@@ -24,7 +24,7 @@ jobs:
           chmod +x eddie
 
       - name: Generate Eddie index into Hugo static/
-        run: ./eddie index --content-dir content/ --output static/eddie-index.bin
+        run: ./eddie index --content-dir content/ --output static/eddie/index.ed
 
       - name: Build Hugo site
         run: hugo --minify

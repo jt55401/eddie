@@ -31,7 +31,7 @@
   }
 
   const config = {
-    indexUrl: scriptEl.getAttribute("data-index-url") || "/eddie-index.bin",
+    indexUrl: scriptEl.getAttribute("data-index-url") || "/eddie/index.ed",
     position: normalizePosition(scriptEl.getAttribute("data-position")),
     theme: scriptEl.getAttribute("data-theme") || "auto",
     offsetY: parseOffsetPx("data-offset-y"),

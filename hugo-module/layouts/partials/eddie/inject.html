@@ -1,7 +1,7 @@
 {{- $cfg := .Site.Params.eddie | default dict -}}
 {{- $enabled := $cfg.enabled | default true -}}
 {{- if $enabled -}}
-{{- $indexUrl := $cfg.indexUrl | default "/eddie/index.bin" -}}
+{{- $indexUrl := $cfg.indexUrl | default "/eddie/index.ed" -}}
 {{- $position := $cfg.position | default "bottom-right" -}}
 {{- $theme := $cfg.theme | default "auto" -}}
 {{- $offsetY := $cfg.offsetY | default 0 -}}

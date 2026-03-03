@@ -70,8 +70,8 @@ async function initialize(indexUrl, workerBaseUrl) {
   }
   const indexBytes = new Uint8Array(await indexResponse.arrayBuffer());
 
-  // 3. Parse model ID from index header
-  const modelId = parseModelIdFromIndex(indexBytes);
+  // 3. Parse model ID from index bytes (supports raw .bin and compressed .ed)
+  const modelId = wasm_bindgen.extract_model_id(indexBytes);
 
   // 4. Fetch model files (with IndexedDB cache)
   postStatus("checking_cache");
@@ -107,23 +107,6 @@ async function initialize(indexUrl, workerBaseUrl) {
 
   initialized = true;
   postStatus("ready");
-}
-
-// -- Index header parsing --
-// Binary format: SAGI (4) + version (4) + dim (4) + num_chunks (4) +
-//   model_id_len (4) + metadata_len (4) + model_id bytes
-function parseModelIdFromIndex(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
-  if (magic !== "SAGI") {
-    throw new Error("Invalid index file (bad magic)");
-  }
-  // Skip: version(4) + dim(4) + num_chunks(4)
-  const modelIdLen = view.getUint32(16, true);
-  // Skip: metadata_len(4)
-  const modelIdStart = 24; // 4+4+4+4+4+4
-  const decoder = new TextDecoder();
-  return decoder.decode(bytes.slice(modelIdStart, modelIdStart + modelIdLen));
 }
 
 // -- IndexedDB helpers --

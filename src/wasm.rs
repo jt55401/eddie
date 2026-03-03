@@ -22,6 +22,12 @@ thread_local! {
     static ENGINE: RefCell<Option<SearchEngine>> = const { RefCell::new(None) };
 }
 
+#[wasm_bindgen]
+pub fn extract_model_id(index_bytes: &[u8]) -> Result<String, JsValue> {
+    SearchIndex::model_id_from_bytes(index_bytes)
+        .map_err(|e| JsValue::from_str(&format!("model_id parse failed: {}", e)))
+}
+
 /// Initialize the search engine from raw model and index bytes.
 ///
 /// Called once by the Web Worker after downloading all assets.
@@ -137,7 +143,9 @@ fn dedup_results(
 
     for (chunk_idx, score) in &scored {
         let meta = &index.metadata[*chunk_idx];
-        let entry = best_per_url.entry(meta.url.as_str()).or_insert((*chunk_idx, *score));
+        let entry = best_per_url
+            .entry(meta.url.as_str())
+            .or_insert((*chunk_idx, *score));
         if *score > entry.1 {
             *entry = (*chunk_idx, *score);
         }

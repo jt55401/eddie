@@ -34,7 +34,7 @@ Run the indexer against your Hugo `content/` directory:
 ```bash
 eddie index \
   --content-dir /path/to/your-hugo-site/content/ \
-  --output eddie-index.bin
+  --output eddie/index.ed
 ```
 
 This will:
@@ -47,14 +47,14 @@ This will:
 6. Split content into chunks by section headings, with paragraph/sentence splitting for long sections
 7. Generate 384-dimensional embeddings using the `all-MiniLM-L6-v2` model (downloaded automatically from HuggingFace Hub on first run, ~23MB, cached)
 8. Build a BM25 keyword index alongside the semantic embeddings
-9. Write a single binary index file
+9. Write a single Brotli-compressed Eddie index file (`.ed`)
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--content-dir` | (required) | Path to your Hugo `content/` directory |
-| `--output` | `index.bin` | Output path for the index file |
+| `--output` | `index.ed` | Output path for the index file (`.ed` for Brotli-compressed format) |
 | `--model` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace model ID |
 | `--chunk-size` | `256` | Maximum tokens per chunk |
 | `--overlap` | `32` | Overlap tokens between consecutive chunks |
@@ -66,7 +66,7 @@ To index as part of your Hugo build:
 ```bash
 hugo && eddie index \
   --content-dir content/ \
-  --output public/eddie-index.bin
+  --output public/eddie/index.ed
 ```
 
 Or place the index in Hugo's `static/` directory so it's included automatically:
@@ -74,7 +74,7 @@ Or place the index in Hugo's `static/` directory so it's included automatically:
 ```bash
 eddie index \
   --content-dir content/ \
-  --output static/eddie-index.bin
+  --output static/eddie/index.ed
 
 hugo  # copies static/ contents to public/
 ```
@@ -98,7 +98,7 @@ jobs:
           cp target/release/eddie /usr/local/bin/
 
       - name: Index content
-        run: eddie index --content-dir content/ --output static/eddie-index.bin
+        run: eddie index --content-dir content/ --output static/eddie/index.ed
 
       - name: Build Hugo site
         run: hugo
@@ -115,7 +115,7 @@ Combines semantic similarity with BM25 keyword matching using reciprocal rank fu
 
 ```bash
 eddie search \
-  --index eddie-index.bin \
+  --index eddie/index.ed \
   --query "What programming languages does Jason know?" \
   --top-k 5
 ```
@@ -126,7 +126,7 @@ Uses embedding cosine similarity — good for meaning-based queries:
 
 ```bash
 eddie search \
-  --index eddie-index.bin \
+  --index eddie/index.ed \
   --query "enterprise web development" \
   --mode semantic
 ```
@@ -137,7 +137,7 @@ Uses BM25 scoring — good for exact term matching:
 
 ```bash
 eddie search \
-  --index eddie-index.bin \
+  --index eddie/index.ed \
   --query "Azure certifications" \
   --mode keyword
 ```
@@ -183,10 +183,10 @@ The default model works well for general English content. For different needs:
 To use a different model, pass `--model` to both `index` and `search`:
 
 ```bash
-eddie index --content-dir content/ --output index.bin \
+eddie index --content-dir content/ --output index.ed \
   --model BAAI/bge-small-en-v1.5
 
-eddie search --index index.bin --query "test" \
+eddie search --index index.ed --query "test" \
   --model BAAI/bge-small-en-v1.5
 ```
 

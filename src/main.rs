@@ -2,18 +2,18 @@
 
 //! Eddie CLI: build-time indexer for static site content.
 
-use std::fs::File;
+use std::fs;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use eddie::bm25::{hybrid_rrf, Bm25Index};
+use eddie::bm25::{Bm25Index, hybrid_rrf};
 use eddie::chunk::chunk_document;
 use eddie::embed::Embedder;
 use eddie::index::SearchIndex;
-use eddie::parse::{parse_content_dir, HugoParser};
+use eddie::parse::{HugoParser, parse_content_dir};
 use eddie::search::search;
 
 const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
@@ -34,7 +34,7 @@ enum Command {
         content_dir: PathBuf,
 
         /// Output path for the index file.
-        #[arg(long, default_value = "index.bin")]
+        #[arg(long, default_value = "index.ed")]
         output: PathBuf,
 
         /// HuggingFace model ID for embeddings.
@@ -165,9 +165,18 @@ fn cmd_index(
     );
 
     eprintln!("Writing index to {}...", output.display());
-    let file = File::create(&output)
+    let file = fs::File::create(&output)
         .with_context(|| format!("creating output file {}", output.display()))?;
-    index.write_to(BufWriter::new(file))?;
+    let writer = BufWriter::new(file);
+    let is_ed_output = output
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ed"));
+    if is_ed_output {
+        index.write_ed_to(writer)?;
+    } else {
+        index.write_to(writer)?;
+    }
 
     eprintln!("Done! Index contains {} chunks.", all_chunks.len());
     Ok(())
@@ -182,9 +191,9 @@ fn cmd_search(
 ) -> Result<()> {
     // Load index
     eprintln!("Loading index from {}...", index_path.display());
-    let file = File::open(&index_path)
+    let bytes = fs::read(&index_path)
         .with_context(|| format!("opening index file {}", index_path.display()))?;
-    let index = SearchIndex::read_from(std::io::BufReader::new(file))?;
+    let index = SearchIndex::from_bytes(&bytes)?;
     eprintln!(
         "  {} chunks, {} dimensions",
         index.metadata.len(),
