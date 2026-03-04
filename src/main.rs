@@ -20,7 +20,10 @@ use eddie::eval::{
     AcceptanceCase, AcceptanceSuite, evaluate_case, load_suite, summarize, write_suite,
 };
 use eddie::index::SearchIndex;
-use eddie::parse::{HugoParser, parse_content_dir};
+use eddie::parse::{
+    AstroParser, ContentParser, DocusaurusParser, EleventyParser, HugoParser, JekyllParser,
+    MkDocsParser, parse_content_dir,
+};
 use eddie::qa::{
     OllamaConfig, OpenRouterConfig, QaCorpus, QaEntry, build_qa_corpus_from_chunks,
     build_qa_entries_from_chunks, synthesize_with_ollama_from_chunks,
@@ -44,6 +47,10 @@ enum Command {
         /// Path to the content directory (e.g. Hugo's content/).
         #[arg(long)]
         content_dir: PathBuf,
+
+        /// CMS parser profile used to parse content files.
+        #[arg(long, default_value = "hugo")]
+        cms: Cms,
 
         /// Output path for the index file.
         #[arg(long, default_value = "index.ed")]
@@ -155,6 +162,10 @@ enum Command {
         #[arg(long)]
         content_dir: PathBuf,
 
+        /// CMS parser profile used to parse content files.
+        #[arg(long, default_value = "hugo")]
+        cms: Cms,
+
         /// Path to acceptance JSON suite.
         #[arg(long)]
         eval: Option<PathBuf>,
@@ -260,6 +271,29 @@ enum ChunkingStrategy {
     Semantic,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum Cms {
+    Hugo,
+    Astro,
+    Docusaurus,
+    Mkdocs,
+    Eleventy,
+    Jekyll,
+}
+
+impl Cms {
+    fn as_str(self) -> &'static str {
+        match self {
+            Cms::Hugo => "hugo",
+            Cms::Astro => "astro",
+            Cms::Docusaurus => "docusaurus",
+            Cms::Mkdocs => "mkdocs",
+            Cms::Eleventy => "eleventy",
+            Cms::Jekyll => "jekyll",
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct TuneCandidate {
     chunk_size: usize,
@@ -277,6 +311,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Index {
             content_dir,
+            cms,
             output,
             model,
             chunk_size,
@@ -298,6 +333,7 @@ fn main() -> Result<()> {
             qa_ollama_temperature,
         } => cmd_index(
             content_dir,
+            cms,
             output,
             &model,
             chunk_size,
@@ -328,6 +364,7 @@ fn main() -> Result<()> {
         } => cmd_search(index, &query, top_k, &model, mode, scope),
         Command::Tune {
             content_dir,
+            cms,
             eval,
             save_eval,
             interactive,
@@ -339,6 +376,7 @@ fn main() -> Result<()> {
             report,
         } => cmd_tune(
             content_dir,
+            cms,
             eval,
             save_eval,
             interactive,
@@ -376,6 +414,7 @@ fn main() -> Result<()> {
 
 fn cmd_index(
     content_dir: PathBuf,
+    cms: Cms,
     output: PathBuf,
     model_id: &str,
     chunk_size: usize,
@@ -397,9 +436,13 @@ fn cmd_index(
     qa_ollama_temperature: f32,
 ) -> Result<()> {
     // Parse content
-    eprintln!("Parsing content from {}...", content_dir.display());
-    let parser = HugoParser;
-    let docs = parse_content_dir(&content_dir, &parser)?;
+    eprintln!(
+        "Parsing content from {} with {} parser...",
+        content_dir.display(),
+        cms.as_str()
+    );
+    let parser = parser_for(cms);
+    let docs = parse_content_dir(&content_dir, parser.as_ref())?;
     eprintln!("  Found {} documents", docs.len());
 
     // Chunk documents
@@ -739,6 +782,7 @@ fn cmd_search(
 #[allow(clippy::too_many_arguments)]
 fn cmd_tune(
     content_dir: PathBuf,
+    cms: Cms,
     eval: Option<PathBuf>,
     save_eval: Option<PathBuf>,
     interactive: bool,
@@ -749,9 +793,13 @@ fn cmd_tune(
     mode: SearchMode,
     report: Option<PathBuf>,
 ) -> Result<()> {
-    let parser = HugoParser;
-    eprintln!("Parsing content from {}...", content_dir.display());
-    let docs = parse_content_dir(&content_dir, &parser)?;
+    let parser = parser_for(cms);
+    eprintln!(
+        "Parsing content from {} with {} parser...",
+        content_dir.display(),
+        cms.as_str()
+    );
+    let docs = parse_content_dir(&content_dir, parser.as_ref())?;
     eprintln!("  Found {} documents", docs.len());
 
     let mut suite = if let Some(path) = &eval {
@@ -821,6 +869,17 @@ fn cmd_tune(
     }
 
     Ok(())
+}
+
+fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
+    match cms {
+        Cms::Hugo => Box::new(HugoParser),
+        Cms::Astro => Box::new(AstroParser),
+        Cms::Docusaurus => Box::new(DocusaurusParser),
+        Cms::Mkdocs => Box::new(MkDocsParser),
+        Cms::Eleventy => Box::new(EleventyParser),
+        Cms::Jekyll => Box::new(JekyllParser),
+    }
 }
 
 fn cmd_qa_corpus(
