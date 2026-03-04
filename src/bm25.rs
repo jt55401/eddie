@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn test_bm25_term_frequency() {
         let texts = vec![
-            "rust rust rust is great",       // high tf for "rust"
+            "rust rust rust is great",        // high tf for "rust"
             "rust is a programming language", // lower tf for "rust"
         ];
         let index = Bm25Index::build(&texts);

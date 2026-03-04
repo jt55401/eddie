@@ -25,17 +25,56 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+compress_asset() {
+  local src="$1"
+  if [[ ! -f "$src" ]]; then
+    return
+  fi
+
+  if command -v brotli >/dev/null 2>&1; then
+    brotli -f -q 11 -o "${src}.br" "$src"
+  else
+    echo "==> brotli not found; skipping ${src}.br"
+  fi
+
+  if command -v gzip >/dev/null 2>&1; then
+    gzip -n -9 -c "$src" > "${src}.gz"
+  else
+    echo "==> gzip not found; skipping ${src}.gz"
+  fi
+}
+
 # 1. Build WASM
 echo "==> Building WASM widget..."
 bash "$PROJECT_ROOT/widget/build.sh"
 
+echo "==> Generating precompressed assets (.br/.gz)..."
+compress_asset "$PROJECT_ROOT/dist/eddie.wasm"
+compress_asset "$PROJECT_ROOT/dist/eddie-wasm.js"
+compress_asset "$PROJECT_ROOT/dist/eddie-worker.js"
+compress_asset "$PROJECT_ROOT/dist/eddie-widget.js"
+
 # 2. Copy dist/ into hugo-module/static/eddie/
 echo "==> Assembling Hugo module..."
 mkdir -p "$STATIC_DIR"
-cp "$PROJECT_ROOT/dist/eddie.wasm"       "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/eddie-wasm.js"    "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/eddie-worker.js"  "$STATIC_DIR/"
-cp "$PROJECT_ROOT/dist/eddie-widget.js"  "$STATIC_DIR/"
+for asset in \
+  eddie.wasm \
+  eddie.wasm.br \
+  eddie.wasm.gz \
+  eddie-wasm.js \
+  eddie-wasm.js.br \
+  eddie-wasm.js.gz \
+  eddie-worker.js \
+  eddie-worker.js.br \
+  eddie-worker.js.gz \
+  eddie-widget.js \
+  eddie-widget.js.br \
+  eddie-widget.js.gz
+do
+  if [[ -f "$PROJECT_ROOT/dist/$asset" ]]; then
+    cp "$PROJECT_ROOT/dist/$asset" "$STATIC_DIR/"
+  fi
+done
 
 echo "==> Hugo module assembled at: $HUGO_MODULE_DIR"
 ls -lh "$STATIC_DIR/"
@@ -59,6 +98,10 @@ if [[ -n "$TARGET_REPO" ]]; then
 
   mkdir -p "$TARGET_REPO/static/eddie"
   cp "$STATIC_DIR"/* "$TARGET_REPO/static/eddie/"
+
+  mkdir -p "$TARGET_REPO/scripts"
+  cp "$HUGO_MODULE_DIR/scripts/eddie-init-site.sh" \
+     "$TARGET_REPO/scripts/eddie-init-site.sh"
 
   echo "==> Files synced to $TARGET_REPO"
 

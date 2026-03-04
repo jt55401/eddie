@@ -10,6 +10,8 @@ fn search_index_round_trip_preserves_chunk_texts() {
         title: "Doc".to_string(),
         url: "/doc/".to_string(),
         section: Some("Intro".to_string()),
+        date: Some("2024-01-01".to_string()),
+        granularity: Some("fine".to_string()),
         chunk_index: 0,
     }];
     let texts = vec!["hello world".to_string()];

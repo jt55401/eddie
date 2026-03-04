@@ -1,0 +1,14 @@
+# Remove an auto-generated claim by matching any combination of fields.
+[[redact]]
+predicate = "worked_for"
+object = "Old Company"
+
+# Add a manual claim.
+[[add]]
+subject = "Jason Grey"
+predicate = "worked_for"
+object = "Nike"
+evidence = "Manual correction"
+source_url = "/about/"
+confidence = 1.0
+tags = ["manual"]

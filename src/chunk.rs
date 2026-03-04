@@ -2,6 +2,8 @@
 
 //! Content chunking: split markdown/HTML into embeddable segments.
 
+use std::collections::HashSet;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,10 @@ pub struct ChunkMeta {
     pub title: String,
     pub url: String,
     pub section: Option<String>,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub granularity: Option<String>,
     pub chunk_index: usize,
 }
 
@@ -42,6 +48,12 @@ pub struct Chunk {
     pub meta: ChunkMeta,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkStrategy {
+    Heading,
+    Semantic,
+}
+
 /// Split a document into embeddable chunks.
 ///
 /// Splits on markdown headings first, then breaks oversized sections at paragraph
@@ -49,8 +61,21 @@ pub struct Chunk {
 /// (conservative: `max_tokens * 0.75`). Overlap repeats the last N words at the
 /// start of the next chunk for context continuity.
 pub fn chunk_document(doc: &Document, max_tokens: usize, overlap_tokens: usize) -> Vec<Chunk> {
+    chunk_document_with_strategy(doc, max_tokens, overlap_tokens, ChunkStrategy::Heading)
+}
+
+/// Split a document into embeddable chunks using the requested strategy.
+pub fn chunk_document_with_strategy(
+    doc: &Document,
+    max_tokens: usize,
+    overlap_tokens: usize,
+    strategy: ChunkStrategy,
+) -> Vec<Chunk> {
     let effective_max = (max_tokens as f64 * 0.75) as usize;
-    let sections = split_into_sections(&doc.body);
+    let sections = match strategy {
+        ChunkStrategy::Heading => split_into_sections(&doc.body),
+        ChunkStrategy::Semantic => split_into_semantic_sections(&doc.body, effective_max),
+    };
 
     let mut chunks = Vec::new();
     let mut chunk_index = 0;
@@ -82,6 +107,8 @@ pub fn chunk_document(doc: &Document, max_tokens: usize, overlap_tokens: usize) 
                     title: doc.meta.title.clone(),
                     url: doc.meta.url.clone(),
                     section: heading.clone(),
+                    date: doc.meta.date.clone(),
+                    granularity: None,
                     chunk_index,
                 },
             });
@@ -90,6 +117,57 @@ pub fn chunk_document(doc: &Document, max_tokens: usize, overlap_tokens: usize) 
     }
 
     chunks
+}
+
+/// Semantic-ish segmentation using sentence similarity drops and size thresholds.
+fn split_into_semantic_sections(body: &str, target_words: usize) -> Vec<(Option<String>, String)> {
+    let sentences = split_sentences(body);
+    if sentences.is_empty() {
+        return Vec::new();
+    }
+
+    let min_words = (target_words / 3).max(40);
+    let mut sections = Vec::new();
+    let mut current = String::new();
+    let mut current_words = 0usize;
+    let mut prev: Option<&str> = None;
+
+    for sentence in sentences {
+        let sentence_words = word_count(sentence);
+        if sentence_words == 0 {
+            continue;
+        }
+
+        let sim = prev
+            .map(|p| sentence_similarity(p, sentence))
+            .unwrap_or(1.0);
+        let similarity_drop = sim < 0.14;
+        let size_break =
+            current_words + sentence_words > target_words && current_words >= min_words;
+
+        if !current.is_empty() && (size_break || (similarity_drop && current_words >= min_words)) {
+            sections.push((None, current.trim().to_string()));
+            current.clear();
+            current_words = 0;
+        }
+
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(sentence.trim());
+        current_words += sentence_words;
+        prev = Some(sentence);
+    }
+
+    if !current.trim().is_empty() {
+        sections.push((None, current.trim().to_string()));
+    }
+
+    if sections.is_empty() && !body.trim().is_empty() {
+        sections.push((None, body.trim().to_string()));
+    }
+
+    sections
 }
 
 /// Split body text into (optional heading, section text) pairs.
@@ -185,6 +263,39 @@ fn merge_pieces(pieces: &[&str], max_words: usize, separator: &str) -> Vec<Strin
     result
 }
 
+fn split_sentences(text: &str) -> Vec<&str> {
+    let sentence_re = Regex::new(r"(?m)([^.!?\n]+[.!?]?)").unwrap();
+    sentence_re
+        .captures_iter(text)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().trim()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn sentence_similarity(a: &str, b: &str) -> f32 {
+    let ta = token_set(a);
+    let tb = token_set(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    if union == 0.0 {
+        return 0.0;
+    }
+    inter / union
+}
+
+fn token_set(text: &str) -> HashSet<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| w.len() > 2)
+        .collect()
+}
+
 /// Count whitespace-delimited words.
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
@@ -230,7 +341,11 @@ mod tests {
         let body = "Intro text.\n\n## Section One\n\nFirst section body.\n\n## Section Two\n\nSecond section body.";
         let doc = make_doc(body);
         let chunks = chunk_document(&doc, 256, 0);
-        assert!(chunks.len() >= 3, "expected at least 3 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 3,
+            "expected at least 3 chunks, got {}",
+            chunks.len()
+        );
         assert!(chunks[0].meta.section.is_none());
         assert_eq!(chunks[1].meta.section.as_deref(), Some("Section One"));
         assert_eq!(chunks[2].meta.section.as_deref(), Some("Section Two"));
@@ -239,11 +354,18 @@ mod tests {
     #[test]
     fn test_large_section_splits() {
         // Create a section with ~200 words (will exceed 256 * 0.75 = 192 effective limit)
-        let words: String = (0..200).map(|i| format!("word{}", i)).collect::<Vec<_>>().join(" ");
+        let words: String = (0..200)
+            .map(|i| format!("word{}", i))
+            .collect::<Vec<_>>()
+            .join(" ");
         let body = format!("## Big Section\n\n{}\n\n{}", words, words);
         let doc = make_doc(&body);
         let chunks = chunk_document(&doc, 256, 0);
-        assert!(chunks.len() >= 2, "expected at least 2 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "expected at least 2 chunks, got {}",
+            chunks.len()
+        );
     }
 
     #[test]
@@ -252,6 +374,7 @@ mod tests {
         let chunks = chunk_document(&doc, 256, 0);
         assert_eq!(chunks[0].meta.title, "Test");
         assert_eq!(chunks[0].meta.url, "/test/");
+        assert_eq!(chunks[0].meta.date.as_deref(), Some("2024-01-01"));
         assert_eq!(chunks[0].meta.chunk_index, 0);
     }
 
@@ -285,5 +408,14 @@ mod tests {
     fn test_tail_words() {
         assert_eq!(tail_words("a b c d e", 3), "c d e");
         assert_eq!(tail_words("short", 5), "short");
+    }
+
+    #[test]
+    fn test_semantic_strategy_produces_chunks() {
+        let body = "The subject built search systems for years. They worked at multiple companies. Rust remains a core tool. Ski conditions were rough. Focus moved to retrieval quality and grounding.";
+        let doc = make_doc(body);
+        let chunks = chunk_document_with_strategy(&doc, 64, 0, ChunkStrategy::Semantic);
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| c.meta.section.is_none()));
     }
 }

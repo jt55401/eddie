@@ -46,9 +46,17 @@ jobs:
           mkdir -p release-assets
           cp target/release/eddie release-assets/eddie-linux-amd64
           cp dist/eddie.wasm release-assets/
+          cp dist/eddie.wasm.br release-assets/
+          cp dist/eddie.wasm.gz release-assets/
           cp dist/eddie-wasm.js release-assets/
+          cp dist/eddie-wasm.js.br release-assets/
+          cp dist/eddie-wasm.js.gz release-assets/
           cp dist/eddie-worker.js release-assets/
+          cp dist/eddie-worker.js.br release-assets/
+          cp dist/eddie-worker.js.gz release-assets/
           cp dist/eddie-widget.js release-assets/
+          cp dist/eddie-widget.js.br release-assets/
+          cp dist/eddie-widget.js.gz release-assets/
           cp dist/ASSET_SIZES.md release-assets/
           cp dist/asset-sizes.csv release-assets/
           tar -czf release-assets/eddie-hugo-module.tar.gz -C hugo-module .
@@ -67,9 +75,17 @@ jobs:
           files: |
             release-assets/eddie-linux-amd64
             release-assets/eddie.wasm
+            release-assets/eddie.wasm.br
+            release-assets/eddie.wasm.gz
             release-assets/eddie-wasm.js
+            release-assets/eddie-wasm.js.br
+            release-assets/eddie-wasm.js.gz
             release-assets/eddie-worker.js
+            release-assets/eddie-worker.js.br
+            release-assets/eddie-worker.js.gz
             release-assets/eddie-widget.js
+            release-assets/eddie-widget.js.br
+            release-assets/eddie-widget.js.gz
             release-assets/ASSET_SIZES.md
             release-assets/asset-sizes.csv
             release-assets/eddie-hugo-module.tar.gz

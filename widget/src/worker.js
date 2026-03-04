@@ -32,22 +32,54 @@ self.onmessage = async function (e) {
       if (!initialized) {
         throw new Error("Engine not initialized");
       }
-      const results = wasm_bindgen.search_query(
+      const mode = msg.mode || "hybrid";
+      const topK = msg.topK || 5;
+      if (typeof wasm_bindgen.search_with_answer !== "function") {
+        throw new Error("WASM does not expose search_with_answer");
+      }
+      const bundle = wasm_bindgen.search_with_answer(
         msg.query,
-        msg.topK || 5,
-        msg.mode || "hybrid"
+        topK,
+        msg.answerTopK || 5,
+        mode,
+        !!msg.answerMode,
+        msg.qaSubject || ""
       );
       self.postMessage({
         type: "search_result",
         requestId: msg.requestId,
-        results: results,
+        results: bundle.results || [],
+        answer: bundle.answer || null,
       });
     } catch (err) {
-      self.postMessage({
-        type: "error",
-        requestId: msg.requestId,
-        error: err.message || String(err),
-      });
+      // Keep UX alive on occasional wasm/runtime faults by degrading to keyword lane.
+      try {
+        if (typeof wasm_bindgen.search_with_answer !== "function") {
+          throw err;
+        }
+        const fallback = wasm_bindgen.search_with_answer(
+          msg.query,
+          msg.topK || 5,
+          msg.answerTopK || 5,
+          "keyword",
+          false,
+          msg.qaSubject || ""
+        );
+        self.postMessage({
+          type: "search_result",
+          requestId: msg.requestId,
+          results: fallback.results || [],
+          answer: null,
+          degraded: true,
+          laneError: err.message || String(err),
+        });
+      } catch (fallbackErr) {
+        self.postMessage({
+          type: "error",
+          requestId: msg.requestId,
+          error: fallbackErr.message || fallbackErr.toString(),
+        });
+      }
     }
   }
 };

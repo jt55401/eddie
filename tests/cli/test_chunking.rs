@@ -1,4 +1,4 @@
-use eddie::chunk::{chunk_document, Document, DocumentMeta};
+use eddie::chunk::{Document, DocumentMeta, chunk_document};
 
 fn make_doc(body: &str) -> Document {
     Document {

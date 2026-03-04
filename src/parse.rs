@@ -298,8 +298,7 @@ fn hugo_strip_shortcodes(content: &str) -> String {
     result = certimage_re.replace_all(&result, "").into_owned();
 
     // {{< mermaid >}}...{{< /mermaid >}} — block shortcode
-    let mermaid_re =
-        Regex::new(r"(?s)\{\{<\s*mermaid\s*>\}\}.*?\{\{<\s*/mermaid\s*>\}\}").unwrap();
+    let mermaid_re = Regex::new(r"(?s)\{\{<\s*mermaid\s*>\}\}.*?\{\{<\s*/mermaid\s*>\}\}").unwrap();
     result = mermaid_re.replace_all(&result, "").into_owned();
 
     // {{< closing >}} — self-closing shortcode

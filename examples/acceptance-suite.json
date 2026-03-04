@@ -1,0 +1,44 @@
+{
+  "name": "jason-grey-site",
+  "cases": [
+    {
+      "id": "programming-years",
+      "query": "how many years has jason been programming",
+      "must_match_any": ["40+", "42", "since age 6"],
+      "top_k": 5,
+      "weight": 1.5
+    },
+    {
+      "id": "consulting-years",
+      "query": "how many years has jason been consulting",
+      "must_match_any": ["30+", "since age 14"],
+      "top_k": 5,
+      "weight": 1.5
+    },
+    {
+      "id": "worked-for-list",
+      "query": "who has jason worked for",
+      "must_include_all": [
+        "life time fitness",
+        "common crawl",
+        "kagi",
+        "kenneth cole",
+        "airborne athletics",
+        "2ndswing golf",
+        "internet broadcasting",
+        "5/3 bank",
+        "nike",
+        "bauer hockey"
+      ],
+      "top_k": 8,
+      "weight": 2.0
+    },
+    {
+      "id": "does-x-very-well-template",
+      "query": "does jason consult very well",
+      "must_match_any": ["jason has been", "for", "years"],
+      "top_k": 5,
+      "weight": 1.0
+    }
+  ]
+}

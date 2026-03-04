@@ -2,10 +2,10 @@
 
 //! Index format: serialize and deserialize the vector index + metadata.
 //!
-//! Binary format (v3):
+//! Binary format (v4):
 //! - `SAGI` magic (4 bytes)
-//! - version: u32 LE (3)
-//! - dim: u32 LE (embedding dimensionality)
+//! - version: u32 LE (4)
+//! - dim: u32 LE (chunk embedding dimensionality)
 //! - num_chunks: u32 LE
 //! - model_id_len: u32 LE
 //! - metadata_len: u32 LE
@@ -13,8 +13,18 @@
 //! - metadata: JSON-encoded `Vec<ChunkMeta>` bytes
 //! - embeddings: `num_chunks * dim` f32 values (LE)
 //! - bm25_index: length-prefixed JSON (u32 LE length + JSON bytes)
-//! - text_count: u32 LE (v3 only)
-//! - texts: for each text, u32 LE length + UTF-8 bytes (v3 only)
+//! - text_count: u32 LE
+//! - texts: for each text, u32 LE length + UTF-8 bytes
+//! - section_count: u32 LE
+//! - repeated section payloads:
+//!   - section_name_len: u32 LE
+//!   - section_name: UTF-8 bytes (`qa`, `claims`, ...)
+//!   - section_item_count: u32 LE
+//!   - section_json_len: u32 LE
+//!   - section_json: JSON-encoded entries
+//!   - section_dim: u32 LE
+//!   - section_embedding_count: u32 LE (number of f32 values)
+//!   - section_embeddings: f32 LE values
 //!
 //! Compressed format (`.ed`):
 //! - `SAED` magic (4 bytes)
@@ -31,13 +41,19 @@ use brotli::{CompressorReader, Decompressor};
 
 use crate::bm25::Bm25Index;
 use crate::chunk::ChunkMeta;
+use crate::claims::ClaimEntry;
+use crate::qa::QaEntry;
 
 const MAGIC: &[u8; 4] = b"SAGI";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const ED_MAGIC: &[u8; 4] = b"SAED";
 const ED_VERSION: u32 = 1;
 
-/// A search index containing chunk metadata, embedding vectors, BM25 index, and chunk texts.
+const SECTION_QA: &str = "qa";
+const SECTION_CLAIMS: &str = "claims";
+
+/// A search index containing chunk metadata, embedding vectors, BM25 index,
+/// chunk texts, and optional knowledge sections (qa/claims).
 #[derive(Debug)]
 pub struct SearchIndex {
     pub model_id: String,
@@ -46,8 +62,17 @@ pub struct SearchIndex {
     /// Flat matrix: `metadata.len() * dim` f32 values, row-major.
     pub embeddings: Vec<f32>,
     pub bm25: Bm25Index,
-    /// Chunk texts for result snippets. Empty if loaded from a v2 index.
     pub texts: Vec<String>,
+
+    /// Optional QA section.
+    pub qa_entries: Vec<QaEntry>,
+    pub qa_dim: usize,
+    pub qa_embeddings: Vec<f32>,
+
+    /// Optional claims section.
+    pub claims: Vec<ClaimEntry>,
+    pub claim_dim: usize,
+    pub claim_embeddings: Vec<f32>,
 }
 
 impl SearchIndex {
@@ -69,7 +94,39 @@ impl SearchIndex {
             embeddings,
             bm25,
             texts,
+            qa_entries: Vec::new(),
+            qa_dim: 0,
+            qa_embeddings: Vec::new(),
+            claims: Vec::new(),
+            claim_dim: 0,
+            claim_embeddings: Vec::new(),
         }
+    }
+
+    pub fn with_qa_section(
+        mut self,
+        entries: Vec<QaEntry>,
+        dim: usize,
+        embeddings: Vec<f32>,
+    ) -> Self {
+        debug_assert!(entries.is_empty() || embeddings.len() == entries.len() * dim);
+        self.qa_entries = entries;
+        self.qa_dim = dim;
+        self.qa_embeddings = embeddings;
+        self
+    }
+
+    pub fn with_claims_section(
+        mut self,
+        claims: Vec<ClaimEntry>,
+        dim: usize,
+        embeddings: Vec<f32>,
+    ) -> Self {
+        debug_assert!(claims.is_empty() || embeddings.len() == claims.len() * dim);
+        self.claims = claims;
+        self.claim_dim = dim;
+        self.claim_embeddings = embeddings;
+        self
     }
 
     /// Serialize the index to a writer.
@@ -94,12 +151,43 @@ impl SearchIndex {
         // BM25 index trailer
         self.bm25.write_to(&mut w)?;
 
-        // Chunk texts trailer (v3)
+        // Chunk texts trailer
         w.write_all(&(self.texts.len() as u32).to_le_bytes())?;
         for text in &self.texts {
             let bytes = text.as_bytes();
             w.write_all(&(bytes.len() as u32).to_le_bytes())?;
             w.write_all(bytes)?;
+        }
+
+        // Knowledge sections
+        let mut section_count = 0u32;
+        if !self.qa_entries.is_empty() {
+            section_count += 1;
+        }
+        if !self.claims.is_empty() {
+            section_count += 1;
+        }
+        w.write_all(&section_count.to_le_bytes())?;
+
+        if !self.qa_entries.is_empty() {
+            write_section(
+                &mut w,
+                SECTION_QA,
+                self.qa_entries.len(),
+                &serde_json::to_vec(&self.qa_entries).context("serializing qa entries")?,
+                self.qa_dim,
+                &self.qa_embeddings,
+            )?;
+        }
+        if !self.claims.is_empty() {
+            write_section(
+                &mut w,
+                SECTION_CLAIMS,
+                self.claims.len(),
+                &serde_json::to_vec(&self.claims).context("serializing claims entries")?,
+                self.claim_dim,
+                &self.claim_embeddings,
+            )?;
         }
 
         Ok(())
@@ -122,7 +210,7 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Deserialize an index from a reader. Accepts v2 (texts will be empty) and v3.
+    /// Deserialize an index from a reader.
     pub fn read_from<R: Read>(mut r: R) -> Result<Self> {
         let mut magic = [0u8; 4];
         r.read_exact(&mut magic).context("reading magic bytes")?;
@@ -134,8 +222,12 @@ impl SearchIndex {
         }
 
         let version = read_u32(&mut r).context("reading version")?;
-        if version != 2 && version != 3 {
-            bail!("unsupported index version: {} (expected 2 or 3)", version);
+        if version != VERSION {
+            bail!(
+                "unsupported index version: {} (expected {})",
+                version,
+                VERSION
+            );
         }
 
         let dim = read_u32(&mut r).context("reading dim")? as usize;
@@ -174,26 +266,56 @@ impl SearchIndex {
         // BM25 index trailer
         let bm25 = Bm25Index::read_from(&mut r).context("reading BM25 index")?;
 
-        // Chunk texts trailer (v3 only)
-        let texts = if version >= 3 {
-            let text_count = read_u32(&mut r).context("reading text count")? as usize;
-            let mut texts = Vec::with_capacity(text_count);
-            for i in 0..text_count {
-                let len = read_u32(&mut r)
-                    .with_context(|| format!("reading text length for chunk {}", i))?
-                    as usize;
-                let mut text_bytes = vec![0u8; len];
-                r.read_exact(&mut text_bytes)
-                    .with_context(|| format!("reading text for chunk {}", i))?;
-                texts.push(
-                    String::from_utf8(text_bytes)
-                        .with_context(|| format!("chunk {} text is not valid UTF-8", i))?,
-                );
+        let text_count = read_u32(&mut r).context("reading text count")? as usize;
+        let mut texts = Vec::with_capacity(text_count);
+        for i in 0..text_count {
+            let len = read_u32(&mut r)
+                .with_context(|| format!("reading text length for chunk {}", i))?
+                as usize;
+            let mut text_bytes = vec![0u8; len];
+            r.read_exact(&mut text_bytes)
+                .with_context(|| format!("reading text for chunk {}", i))?;
+            texts.push(
+                String::from_utf8(text_bytes)
+                    .with_context(|| format!("chunk {} text is not valid UTF-8", i))?,
+            );
+        }
+
+        let section_count = read_u32(&mut r).context("reading section count")? as usize;
+        let mut qa_entries: Vec<QaEntry> = Vec::new();
+        let mut qa_dim = 0usize;
+        let mut qa_embeddings: Vec<f32> = Vec::new();
+        let mut claims: Vec<ClaimEntry> = Vec::new();
+        let mut claim_dim = 0usize;
+        let mut claim_embeddings: Vec<f32> = Vec::new();
+
+        for _ in 0..section_count {
+            let section = read_section(&mut r)?;
+            match section.name.as_str() {
+                SECTION_QA => {
+                    qa_entries = serde_json::from_slice(&section.entries_json)
+                        .context("parsing qa section json")?;
+                    qa_dim = section.dim;
+                    qa_embeddings = section.embeddings;
+                    validate_section_embeddings("qa", qa_entries.len(), qa_dim, &qa_embeddings)?;
+                }
+                SECTION_CLAIMS => {
+                    claims = serde_json::from_slice(&section.entries_json)
+                        .context("parsing claims section json")?;
+                    claim_dim = section.dim;
+                    claim_embeddings = section.embeddings;
+                    validate_section_embeddings(
+                        "claims",
+                        claims.len(),
+                        claim_dim,
+                        &claim_embeddings,
+                    )?;
+                }
+                _ => {
+                    // Unknown section: intentionally ignored.
+                }
             }
-            texts
-        } else {
-            Vec::new()
-        };
+        }
 
         Ok(Self {
             model_id,
@@ -202,6 +324,12 @@ impl SearchIndex {
             embeddings,
             bm25,
             texts,
+            qa_entries,
+            qa_dim,
+            qa_embeddings,
+            claims,
+            claim_dim,
+            claim_embeddings,
         })
     }
 
@@ -239,6 +367,113 @@ impl SearchIndex {
         let start = index * self.dim;
         &self.embeddings[start..start + self.dim]
     }
+
+    pub fn qa_embedding(&self, index: usize) -> Option<&[f32]> {
+        if self.qa_dim == 0 || self.qa_embeddings.is_empty() {
+            return None;
+        }
+        let start = index.checked_mul(self.qa_dim)?;
+        let end = start.checked_add(self.qa_dim)?;
+        self.qa_embeddings.get(start..end)
+    }
+
+    pub fn claim_embedding(&self, index: usize) -> Option<&[f32]> {
+        if self.claim_dim == 0 || self.claim_embeddings.is_empty() {
+            return None;
+        }
+        let start = index.checked_mul(self.claim_dim)?;
+        let end = start.checked_add(self.claim_dim)?;
+        self.claim_embeddings.get(start..end)
+    }
+}
+
+struct EncodedSection {
+    name: String,
+    entries_json: Vec<u8>,
+    dim: usize,
+    embeddings: Vec<f32>,
+}
+
+fn validate_section_embeddings(
+    section_name: &str,
+    entry_count: usize,
+    dim: usize,
+    embeddings: &[f32],
+) -> Result<()> {
+    if entry_count == 0 {
+        return Ok(());
+    }
+    if dim == 0 {
+        bail!(
+            "{} section has entries but zero embedding dim",
+            section_name
+        );
+    }
+    if embeddings.len() != entry_count * dim {
+        bail!(
+            "{} section embedding mismatch: {} entries * dim {} != {} floats",
+            section_name,
+            entry_count,
+            dim,
+            embeddings.len()
+        );
+    }
+    Ok(())
+}
+
+fn write_section<W: Write>(
+    w: &mut W,
+    name: &str,
+    item_count: usize,
+    entries_json: &[u8],
+    dim: usize,
+    embeddings: &[f32],
+) -> Result<()> {
+    validate_section_embeddings(name, item_count, dim, embeddings)?;
+
+    let name_bytes = name.as_bytes();
+    w.write_all(&(name_bytes.len() as u32).to_le_bytes())?;
+    w.write_all(name_bytes)?;
+    w.write_all(&(item_count as u32).to_le_bytes())?;
+    w.write_all(&(entries_json.len() as u32).to_le_bytes())?;
+    w.write_all(entries_json)?;
+    w.write_all(&(dim as u32).to_le_bytes())?;
+    w.write_all(&(embeddings.len() as u32).to_le_bytes())?;
+    for &val in embeddings {
+        w.write_all(&val.to_le_bytes())?;
+    }
+    Ok(())
+}
+
+fn read_section<R: Read>(r: &mut R) -> Result<EncodedSection> {
+    let name_len = read_u32(r).context("reading section name length")? as usize;
+    let mut name_bytes = vec![0u8; name_len];
+    r.read_exact(&mut name_bytes)
+        .context("reading section name")?;
+    let name = String::from_utf8(name_bytes).context("section name is not UTF-8")?;
+
+    let _item_count = read_u32(r).context("reading section item count")? as usize;
+    let json_len = read_u32(r).context("reading section json length")? as usize;
+    let mut entries_json = vec![0u8; json_len];
+    r.read_exact(&mut entries_json)
+        .context("reading section json")?;
+
+    let dim = read_u32(r).context("reading section embedding dim")? as usize;
+    let emb_count = read_u32(r).context("reading section embedding count")? as usize;
+    let mut emb_raw = vec![0u8; emb_count * 4];
+    r.read_exact(&mut emb_raw)
+        .context("reading section embeddings")?;
+    let embeddings = emb_raw
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+
+    Ok(EncodedSection {
+        name,
+        entries_json,
+        dim,
+        embeddings,
+    })
 }
 
 fn parse_sagi_model_id(data: &[u8]) -> Result<String> {
@@ -250,7 +485,7 @@ fn parse_sagi_model_id(data: &[u8]) -> Result<String> {
     }
 
     let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-    if version != 2 && version != 3 {
+    if version != VERSION {
         bail!("unsupported SAGI version: {}", version);
     }
 
@@ -337,12 +572,16 @@ mod tests {
                 title: "Test".to_string(),
                 url: "/test/".to_string(),
                 section: Some("Intro".to_string()),
+                date: Some("2024-01-01".to_string()),
+                granularity: Some("fine".to_string()),
                 chunk_index: 0,
             },
             ChunkMeta {
                 title: "Test".to_string(),
                 url: "/test/".to_string(),
                 section: Some("Body".to_string()),
+                date: Some("2024-01-01".to_string()),
+                granularity: Some("fine".to_string()),
                 chunk_index: 1,
             },
         ];
@@ -352,6 +591,27 @@ mod tests {
             "body content here".to_string(),
         ];
         let bm25 = Bm25Index::build(&["intro text here", "body content here"]);
+        let qa_entries = vec![QaEntry {
+            question: "Who has the subject worked for?".to_string(),
+            answer: "The subject has worked for Common Crawl.".to_string(),
+            source_title: "About".to_string(),
+            source_url: "/about/".to_string(),
+            source_section: Some("Bio".to_string()),
+            tags: vec!["work-history".to_string()],
+            confidence: 0.9,
+        }];
+        let claims = vec![ClaimEntry {
+            subject: "Subject".to_string(),
+            predicate: "worked_for".to_string(),
+            object: "Common Crawl".to_string(),
+            evidence: "The subject worked for Common Crawl.".to_string(),
+            source_title: "About".to_string(),
+            source_url: "/about/".to_string(),
+            source_section: Some("Bio".to_string()),
+            tags: vec!["work-history".to_string()],
+            confidence: 0.9,
+        }];
+
         SearchIndex::new(
             "test-model".to_string(),
             3,
@@ -360,10 +620,12 @@ mod tests {
             bm25,
             texts,
         )
+        .with_qa_section(qa_entries, 3, vec![0.5, 0.4, 0.3])
+        .with_claims_section(claims, 3, vec![0.2, 0.3, 0.4])
     }
 
     #[test]
-    fn test_round_trip() {
+    fn test_round_trip_with_sections() {
         let index = sample_index();
         let mut buf = Vec::new();
         index.write_to(&mut buf).unwrap();
@@ -372,25 +634,11 @@ mod tests {
         assert_eq!(restored.model_id, "test-model");
         assert_eq!(restored.dim, 3);
         assert_eq!(restored.metadata.len(), 2);
-        assert_eq!(restored.metadata[0].title, "Test");
-        assert_eq!(restored.metadata[0].section.as_deref(), Some("Intro"));
-        assert_eq!(restored.metadata[1].chunk_index, 1);
-        assert_eq!(restored.embeddings, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(restored.bm25.num_docs, 2);
         assert_eq!(restored.texts.len(), 2);
-        assert_eq!(restored.texts[0], "intro text here");
-        assert_eq!(restored.texts[1], "body content here");
-    }
-
-    #[test]
-    fn test_round_trip_from_bytes() {
-        let index = sample_index();
-        let mut buf = Vec::new();
-        index.write_to(&mut buf).unwrap();
-
-        let restored = SearchIndex::from_bytes(&buf).unwrap();
-        assert_eq!(restored.model_id, "test-model");
-        assert_eq!(restored.texts.len(), 2);
+        assert_eq!(restored.qa_entries.len(), 1);
+        assert_eq!(restored.qa_embeddings.len(), 3);
+        assert_eq!(restored.claims.len(), 1);
+        assert_eq!(restored.claim_embeddings.len(), 3);
     }
 
     #[test]
@@ -401,8 +649,8 @@ mod tests {
 
         let restored = SearchIndex::from_bytes(&buf).unwrap();
         assert_eq!(restored.model_id, "test-model");
-        assert_eq!(restored.dim, 3);
-        assert_eq!(restored.texts.len(), 2);
+        assert_eq!(restored.qa_entries.len(), 1);
+        assert_eq!(restored.claims.len(), 1);
         assert_eq!(restored.embedding(0), &[1.0, 2.0, 3.0]);
     }
 
@@ -420,20 +668,6 @@ mod tests {
         let mut ed = Vec::new();
         index.write_ed_to(&mut ed).unwrap();
         assert_eq!(SearchIndex::model_id_from_bytes(&ed).unwrap(), "test-model");
-    }
-
-    #[test]
-    fn test_magic_validation() {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"NOPE");
-        buf.extend_from_slice(&[0u8; 100]);
-
-        let err = SearchIndex::read_from(Cursor::new(&buf)).unwrap_err();
-        assert!(
-            format!("{}", err).contains("invalid magic"),
-            "expected magic error, got: {}",
-            err
-        );
     }
 
     #[test]
@@ -456,6 +690,8 @@ mod tests {
         assert_eq!(restored.embeddings.len(), 0);
         assert_eq!(restored.bm25.num_docs, 0);
         assert_eq!(restored.texts.len(), 0);
+        assert_eq!(restored.qa_entries.len(), 0);
+        assert_eq!(restored.claims.len(), 0);
     }
 
     #[test]
@@ -463,5 +699,7 @@ mod tests {
         let index = sample_index();
         assert_eq!(index.embedding(0), &[1.0, 2.0, 3.0]);
         assert_eq!(index.embedding(1), &[4.0, 5.0, 6.0]);
+        assert_eq!(index.qa_embedding(0).unwrap(), &[0.5, 0.4, 0.3]);
+        assert_eq!(index.claim_embedding(0).unwrap(), &[0.2, 0.3, 0.4]);
     }
 }

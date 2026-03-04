@@ -29,9 +29,7 @@ impl Embedder {
         let api = Api::new().context("creating HuggingFace Hub API client")?;
         let repo = api.model(model_id.to_string());
 
-        let config_path = repo
-            .get("config.json")
-            .context("downloading config.json")?;
+        let config_path = repo.get("config.json").context("downloading config.json")?;
         let tokenizer_path = repo
             .get("tokenizer.json")
             .context("downloading tokenizer.json")?;
@@ -73,8 +71,7 @@ impl Embedder {
     ) -> Result<Self> {
         let device = Device::Cpu;
 
-        let config: Config =
-            serde_json::from_slice(config_bytes).context("parsing config.json")?;
+        let config: Config = serde_json::from_slice(config_bytes).context("parsing config.json")?;
 
         let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
             .map_err(|e| anyhow::anyhow!("tokenizer error: {}", e))?;
@@ -106,11 +103,9 @@ impl Embedder {
             let ids = encoding.get_ids();
             let attention = encoding.get_attention_mask();
 
-            let input_ids =
-                Tensor::new(ids, &self.device)?.unsqueeze(0)?;
+            let input_ids = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
             let token_type_ids = input_ids.zeros_like()?;
-            let attention_mask =
-                Tensor::new(attention, &self.device)?.unsqueeze(0)?;
+            let attention_mask = Tensor::new(attention, &self.device)?.unsqueeze(0)?;
 
             // Forward pass: [1, seq_len, hidden_size]
             let output = self
@@ -140,9 +135,7 @@ impl Embedder {
 /// Input shapes: output [batch, seq_len, hidden], mask [batch, seq_len].
 fn mean_pool(output: &Tensor, attention_mask: &Tensor) -> Result<Tensor> {
     // Expand mask to [batch, seq_len, 1] for broadcasting
-    let mask_expanded = attention_mask
-        .unsqueeze(2)?
-        .to_dtype(output.dtype())?;
+    let mask_expanded = attention_mask.unsqueeze(2)?.to_dtype(output.dtype())?;
 
     // Multiply and sum over seq_len dimension
     let masked = output.broadcast_mul(&mask_expanded)?;

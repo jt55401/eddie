@@ -7,6 +7,10 @@
   indexUrl = "/eddie/index.ed"
   position = "bottom-right"
   theme = "auto"
+  qaMode = "auto"
+  qaSubject = ""
+  topK = 8
+  answerTopK = 5
 
 [module]
   [module.hugoVersion]

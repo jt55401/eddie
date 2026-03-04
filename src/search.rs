@@ -30,7 +30,11 @@ pub fn search(index: &SearchIndex, query_embedding: &[f32], top_k: usize) -> Vec
         })
         .collect();
 
-    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     scored.truncate(top_k);
     scored
 }
@@ -55,6 +59,8 @@ mod tests {
                 title: format!("Doc {}", i),
                 url: format!("/doc-{}/", i),
                 section: None,
+                date: Some("2024-01-01".to_string()),
+                granularity: Some("fine".to_string()),
                 chunk_index: i,
             })
             .collect();
@@ -82,8 +88,8 @@ mod tests {
     fn test_search_top_k_ordering() {
         // Three 2D normalized vectors
         let index = make_index(vec![
-            vec![1.0, 0.0],  // doc 0: points right
-            vec![0.0, 1.0],  // doc 1: points up
+            vec![1.0, 0.0],     // doc 0: points right
+            vec![0.0, 1.0],     // doc 1: points up
             vec![0.707, 0.707], // doc 2: 45 degrees
         ]);
 
@@ -98,11 +104,7 @@ mod tests {
 
     #[test]
     fn test_search_top_k_truncation() {
-        let index = make_index(vec![
-            vec![1.0, 0.0],
-            vec![0.0, 1.0],
-            vec![0.707, 0.707],
-        ]);
+        let index = make_index(vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.707, 0.707]]);
         let query = vec![1.0, 0.0];
         let results = search(&index, &query, 1);
         assert_eq!(results.len(), 1);

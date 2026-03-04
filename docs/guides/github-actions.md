@@ -12,9 +12,17 @@ When you push a tag like `v0.2.1`, `release.yml` produces and uploads:
 
 - `eddie-linux-amd64`
 - `eddie.wasm`
+- `eddie.wasm.br`
+- `eddie.wasm.gz`
 - `eddie-wasm.js`
+- `eddie-wasm.js.br`
+- `eddie-wasm.js.gz`
 - `eddie-worker.js`
+- `eddie-worker.js.br`
+- `eddie-worker.js.gz`
 - `eddie-widget.js`
+- `eddie-widget.js.br`
+- `eddie-widget.js.gz`
 - `ASSET_SIZES.md`
 - `asset-sizes.csv`
 - `eddie-hugo-module.tar.gz`

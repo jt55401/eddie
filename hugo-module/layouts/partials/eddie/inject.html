@@ -6,11 +6,19 @@
 {{- $theme := $cfg.theme | default "auto" -}}
 {{- $offsetY := $cfg.offsetY | default 0 -}}
 {{- $offsetX := $cfg.offsetX | default 0 -}}
+{{- $qaMode := $cfg.qaMode | default "auto" -}}
+{{- $qaSubject := $cfg.qaSubject | default "" -}}
+{{- $topK := $cfg.topK | default 8 -}}
+{{- $answerTopK := $cfg.answerTopK | default 5 -}}
 <script src="{{ "eddie/eddie-widget.js" | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
         data-theme="{{ $theme }}"
         data-offset-y="{{ $offsetY }}"
         data-offset-x="{{ $offsetX }}"
+        data-qa-mode="{{ $qaMode }}"
+        data-qa-subject="{{ $qaSubject }}"
+        data-top-k="{{ $topK }}"
+        data-answer-top-k="{{ $answerTopK }}"
         defer></script>
 {{- end -}}

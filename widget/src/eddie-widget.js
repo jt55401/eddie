@@ -19,6 +19,21 @@
     return Number.isFinite(value) ? Math.trunc(value) : 0;
   }
 
+  function parseIntAttr(attrName, fallback) {
+    const raw = scriptEl.getAttribute(attrName);
+    if (raw == null || raw === "") return fallback;
+    const value = Number.parseInt(raw, 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function normalizeQaMode(raw) {
+    const value = (raw || "").toLowerCase();
+    if (value === "off" || value === "always" || value === "auto") {
+      return value;
+    }
+    return "auto";
+  }
+
   function normalizePosition(raw) {
     const value = (raw || "").toLowerCase();
     const allowed = new Set([
@@ -36,6 +51,10 @@
     theme: scriptEl.getAttribute("data-theme") || "auto",
     offsetY: parseOffsetPx("data-offset-y"),
     offsetX: parseOffsetPx("data-offset-x"),
+    qaMode: normalizeQaMode(scriptEl.getAttribute("data-qa-mode")),
+    qaSubject: (scriptEl.getAttribute("data-qa-subject") || "").toLowerCase(),
+    resultTopK: parseIntAttr("data-top-k", 8),
+    answerTopK: parseIntAttr("data-answer-top-k", 5),
   };
 
   const HEART_SPRITES = [
@@ -66,8 +85,11 @@
   let isOpen = false;
   let selectedIndex = -1;
   let currentResults = [];
+  let currentAnswer = null;
   let engineState = "idle"; // idle | loading | ready | error
   let lastHeartIndex = -1;
+  let activeRequestId = 0;
+  let searchPending = false;
 
   // -- DOM setup --
   const host = document.createElement("div");
@@ -292,6 +314,47 @@
       list-style: none;
     }
 
+    .sa-answer {
+      display: none;
+      border-bottom: 1px solid var(--sa-border);
+      background: var(--sa-bg-elevated);
+      padding: 12px 16px;
+      gap: 6px;
+      flex-direction: column;
+    }
+    .sa-answer.sa-visible {
+      display: flex;
+    }
+    .sa-answer-label {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--sa-text-muted);
+      font-family: var(--sa-font-mono);
+    }
+    .sa-answer-text {
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--sa-text);
+    }
+    .sa-answer-cites {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 2px;
+    }
+    .sa-answer-cite {
+      font-size: 11px;
+      color: var(--sa-accent);
+      text-decoration: none;
+      border: 1px solid var(--sa-border);
+      border-radius: 999px;
+      padding: 2px 8px;
+    }
+    .sa-answer-cite:hover {
+      border-color: var(--sa-accent);
+    }
+
     .sa-result {
       display: block;
       padding: 12px 16px;
@@ -507,6 +570,11 @@
   errorEl.className = "sa-error";
   modal.appendChild(errorEl);
 
+  // Answer area (experimental factual mode)
+  const answerEl = document.createElement("div");
+  answerEl.className = "sa-answer";
+  modal.appendChild(answerEl);
+
   // Results
   const resultsList = document.createElement("ul");
   resultsList.className = "sa-results";
@@ -675,23 +743,52 @@
   }
 
   function handleSearchResult(msg) {
+    if (msg.requestId !== activeRequestId) return;
     currentResults = msg.results || [];
+    currentAnswer = msg.answer || null;
+    searchPending = false;
+    maybeFinalizeQuery();
+  }
+
+  function maybeFinalizeQuery() {
+    if (searchPending) {
+      return;
+    }
+
     selectedIndex = -1;
+    showStatus(false);
     renderResults();
   }
 
   function handleError(msg) {
+    if (msg.requestId && msg.requestId !== activeRequestId) return;
     showError(msg.error || "Search failed");
   }
 
   function doSearch(query) {
     if (!worker || engineState !== "ready") return;
-    searchRequestId++;
+    searchRequestId += 1;
+    activeRequestId = searchRequestId;
+    currentResults = [];
+    currentAnswer = null;
+    const answerMode = shouldUseAnswerMode(query);
+    searchPending = true;
+
+    if (answerMode) {
+      statusText.textContent = "Searching and grounding answer...";
+      progressBar.classList.add("sa-progress-indeterminate");
+      progressFill.style.width = "";
+      showStatus(true);
+    }
+
     worker.postMessage({
       type: "search",
-      requestId: searchRequestId,
+      requestId: activeRequestId,
       query: query,
-      topK: 8,
+      topK: config.resultTopK,
+      answerTopK: config.answerTopK,
+      answerMode: answerMode,
+      qaSubject: config.qaSubject || "",
       mode: "hybrid",
     });
   }
@@ -700,6 +797,7 @@
   function renderResults() {
     resultsList.textContent = "";
     errorEl.classList.remove("sa-visible");
+    renderAnswer();
 
     if (currentResults.length === 0 && input.value.trim()) {
       const empty = document.createElement("div");
@@ -726,7 +824,11 @@
       urlEl.textContent = r.url;
       li.appendChild(urlEl);
 
-      if (r.section) {
+      if (
+        r.section &&
+        r.section !== "Semantic Segment" &&
+        r.section !== "Summary Lane"
+      ) {
         const sectionEl = document.createElement("div");
         sectionEl.className = "sa-result-section";
         sectionEl.textContent = r.section;
@@ -775,8 +877,11 @@
 
   function clearResults() {
     currentResults = [];
+    currentAnswer = null;
     selectedIndex = -1;
+    searchPending = false;
     resultsList.textContent = "";
+    answerEl.classList.remove("sa-visible");
   }
 
   function applyTriggerOffsets() {
@@ -866,6 +971,59 @@
   function showError(message) {
     errorEl.textContent = message;
     errorEl.classList.add("sa-visible");
+  }
+
+  function shouldUseAnswerMode(query) {
+    if (config.qaMode === "off") return false;
+    if (config.qaMode === "always") return true;
+    return looksFactualQuery(query);
+  }
+
+  function looksFactualQuery(query) {
+    const q = query.toLowerCase().trim();
+    if (!q) return false;
+    if (q.includes("?")) return true;
+    if (/^(who|what|when|where|why|how|does|do|is|are|can|could|should)\b/i.test(q)) {
+      return true;
+    }
+    return q.split(/\s+/).length >= 5;
+  }
+
+  function renderAnswer() {
+    answerEl.textContent = "";
+    if (!currentAnswer || !currentAnswer.text) {
+      answerEl.classList.remove("sa-visible");
+      return;
+    }
+
+    const label = document.createElement("div");
+    label.className = "sa-answer-label";
+    label.textContent = "Experimental Answer";
+    answerEl.appendChild(label);
+
+    const text = document.createElement("div");
+    text.className = "sa-answer-text";
+    text.textContent = currentAnswer.text;
+    answerEl.appendChild(text);
+
+    if (currentAnswer.citations && currentAnswer.citations.length > 0) {
+      const cites = document.createElement("div");
+      cites.className = "sa-answer-cites";
+      currentAnswer.citations.slice(0, 3).forEach((url) => {
+        const a = document.createElement("a");
+        a.className = "sa-answer-cite";
+        a.href = url;
+        a.textContent = "source";
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          navigateToResult({ url: url });
+        });
+        cites.appendChild(a);
+      });
+      answerEl.appendChild(cites);
+    }
+
+    answerEl.classList.add("sa-visible");
   }
 
   // -- Global keyboard shortcut: Ctrl+K or Cmd+K --
