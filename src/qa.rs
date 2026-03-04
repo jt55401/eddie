@@ -210,16 +210,31 @@ fn extract_claim_backed_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
     }
 
     let mut worked_for = Vec::new();
+    let mut skills = Vec::new();
     for claim in claims {
         if claim.predicate == "worked_for" && !worked_for.contains(&claim.object) {
             worked_for.push(claim.object);
+            continue;
+        }
+        if claim.predicate == "has_skill" && !skills.contains(&claim.object) {
+            out.push(make_entry(
+                format!("Does {} know {}?", SUBJECT_LABEL, claim.object),
+                format!("{} has skill in {}.", SUBJECT_LABEL, claim.object),
+                meta,
+                vec!["claim-backed".to_string(), "skills".to_string()],
+                0.8,
+            ));
+            skills.push(claim.object);
             continue;
         }
 
         if let Some(activity) = claim.predicate.strip_prefix("years_") {
             out.push(make_entry(
                 format!("How many years has {} been {}?", SUBJECT_LABEL, activity),
-                format!("{} has been {} for {}.", SUBJECT_LABEL, activity, claim.object),
+                format!(
+                    "{} has been {} for {}.",
+                    SUBJECT_LABEL, activity, claim.object
+                ),
                 meta,
                 vec!["claim-backed".to_string(), "experience".to_string()],
                 0.82,
@@ -244,10 +259,23 @@ fn extract_claim_backed_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
     if !worked_for.is_empty() {
         out.push(make_entry(
             format!("Who has {} worked for?", SUBJECT_LABEL),
-            format!("{} has worked for {}.", SUBJECT_LABEL, worked_for.join(", ")),
+            format!(
+                "{} has worked for {}.",
+                SUBJECT_LABEL,
+                worked_for.join(", ")
+            ),
             meta,
             vec!["claim-backed".to_string(), "work-history".to_string()],
             0.86,
+        ));
+    }
+    if !skills.is_empty() {
+        out.push(make_entry(
+            format!("What skills does {} have?", SUBJECT_LABEL),
+            format!("{} has skills in {}.", SUBJECT_LABEL, skills.join(", ")),
+            meta,
+            vec!["claim-backed".to_string(), "skills".to_string()],
+            0.82,
         ));
     }
 

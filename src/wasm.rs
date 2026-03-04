@@ -325,8 +325,14 @@ fn truncate_snippet(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn query_qa_hits_with_vec(engine: &SearchEngine, query_vec: &[f32], top_k: usize) -> Vec<WasmQaHit> {
-    if engine.index.qa_entries.is_empty() || engine.index.qa_embeddings.is_empty() || engine.index.qa_dim == 0
+fn query_qa_hits_with_vec(
+    engine: &SearchEngine,
+    query_vec: &[f32],
+    top_k: usize,
+) -> Vec<WasmQaHit> {
+    if engine.index.qa_entries.is_empty()
+        || engine.index.qa_embeddings.is_empty()
+        || engine.index.qa_dim == 0
     {
         return Vec::new();
     }
@@ -353,7 +359,9 @@ fn query_claim_hits_with_vec(
     query_vec: &[f32],
     top_k: usize,
 ) -> Vec<WasmClaimHit> {
-    if engine.index.claims.is_empty() || engine.index.claim_embeddings.is_empty() || engine.index.claim_dim == 0
+    if engine.index.claims.is_empty()
+        || engine.index.claim_embeddings.is_empty()
+        || engine.index.claim_dim == 0
     {
         return Vec::new();
     }
@@ -395,6 +403,7 @@ struct EvidenceItem {
     text: String,
     url: String,
     raw_score: f64,
+    predicate: Option<String>,
 }
 
 #[derive(Clone)]
@@ -404,6 +413,20 @@ struct ScoredEvidence {
     url: String,
     score: f64,
     matched: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryIntent {
+    Knowledge,
+    WorkHistory,
+    Duration,
+    Generic,
+}
+
+struct QueryAnalysis {
+    terms: Vec<String>,
+    intent: QueryIntent,
+    yes_no: bool,
 }
 
 fn synthesize_answer(
@@ -418,10 +441,10 @@ fn synthesize_answer(
         return None;
     }
 
-    let query_terms = query_tokens(query, qa_subject);
+    let analysis = analyze_query(query, qa_subject);
     let mut ranked: Vec<ScoredEvidence> = evidence
         .into_iter()
-        .map(|item| score_evidence(item, &query_terms))
+        .map(|item| score_evidence(item, &analysis))
         .collect();
     ranked.sort_by(|a, b| {
         b.score
@@ -429,7 +452,7 @@ fn synthesize_answer(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let picked = select_answer_evidence(&ranked, &query_terms);
+    let picked = select_answer_evidence(&ranked, &analysis);
     if picked.is_empty() {
         return Some(WasmAnswer {
             text: "I couldn't find strong evidence for that in the current index.".to_string(),
@@ -469,7 +492,7 @@ fn collect_evidence(
 ) -> Vec<EvidenceItem> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    let mut push = |lane: &str, text: &str, url: &str, raw_score: f64| {
+    let mut push = |lane: &str, text: &str, url: &str, raw_score: f64, predicate: Option<&str>| {
         let clean = normalize_ws(text);
         if clean.is_empty() {
             return;
@@ -482,7 +505,12 @@ fn collect_evidence(
             lane: lane.to_string(),
             text: clean,
             url: url.to_string(),
-            raw_score: if raw_score.is_finite() { raw_score } else { 0.0 },
+            raw_score: if raw_score.is_finite() {
+                raw_score
+            } else {
+                0.0
+            },
+            predicate: predicate.map(|p| p.to_string()),
         });
     };
 
@@ -492,12 +520,18 @@ fn collect_evidence(
         } else {
             &hit.question
         };
-        push("qa", text, &hit.source_url, hit.score);
+        push("qa", text, &hit.source_url, hit.score, None);
     }
 
     for hit in claim_hits.iter().take(12) {
         let sentence = claim_to_sentence(hit);
-        push("claims", &sentence, &hit.source_url, hit.score);
+        push(
+            "claims",
+            &sentence,
+            &hit.source_url,
+            hit.score,
+            Some(hit.predicate.as_str()),
+        );
     }
 
     for hit in search_hits.iter().take(12) {
@@ -506,7 +540,7 @@ fn collect_evidence(
         } else {
             &hit.title
         };
-        push("search", text, &hit.url, hit.score);
+        push("search", text, &hit.url, hit.score, None);
     }
 
     out
@@ -521,6 +555,9 @@ fn claim_to_sentence(hit: &WasmClaimHit) -> String {
 
     if predicate == "worked_for" {
         return format!("Worked for {}.", object).trim().to_string();
+    }
+    if predicate == "has_skill" {
+        return format!("Has skill {}.", object).trim().to_string();
     }
     if let Some(activity) = predicate.strip_prefix("years_") {
         let activity = activity.replace('_', " ");
@@ -541,20 +578,34 @@ fn claim_to_sentence(hit: &WasmClaimHit) -> String {
         .join(" ")
 }
 
+fn analyze_query(query: &str, qa_subject: &str) -> QueryAnalysis {
+    let lower = normalize_query_for_parse(query);
+    QueryAnalysis {
+        terms: query_tokens(query, qa_subject),
+        intent: detect_query_intent(&lower),
+        yes_no: is_yes_no_question(&lower),
+    }
+}
+
 fn query_tokens(query: &str, qa_subject: &str) -> Vec<String> {
     let stop_words: HashSet<&'static str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "do", "does",
-        "did", "has", "have", "had", "in", "on", "at", "of", "to", "for", "with", "and",
-        "or", "by", "from", "as", "it", "this", "that", "who", "what", "when", "where",
-        "why", "how", "many", "long", "since", "years", "know",
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+        "has", "have", "had", "in", "on", "at", "of", "to", "for", "with", "and", "or", "by",
+        "from", "as", "it", "this", "that", "who", "what", "when", "where", "why", "how", "many",
+        "long", "since", "years", "know",
     ]
     .into_iter()
     .collect();
 
-    let mut subject_terms = HashSet::new();
+    let mut subject_terms: HashSet<String> = HashSet::new();
     for token in qa_subject.to_lowercase().split_whitespace() {
         if !token.is_empty() {
             subject_terms.insert(token.to_string());
+        }
+    }
+    for token in infer_subject_terms(query) {
+        if !token.is_empty() {
+            subject_terms.insert(token);
         }
     }
 
@@ -567,36 +618,64 @@ fn query_tokens(query: &str, qa_subject: &str) -> Vec<String> {
         }
     }
 
-    normalized
-        .split_whitespace()
-        .filter(|t| t.len() > 1)
-        .filter(|t| !stop_words.contains(*t))
-        .filter(|t| !subject_terms.contains(*t))
-        .map(|t| t.to_string())
-        .collect()
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for token in normalized.split_whitespace() {
+        for variant in expand_query_term(token) {
+            if variant.len() <= 1 {
+                continue;
+            }
+            if stop_words.contains(variant.as_str()) {
+                continue;
+            }
+            if subject_terms.contains(variant.as_str()) {
+                continue;
+            }
+            if seen.insert(variant.clone()) {
+                out.push(variant);
+            }
+        }
+    }
+
+    out
 }
 
-fn score_evidence(item: EvidenceItem, query_terms: &[String]) -> ScoredEvidence {
+fn score_evidence(item: EvidenceItem, query: &QueryAnalysis) -> ScoredEvidence {
     let hay = item.text.to_lowercase();
     let mut matched = Vec::new();
-    for term in query_terms {
+    for term in &query.terms {
         if hay.contains(term) {
             matched.push(term.clone());
         }
     }
 
-    let coverage = if query_terms.is_empty() {
+    let coverage = if query.terms.is_empty() {
         0.0
     } else {
-        matched.len() as f64 / query_terms.len() as f64
+        matched.len() as f64 / query.terms.len() as f64
     };
     let lane_weight = match item.lane.as_str() {
-        "qa" => 1.0,
+        "qa" => 0.95,
         "claims" => 0.9,
-        _ => 0.75,
+        _ => 0.8,
     };
     let raw = item.raw_score.clamp(0.0, 1.0);
-    let score = lane_weight + coverage * 1.2 + raw * 0.25;
+    let intent_bonus = intent_alignment_bonus(
+        query.intent,
+        item.lane.as_str(),
+        item.predicate.as_deref(),
+        hay.as_str(),
+    );
+    let yes_no_bonus = if query.yes_no && query.intent == QueryIntent::Knowledge {
+        match item.predicate.as_deref() {
+            Some("has_skill") => 0.22,
+            Some("worked_for") => -0.2,
+            _ => 0.0,
+        }
+    } else {
+        0.0
+    };
+    let score = lane_weight + coverage * 1.4 + raw * 0.25 + intent_bonus + yes_no_bonus;
 
     ScoredEvidence {
         lane: item.lane,
@@ -607,25 +686,36 @@ fn score_evidence(item: EvidenceItem, query_terms: &[String]) -> ScoredEvidence 
     }
 }
 
-fn select_answer_evidence(ranked: &[ScoredEvidence], query_terms: &[String]) -> Vec<ScoredEvidence> {
+fn select_answer_evidence(ranked: &[ScoredEvidence], query: &QueryAnalysis) -> Vec<ScoredEvidence> {
     if ranked.is_empty() {
         return Vec::new();
     }
-    if !query_terms.is_empty() && ranked.iter().all(|item| item.matched.is_empty()) {
+    if !query.terms.is_empty() && ranked.iter().all(|item| item.matched.is_empty()) {
         return Vec::new();
     }
 
+    let min_score = match query.intent {
+        QueryIntent::Knowledge => 1.1,
+        QueryIntent::WorkHistory | QueryIntent::Duration => 1.0,
+        QueryIntent::Generic => 0.95,
+    };
     let mut picked = Vec::new();
     let mut covered: HashSet<&str> = HashSet::new();
     for item in ranked {
         if picked.len() >= 2 {
             break;
         }
-        if !query_terms.is_empty() && item.matched.is_empty() {
+        if item.score < min_score {
+            continue;
+        }
+        if !query.terms.is_empty() && item.matched.is_empty() {
             continue;
         }
 
-        let adds_coverage = item.matched.iter().any(|term| !covered.contains(term.as_str()));
+        let adds_coverage = item
+            .matched
+            .iter()
+            .any(|term| !covered.contains(term.as_str()));
         if picked.is_empty() || adds_coverage {
             for term in &item.matched {
                 covered.insert(term);
@@ -637,10 +727,194 @@ fn select_answer_evidence(ranked: &[ScoredEvidence], query_terms: &[String]) -> 
     if !picked.is_empty() {
         return picked;
     }
-    if query_terms.is_empty() {
+    if query.terms.is_empty() && ranked[0].score >= min_score {
         return vec![ranked[0].clone()];
     }
     Vec::new()
+}
+
+fn normalize_query_for_parse(query: &str) -> String {
+    let mut out = String::new();
+    for ch in query.to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '+') {
+            out.push(ch);
+        } else {
+            out.push(' ');
+        }
+    }
+    normalize_ws(out.as_str())
+}
+
+fn detect_query_intent(lower_query: &str) -> QueryIntent {
+    let padded = format!(" {} ", lower_query);
+    if padded.contains(" worked for ")
+        || padded.contains(" worked at ")
+        || padded.contains(" employer ")
+        || padded.contains(" employers ")
+        || padded.contains(" companies ")
+        || padded.contains(" company ")
+    {
+        return QueryIntent::WorkHistory;
+    }
+    if padded.contains("how many years")
+        || padded.contains("how long")
+        || padded.contains("since age")
+        || padded.contains(" years has ")
+        || padded.contains(" years of ")
+    {
+        return QueryIntent::Duration;
+    }
+    if padded.contains(" know ")
+        || padded.contains(" knows ")
+        || padded.contains(" familiar with ")
+        || padded.contains(" proficient ")
+        || padded.contains(" skill ")
+        || padded.contains(" skills ")
+        || padded.contains(" expertise ")
+        || padded.contains(" experience with ")
+        || padded.contains(" use ")
+        || padded.contains(" uses ")
+    {
+        return QueryIntent::Knowledge;
+    }
+    QueryIntent::Generic
+}
+
+fn is_yes_no_question(lower_query: &str) -> bool {
+    lower_query.starts_with("does ")
+        || lower_query.starts_with("is ")
+        || lower_query.starts_with("can ")
+        || lower_query.starts_with("has ")
+        || lower_query.starts_with("have ")
+        || lower_query.starts_with("did ")
+}
+
+fn infer_subject_terms(query: &str) -> HashSet<String> {
+    let q = normalize_query_for_parse(query);
+    let mut terms = HashSet::new();
+    let patterns: [(&str, &[&str]); 8] = [
+        ("does ", &[" know ", " use ", " have ", " work ", " do "]),
+        ("is ", &[" familiar with ", " skilled in ", " good at "]),
+        ("who has ", &[" worked", " work "]),
+        ("how many years has ", &[" been "]),
+        ("how long has ", &[" been "]),
+        ("since what age has ", &[" been "]),
+        ("has ", &[" worked for ", " worked at "]),
+        ("what has ", &[" worked on ", " done "]),
+    ];
+
+    for (prefix, suffixes) in patterns {
+        if let Some(subject) = capture_between_any(&q, prefix, suffixes) {
+            for token in subject.split_whitespace() {
+                if token.len() > 1 {
+                    terms.insert(token.to_string());
+                }
+            }
+        }
+    }
+    terms
+}
+
+fn capture_between_any<'a>(input: &'a str, prefix: &str, suffixes: &[&str]) -> Option<&'a str> {
+    let rest = input.strip_prefix(prefix)?;
+    let mut best: Option<&str> = None;
+    let mut best_pos = usize::MAX;
+    for suffix in suffixes {
+        if let Some(pos) = rest.find(suffix) {
+            if pos < best_pos {
+                best = Some(rest[..pos].trim());
+                best_pos = pos;
+            }
+        }
+    }
+    best.filter(|s| !s.is_empty() && s.split_whitespace().count() <= 4)
+}
+
+fn expand_query_term(token: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let base = token.trim().to_string();
+    if base.is_empty() {
+        return out;
+    }
+    out.push(base.clone());
+
+    if base.contains('-') || base.contains('/') || base.contains('_') {
+        let compact = base.replace(['-', '/', '_'], "");
+        if compact.len() > 1 {
+            out.push(compact);
+        }
+        for part in base.split(['-', '/', '_']) {
+            let p = part.trim();
+            if p.len() > 1 {
+                out.push(p.to_string());
+            }
+        }
+    }
+
+    out
+}
+
+fn intent_alignment_bonus(
+    intent: QueryIntent,
+    lane: &str,
+    predicate: Option<&str>,
+    text_lower: &str,
+) -> f64 {
+    let pred = predicate.unwrap_or_default();
+    match intent {
+        QueryIntent::Knowledge => {
+            if pred == "has_skill" {
+                return 0.95;
+            }
+            if pred == "worked_for" {
+                return -1.1;
+            }
+            if pred.starts_with("years_") || pred.starts_with("since_age_") {
+                return -0.45;
+            }
+            if text_lower.contains("worked for ") {
+                return -0.8;
+            }
+            if lane == "search" {
+                return 0.12;
+            }
+            if lane == "qa" {
+                return 0.16;
+            }
+            0.0
+        }
+        QueryIntent::WorkHistory => {
+            if pred == "worked_for" {
+                return 0.95;
+            }
+            if pred == "has_skill" {
+                return -0.7;
+            }
+            if pred.starts_with("years_") || pred.starts_with("since_age_") {
+                return -0.3;
+            }
+            if text_lower.contains("worked for ") {
+                return 0.45;
+            }
+            0.0
+        }
+        QueryIntent::Duration => {
+            if pred.starts_with("years_") || pred.starts_with("since_age_") {
+                return 0.95;
+            }
+            if pred == "worked_for" {
+                return -0.8;
+            }
+            if pred == "has_skill" {
+                return -0.4;
+            }
+            if text_lower.contains("years ") || text_lower.contains("since age ") {
+                return 0.35;
+            }
+            0.0
+        }
+        QueryIntent::Generic => 0.0,
+    }
 }
 
 fn normalize_answer_sentence(text: &str) -> String {
@@ -648,7 +922,8 @@ fn normalize_answer_sentence(text: &str) -> String {
     if clean.is_empty() {
         return String::new();
     }
-    if clean.ends_with('.') || clean.ends_with('!') || clean.ends_with('?') || clean.ends_with('…') {
+    if clean.ends_with('.') || clean.ends_with('!') || clean.ends_with('?') || clean.ends_with('…')
+    {
         return clean;
     }
     format!("{}.", clean)
@@ -733,4 +1008,42 @@ fn current_year_estimate() -> f64 {
     // Browser-safe clock source for wasm32.
     let millis = js_sys::Date::now();
     1970.0 + ((millis / 1000.0) / (365.2425 * 24.0 * 3600.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_terms_drop_subject_for_knowledge_question() {
+        let terms = query_tokens("does jason know k-means?", "");
+        assert!(terms.iter().any(|t| t == "k-means" || t == "kmeans"));
+        assert!(!terms.iter().any(|t| t == "jason"));
+    }
+
+    #[test]
+    fn knowledge_intent_penalizes_work_history_claims() {
+        let query = analyze_query("does jason know k-means?", "");
+        let score_work = score_evidence(
+            EvidenceItem {
+                lane: "claims".to_string(),
+                text: "Worked for Common Crawl.".to_string(),
+                url: "/about/".to_string(),
+                raw_score: 0.9,
+                predicate: Some("worked_for".to_string()),
+            },
+            &query,
+        );
+        let score_skill = score_evidence(
+            EvidenceItem {
+                lane: "claims".to_string(),
+                text: "Has skill K-Means.".to_string(),
+                url: "/skills/".to_string(),
+                raw_score: 0.6,
+                predicate: Some("has_skill".to_string()),
+            },
+            &query,
+        );
+        assert!(score_skill.score > score_work.score);
+    }
 }

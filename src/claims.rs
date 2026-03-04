@@ -112,6 +112,7 @@ pub fn extract_claims_from_chunk(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry
     out.extend(extract_experience_claims(text, meta));
     out.extend(extract_work_history_claims(text, meta));
     out.extend(extract_role_company_claims(text, meta));
+    out.extend(extract_skill_claims(text, meta));
     out
 }
 
@@ -376,6 +377,93 @@ fn extract_role_company_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> 
     out
 }
 
+fn extract_skill_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    let context = format!(
+        "{} {} {}",
+        meta.title.to_lowercase(),
+        meta.section.as_deref().unwrap_or("").to_lowercase(),
+        meta.url.to_lowercase(),
+    );
+    let text_lower = text.to_lowercase();
+    let skill_context = context.contains("skill")
+        || context.contains("technology")
+        || context.contains("tool")
+        || context.contains("framework")
+        || context.contains("language")
+        || context.contains("machine learning")
+        || context.contains("/skills/");
+    let lexical_hint = text_lower.contains("skills:")
+        || text_lower.contains("technologies:")
+        || text_lower.contains("tools:")
+        || text_lower.contains("frameworks:")
+        || text_lower.contains("languages:")
+        || text_lower.contains("experience with")
+        || text_lower.contains("familiar with")
+        || text_lower.contains("proficient in")
+        || text_lower.contains("knowledge of");
+
+    if !skill_context && !lexical_hint {
+        return out;
+    }
+
+    let bullet_re = Regex::new(r"(?m)^\s*[-*]\s+(?P<item>[^\n]{1,100})\s*$").unwrap();
+    for cap in bullet_re.captures_iter(text) {
+        let raw = cap.name("item").map(|m| m.as_str()).unwrap_or("");
+        if let Some(skill) = clean_skill_candidate(raw) {
+            push_skill_claim(
+                &mut out,
+                &mut seen,
+                skill,
+                raw,
+                meta,
+                vec!["skills".to_string(), "bullet-list".to_string()],
+                0.8,
+            );
+        }
+    }
+
+    let labeled_re =
+        Regex::new(r"(?im)\b(?:skills?|technologies|tools|frameworks?|languages?)\s*[:\-]\s*(?P<items>[^\n]{3,260})")
+            .unwrap();
+    for cap in labeled_re.captures_iter(text) {
+        let raw = cap.name("items").map(|m| m.as_str()).unwrap_or("");
+        for skill in split_skill_items(raw) {
+            push_skill_claim(
+                &mut out,
+                &mut seen,
+                skill.clone(),
+                raw,
+                meta,
+                vec!["skills".to_string(), "labeled-list".to_string()],
+                0.78,
+            );
+        }
+    }
+
+    let experience_re =
+        Regex::new(r"(?im)\b(?:experience with|familiar with|proficient in|knowledge of)\s+(?P<items>[^\n\.;]{3,220})")
+            .unwrap();
+    for cap in experience_re.captures_iter(text) {
+        let raw = cap.name("items").map(|m| m.as_str()).unwrap_or("");
+        for skill in split_skill_items(raw) {
+            push_skill_claim(
+                &mut out,
+                &mut seen,
+                skill.clone(),
+                raw,
+                meta,
+                vec!["skills".to_string(), "experience-phrase".to_string()],
+                0.74,
+            );
+        }
+    }
+
+    out
+}
+
 fn split_orgs(raw: &str) -> Vec<String> {
     raw.replace(" and ", ",")
         .replace(" & ", ",")
@@ -481,6 +569,99 @@ fn clean_org_candidate(input: &str) -> Option<String> {
     Some(s)
 }
 
+fn split_skill_items(raw: &str) -> Vec<String> {
+    raw.replace(" and ", ",")
+        .replace(" / ", ",")
+        .split(',')
+        .filter_map(clean_skill_candidate)
+        .collect()
+}
+
+fn clean_skill_candidate(input: &str) -> Option<String> {
+    let mut s = strip_markdown_link(input);
+    s = s.replace('`', "");
+    s = s
+        .trim()
+        .trim_matches(|c: char| {
+            c == '.'
+                || c == ';'
+                || c == ':'
+                || c == '-'
+                || c == '*'
+                || c == '('
+                || c == ')'
+                || c == '"'
+                || c == '\''
+        })
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        return None;
+    }
+
+    if s.len() > 48 || s.split_whitespace().count() > 6 {
+        return None;
+    }
+    let lower = s.to_lowercase();
+    if lower.contains("http://")
+        || lower.contains("https://")
+        || lower.starts_with("i have ")
+        || lower.starts_with("i've ")
+        || lower.contains(" years")
+        || lower.contains("age ")
+        || lower.contains("worked ")
+        || lower.contains("consult")
+    {
+        return None;
+    }
+
+    let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic());
+    if !has_alpha {
+        return None;
+    }
+
+    Some(normalize_ws(&s))
+}
+
+fn strip_markdown_link(input: &str) -> String {
+    let trimmed = input.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(')') {
+        return trimmed.to_string();
+    }
+    let Some(mid) = trimmed.find("](") else {
+        return trimmed.to_string();
+    };
+    let label = &trimmed[1..mid];
+    if label.trim().is_empty() {
+        return trimmed.to_string();
+    }
+    label.trim().to_string()
+}
+
+fn push_skill_claim(
+    out: &mut Vec<ClaimEntry>,
+    seen: &mut HashSet<String>,
+    skill: String,
+    evidence: &str,
+    meta: &ChunkMeta,
+    tags: Vec<String>,
+    confidence: f32,
+) {
+    let key = skill.to_lowercase();
+    if !seen.insert(key) {
+        return;
+    }
+    out.push(make_claim(
+        DEFAULT_SUBJECT.to_string(),
+        "has_skill".to_string(),
+        skill,
+        evidence,
+        meta,
+        tags,
+        confidence,
+    ));
+}
+
 fn make_claim(
     subject: String,
     predicate: String,
@@ -533,6 +714,10 @@ fn normalize_activity(activity: &str) -> &str {
         return "engineering";
     }
     ""
+}
+
+fn normalize_ws(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -659,5 +844,26 @@ confidence = 1.0
                 .iter()
                 .any(|c| c.predicate == "worked_for" && c.object == "Nike")
         );
+    }
+
+    #[test]
+    fn extract_skill_claims_from_skill_like_page() {
+        let mut m = meta();
+        m.title = "Machine Learning".to_string();
+        m.url = "/skills/machine-learning/".to_string();
+        let text = r#"
+* K-Means
+* Markov Models
+* Bayesian networks
+"#;
+        let claims = extract_claims_from_chunk(text, &m);
+        let skills: Vec<String> = claims
+            .iter()
+            .filter(|c| c.predicate == "has_skill")
+            .map(|c| c.object.clone())
+            .collect();
+        assert!(skills.iter().any(|s| s == "K-Means"));
+        assert!(skills.iter().any(|s| s == "Markov Models"));
+        assert!(skills.iter().any(|s| s == "Bayesian networks"));
     }
 }
