@@ -9,9 +9,7 @@ rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 
 echo "==> Downloading public Docusaurus template"
-git clone --depth 1 --filter=blob:none --sparse https://github.com/facebook/docusaurus.git "$WORKDIR/docusaurus-src"
-git -C "$WORKDIR/docusaurus-src" sparse-checkout set website
-cp -R "$WORKDIR/docusaurus-src/website" "$SITE_ROOT"
+npx create-docusaurus@latest "$SITE_ROOT" classic --javascript --package-manager npm --skip-install
 
 echo "==> Seeding Eddie voice content corpus"
 bash "$REPO_ROOT/integrations/docusaurus/tests/docker/seed-content.sh" "$SITE_ROOT"
