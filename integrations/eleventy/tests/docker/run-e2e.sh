@@ -29,14 +29,15 @@ echo "==> Indexing Eleventy content"
 "$REPO_ROOT/target/release/eddie" index \
   --cms eleventy \
   --content-dir "$SITE_ROOT/src" \
-  --output "$SITE_ROOT/src/assets/eddie/index.ed"
+  --output "$SITE_ROOT/public/eddie/index.ed"
 
 echo "==> Building Eleventy site"
 cd "$SITE_ROOT"
 npm run build
 
-echo "==> Starting Eleventy server"
-npx @11ty/eleventy --serve --port=8080 >/tmp/eleventy-server.log 2>&1 &
+echo "==> Starting static site server"
+cd "$SITE_ROOT/_site"
+python3 -m http.server 8080 --bind 0.0.0.0 >/tmp/eleventy-server.log 2>&1 &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
@@ -47,7 +48,19 @@ for _ in $(seq 1 60); do
   sleep 2
 done
 
-curl -fsS http://127.0.0.1:8080 >/tmp/eleventy-home.html
-grep -q "eddie-widget.js" /tmp/eleventy-home.html
+if ! curl -fsS http://127.0.0.1:8080 >/tmp/eleventy-home.html; then
+  echo "Eleventy server did not come up. Recent logs:" >&2
+  tail -n 120 /tmp/eleventy-server.log >&2 || true
+  exit 1
+fi
+
+if ! grep -q "eddie-widget.js" /tmp/eleventy-home.html; then
+  echo "Eddie widget tag not found in Eleventy home page." >&2
+  echo "Recent home page excerpt:" >&2
+  head -n 120 /tmp/eleventy-home.html >&2 || true
+  echo "Checking generated assets:" >&2
+  find "$SITE_ROOT/_site" -maxdepth 4 -type f | grep -E "eddie|index.ed" >&2 || true
+  exit 1
+fi
 
 echo "Eleventy E2E passed"
