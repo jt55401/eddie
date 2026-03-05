@@ -8,9 +8,24 @@ mkdir -p "$SITE_DIR/assets/eddie"
 cp "$WIDGET_SRC" "$SITE_DIR/assets/eddie/eddie-widget.js"
 
 mkdir -p "$SITE_DIR/_includes"
-HEAD_CUSTOM="$SITE_DIR/_includes/head-custom.html"
-if ! grep -q "eddie-widget.js" "$HEAD_CUSTOM" 2>/dev/null; then
-  cat >> "$HEAD_CUSTOM" <<'HTML'
-<script defer src="/assets/eddie/eddie-widget.js"></script>
+HEAD_INCLUDE="$SITE_DIR/_includes/head.html"
+if [[ -f "$HEAD_INCLUDE" ]]; then
+  if ! grep -q "eddie-widget.js" "$HEAD_INCLUDE"; then
+    perl -0777 -i -pe 's#</head>#  <script defer src="/assets/eddie/eddie-widget.js"></script>\n</head>#s' "$HEAD_INCLUDE"
+  fi
+else
+  cat > "$HEAD_INCLUDE" <<'HTML'
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {%- seo -%}
+  <link rel="stylesheet" href="{{ "/assets/main.css" | relative_url }}">
+  {%- feed_meta -%}
+  {%- if jekyll.environment == 'production' and site.google_analytics -%}
+    {%- include google-analytics.html -%}
+  {%- endif -%}
+  <script defer src="/assets/eddie/eddie-widget.js"></script>
+</head>
 HTML
 fi

@@ -35,19 +35,19 @@ echo "==> Building Jekyll site"
 cd "$SITE_ROOT"
 bundle exec jekyll build
 
-echo "==> Starting Jekyll server"
-bundle exec jekyll serve --host 0.0.0.0 --port 4000 >/tmp/jekyll-server.log 2>&1 &
+echo "==> Starting static site server"
+cd "$SITE_ROOT/_site"
+python3 -m http.server 4000 --bind 0.0.0.0 >/tmp/jekyll-server.log 2>&1 &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
-for _ in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:4000 >/tmp/jekyll-home.html; then
-    break
-  fi
-  sleep 2
-done
+sleep 2
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+  echo "Jekyll static server did not stay running. Recent logs:" >&2
+  tail -n 120 /tmp/jekyll-server.log >&2 || true
+  exit 1
+fi
 
-curl -fsS http://127.0.0.1:4000 >/tmp/jekyll-home.html
-grep -q "eddie-widget.js" /tmp/jekyll-home.html
+grep -q "eddie-widget.js" "$SITE_ROOT/_site/index.html"
 
 echo "Jekyll E2E passed"
