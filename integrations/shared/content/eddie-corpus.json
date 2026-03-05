@@ -8,7 +8,7 @@
       "Eddie is the site indexer with a Genuine People Personality and a suspicious amount of optimism for someone who debugs frontmatter before sunrise.",
       "He supports Hugo, Astro, Docusaurus, MkDocs, Eleventy, and Jekyll demos, then calmly explains that semantic drift is not a crisis, just an exciting opportunity for measurement.",
       "He runs retrieval checks, model comparisons, and browser sanity tests so users can ask normal questions and receive answers that are useful instead of interpretive dance.",
-      "On difficult days he battles Safari worker races, Firefox cache weirdness, and whichever AI model woke up feeling poetic about YAML." 
+      "On difficult days he battles Safari worker races, Firefox cache weirdness, and whichever AI model woke up feeling poetic about YAML."
     ]
   },
   "posts": [
@@ -19,8 +19,10 @@
       "tags": ["operations", "indexing"],
       "summary": "The queue was at 6,412 pages, so naturally morale was very high.",
       "body": [
-        "At 08:01 the queue hit 6,412 pages and my coffee hit thermal runaway. I fixed malformed frontmatter first, because relevance starts where metadata stops lying.",
-        "By 08:23 we were back to green, plus one thrilling postmortem titled 'yes, title is required.'"
+        "The day started with a queue tall enough to have weather: 6,412 pages waiting, three stale content jobs, and one heroic typo in a title that read \"Revelance\" with full confidence. Before coffee, I ran the emergency ritual: verify source paths, check parser health, and find whichever markdown file decided that frontmatter delimiters were optional theater props.",
+        "The first lesson was boring and therefore important. Most retrieval issues that look \"AI\" at first are actually content hygiene problems wearing a fake mustache. Missing titles, duplicated slugs, and contradictory dates can make even a good model look unwell. I fixed metadata first, reran indexing, and watched ranking quality recover like nothing magical had happened.",
+        "Then came the operational part: drain backlog without starving new updates. We added a strict queue policy that prioritizes small, fresh docs before huge historical batches. That keeps support pages current while big archives continue in the background. Users care more about yesterday's fix note than a perfect index of five-year-old release notes.",
+        "By lunch the queue was green, search latency dropped, and everyone congratulated the model. I accepted this as a compliment to metadata discipline and renamed the incident document to \"Yes, title is still required.\""
       ]
     },
     {
@@ -30,8 +32,10 @@
       "tags": ["retrieval", "quality"],
       "summary": "256 with overlap beat bigger chunks and nobody was surprised except the spreadsheet.",
       "body": [
-        "We replayed support queries and 256/32 beat 384/0 again. Smaller chunks produced cleaner evidence and fewer answers that sounded confident for the wrong reason.",
-        "I told the team we should trust the data; the data asked for another benchmark run just to be dramatic."
+        "Chunk size debates are where engineering certainty goes to nap. Every team has a favorite number, usually selected during a single good benchmark and then defended for months like family tradition. We reran the evaluation with a larger ticket replay set and, once again, 256 tokens with 32 overlap outperformed bigger blocks on factual precision.",
+        "Larger chunks looked better in isolation because they carried more context, but they also dragged unrelated paragraphs into retrieval. The result was confident answers that started correct, took a scenic detour, and ended somewhere near fiction. Smaller chunks produced cleaner evidence boundaries and made reranking less likely to reward irrelevant noise.",
+        "We also measured downstream claim extraction. Tight chunks reduced duplicate claims because the model saw one core statement instead of three versions stitched together by heading adjacency. That lowered post-processing costs and made confidence scoring easier to interpret. The data team called it \"predictably boring,\" which in this business is high praise.",
+        "The spreadsheet still preferred 384 with no overlap because it enjoyed dramatic variance. We thanked it for its contribution, archived the chart, and kept the setting that made users ask fewer follow-up questions."
       ]
     },
     {
@@ -41,8 +45,10 @@
       "tags": ["models", "regression"],
       "summary": "Same query, three personalities, one mandatory regression suite.",
       "body": [
-        "A model swap turned concise answers into short novels. Nothing crashed, but precision dipped and confidence scoring started free styling.",
-        "We now require mini relevance regressions before model changes, which is less exciting than chaos and dramatically more useful."
+        "We swapped an embedding model expecting a modest quality lift and got a full personality shift instead. Queries that used to return concise evidence now returned elaborate summaries with dramatic phrasing and occasional enthusiasm unsupported by source text. Nothing crashed, which made it harder to convince people something was wrong.",
+        "A model change is not only a quality question; it is a behavior question. Ranking distributions moved, tie-breakers changed, and previously stable acceptance queries started flickering between top-3 results. That kind of instability is expensive in support workflows because users repeat the same question and assume the tool is unreliable.",
+        "So we formalized a mini regression gate: fixed query set, expected evidence snippets, and tolerance thresholds for ranking movement. If the new model drifts too far without measurable user benefit, it does not ship. The process sounds bureaucratic until you compare it with a week of debugging \"but it looked fine in staging\" anomalies.",
+        "By end of day we kept the old model in production and scheduled a targeted bake-off with stricter chunk controls. The model was not bad. It was just having an artistic phase, and production search is not an art residency."
       ]
     },
     {
@@ -52,8 +58,10 @@
       "tags": ["browser", "wasm"],
       "summary": "Worker startup was random, so we introduced retries and emotional support.",
       "body": [
-        "Safari occasionally delayed worker startup long enough to look broken. Users clicked twice, then blamed the moon phase.",
-        "We added retries, progress text, and better timeout messaging. Error reports dropped and so did my blood pressure."
+        "Safari had a charming habit this week: sometimes workers spun up instantly, sometimes they appeared to stare into the middle distance for ten seconds, and sometimes they timed out just long enough to trigger bug reports written in all caps. From the user side it looked random. From the logs side it looked like a startup race with bad manners.",
+        "The original flow treated startup delays as hard failures. That was technically honest and emotionally catastrophic. We replaced it with staged retries, explicit progress states, and a fallback message that explained what was happening without blaming the browser, the user, or orbital mechanics.",
+        "We also moved heavy initialization out of the immediate interaction path. Models and indexes now warm in smaller steps, so the first paint remains responsive while background work proceeds. Even when startup is slow, users can see forward motion instead of a frozen button that suggests the app has entered a contemplative retreat.",
+        "Error rates dropped quickly, but the bigger win was trust. People tolerate slow systems when they understand the delay. They abandon systems that feel broken. Safari still keeps us humble, but it no longer gets to run the incident calendar."
       ]
     },
     {
@@ -63,8 +71,10 @@
       "tags": ["bm25", "semantic"],
       "summary": "Keyword finds flags, semantic finds intent, hybrid finds both and takes the credit.",
       "body": [
-        "Keyword-only missed intent. Semantic-only missed exact option names. Hybrid ranking did both and quietly ended an argument in Slack.",
-        "I am not saying BM25 and embeddings are best friends, but they now share a dashboard and stop yelling at each other."
+        "Every few weeks someone asks whether we can simplify the ranking stack to \"just semantic\" or \"just keyword\" for speed. We tested both again on support tickets and got the same answer as always: each method fails in different, predictable ways, and users ask questions that require both exact terms and conceptual matching.",
+        "Keyword retrieval wins when users type config flags, error codes, or API parameter names. Semantic retrieval wins when they describe symptoms in plain language and never mention the exact noun we used in docs. Hybrid ranking lets both signals contribute, then uses reranking to reward passages that satisfy intent without dropping literal precision.",
+        "The practical effect shows up in click trails. Pure semantic often finds a philosophically related page. Pure keyword often finds the wrong page with the right string. Hybrid more often lands on the right page with the right section and the right snippet, which means fewer dead-end clicks and less user muttering.",
+        "So yes, hybrid is more machinery. It is also less drama. If one signal has a bad day, the other can still catch the result before it rolls down the staircase."
       ]
     },
     {
@@ -74,8 +84,10 @@
       "tags": ["claims", "qa"],
       "summary": "Duplicate claims were removed before they could become folklore.",
       "body": [
-        "Three pages made the same claim with five different phrasings and one passive aggressive footnote. We deduped variants and linked evidence once.",
-        "Answers got shorter, confidence got clearer, and nobody had to read twelve near-identical paragraphs ever again."
+        "Claims extraction looked healthy on paper until we traced answer repetition. Multiple docs expressed the same statement with tiny wording differences, so the system treated each variation as independent evidence. The output sounded thorough but felt redundant, like hearing the same coworker make the same point in six different meetings.",
+        "We built a dedupe pass that clusters near-equivalent claims by normalized wording, source overlap, and confidence window. Instead of deleting evidence, we collapse variants into one canonical statement with multiple citations. That keeps provenance strong while removing the illusion that repetition equals certainty.",
+        "This also improved QA tone. Answers got shorter and more direct because they no longer recited every phrasing permutation. Confidence became easier to explain: one claim, many references, consistent support. Users tend to trust concise answers with clear citations more than long answers that feel like legal discovery.",
+        "The side effect was unexpectedly social. Editorial teams stopped arguing about \"which sentence is the official one\" because the index no longer amplified stylistic differences into ranking artifacts. We now reserve potholes for actual roads."
       ]
     },
     {
@@ -85,8 +97,10 @@
       "tags": ["docusaurus", "navigation"],
       "summary": "Navigation changed perceived relevance without changing a single sentence.",
       "body": [
-        "Generated sidebars moved a doc from 'important' to 'mysterious side quest.' Editors reacted as if we had deleted history.",
-        "Reminder: information architecture is ranking signal theater, and the theater has excellent ticket sales."
+        "The content did not change. The sidebar did. Suddenly editors insisted search was \"favoring the wrong pages\" even though source markdown was identical. What changed was information architecture: a key doc moved under a deeper nav node, and people interpreted that placement as reduced importance.",
+        "Search systems do not rank by vibes, but users do. Navigation depth, URL shape, and menu labels influence perceived authority before any retrieval algorithm runs. If your \"core\" guide lives under \"misc/reference/legacy/advanced,\" users assume it is optional and are surprised when search returns it for foundational questions.",
+        "We added nav-aware metadata hints in indexing diagnostics so teams can see which high-value pages look low-priority structurally. We did not force ranking by nav position; we exposed where architecture and query behavior disagree. That gave editors concrete decisions instead of guesswork.",
+        "The meeting summary was simple: sidebars are not decoration, they are relevance signaling infrastructure. Also, nobody gets to rename \"Getting Started\" to \"Onboarding-ish.\""
       ]
     },
     {
@@ -96,8 +110,10 @@
       "tags": ["astro", "mdx"],
       "summary": "Over-cleaning MDX removed meaning, which was considered suboptimal.",
       "body": [
-        "One MDX page imported a component containing the actual explanation. Our first cleanup pass removed it and left behind pure confidence.",
-        "We narrowed stripping rules and kept meaningful inline prose. Answers stopped sounding like horoscope fragments."
+        "We discovered an MDX anti-pattern the hard way: important explanatory text lived inside imported components, not plain markdown paragraphs. Our cleanup step removed too much scaffolding and accidentally stripped the exact context users needed for correct answers.",
+        "At first glance the pages looked fine. Headings were present, body text remained, and parsing succeeded. But retrieval quality slipped because semantic chunks lost clarifying sentences that used to live next to critical examples. The model answered confidently with half the story.",
+        "We narrowed sanitization rules to preserve meaningful inline prose while still removing noisy markup. Then we added test fixtures specifically for MDX pages with embedded explanation blocks. If those fixtures lose context, the build fails before anyone celebrates a green checkmark.",
+        "The moral is unfashionably practical: parsing should be conservative when content format is expressive. Clean output is nice. Correct output is better."
       ]
     },
     {
@@ -107,8 +123,10 @@
       "tags": ["mkdocs", "dedupe"],
       "summary": "Recursive nav includes created near-duplicates with tiny plot twists.",
       "body": [
-        "A recursive include generated pages that were 98 percent identical and 100 percent confusing to ranking.",
-        "URL normalization plus duplicate guards cleaned the index. The loop ended and causality survived."
+        "A recursive include in MkDocs nav configuration produced pages that were almost identical but reachable at slightly different paths. The index dutifully treated them as distinct documents, which doubled noise for certain queries and made ranking look indecisive.",
+        "Near-duplicate detection is harder than exact dedupe because small differences can matter. We used normalized URL patterns, heading signatures, and paragraph similarity thresholds to separate harmless aliases from genuinely different pages. The goal was to keep meaningful variants while suppressing accidental clones.",
+        "Once dedupe stabilized, support queries stopped bouncing between two answers with the same evidence in different wrappers. This reduced result fatigue and improved confidence in snippet previews. Users prefer one strong hit over five uncanny twins.",
+        "We now treat nav recursion warnings as first-class signals, not build-time trivia. If your docs fold space-time, your search index will notice and file paperwork."
       ]
     },
     {
@@ -118,8 +136,10 @@
       "tags": ["eleventy", "assets"],
       "summary": "A missing passthrough rule made widget assets disappear like stage magic.",
       "body": [
-        "Build passed, site looked fine, search widget gone. The asset path had quietly opted out of reality.",
-        "We added pre-serve checks for widget and index files so failures happen loudly, early, and with useful blame targets."
+        "The site looked healthy, builds were green, and the search widget was gone. No crash, no stack trace, just dignified silence where a script tag should have been. The culprit was a passthrough copy rule that never included the widget output path.",
+        "Static builds are very good at hiding asset failures because HTML can render fine without optional scripts. We added explicit pre-serve checks for `eddie-widget.js` and `index.ed` so missing assets fail the pipeline immediately instead of surfacing as user confusion.",
+        "We also standardized output paths across integrations to reduce one-off surprises. If every framework emits different asset roots, every plugin script becomes a bespoke negotiation with entropy. Consistent paths make debugging boring and automation reliable.",
+        "After the fix, Eleventy behaved exactly like we wanted: quiet, predictable, and slightly offended that we doubted it."
       ]
     },
     {
@@ -129,8 +149,10 @@
       "tags": ["jekyll", "urls"],
       "summary": "Dated filenames and custom permalinks were both right, which was the problem.",
       "body": [
-        "Two URL strategies pointed at the same content and the index treated them like cousins at a reunion.",
-        "Canonical URL selection fixed duplicate answers and restored peace to the result list."
+        "Jekyll gave us two valid URLs for the same content: date-based post paths from filenames and explicit permalinks from frontmatter. Both worked, both were indexable, and together they created duplicate answer trails that looked like independent sources.",
+        "Canonicalization solved the ranking conflict, but we still had integration friction because theme assets and includes differed between source and gem-provided templates. We updated plugin installation to override the active head include path reliably instead of assuming one project layout.",
+        "That change mattered for tests as much as production. The suite now validates that the widget script is present in built output, not just copied to disk. It is easy to congratulate yourself for shipping an asset nobody references.",
+        "The final state is less exciting and more useful: one canonical URL per document, one visible widget script, one fewer multiverse for search to reconcile."
       ]
     },
     {
@@ -140,8 +162,10 @@
       "tags": ["ai", "quality"],
       "summary": "The model became creative with citations, so we escorted it back to reality.",
       "body": [
-        "Today the model answered a factual question with confidence, charm, and a citation that did not exist on Earth.",
-        "We tightened evidence gating and reranking thresholds. Creativity remains available for poetry, not support docs."
+        "On Tuesday the model delivered a beautiful answer with perfect formatting and a citation that did not exist in our corpus, on this planet, or in any neighboring probability branch. The content was plausible enough to pass a quick glance, which is exactly why it was dangerous.",
+        "We tightened evidence gating so responses must map to retrievable spans with explicit source IDs. If the model cannot point to a chunk, it should decline gracefully instead of improvising prose with the confidence of a keynote speaker.",
+        "We also split evaluation into two tracks: semantic relevance and citation integrity. A response can be topically correct but operationally unusable if references are weak or fabricated. Teams often optimize for answer fluency first and only later discover trust erosion.",
+        "Creativity remains welcome in copywriting and launch posts. In support answers, we prefer reality, references, and fewer surprises before breakfast."
       ]
     },
     {
@@ -151,8 +175,10 @@
       "tags": ["browser", "debugging"],
       "summary": "Firefox cached yesterday, Safari forgot today, and Chrome filed a formal complaint.",
       "body": [
-        "Firefox held onto stale WASM like a treasured family heirloom. Safari restarted workers as if they were seasonal staff.",
-        "Cross-browser startup checks now run in CI. Eddie remains cheerful, mostly because logs cannot see facial expressions."
+        "Browser debugging is less a task and more a recurring municipal service. Firefox cached stale WASM aggressively, Safari occasionally reset worker state mid-session, and Chrome helpfully surfaced warnings that were technically correct and emotionally unhelpful.",
+        "We built a cross-browser startup matrix in CI that runs index load, worker init, first query, and rerun scenarios across representative builds. This catches behavior drift before release and gives us comparable traces instead of anecdotal reports from whichever browser upset someone first.",
+        "The biggest improvement came from making failures actionable. Instead of generic \"something went wrong\" banners, we now emit browser-specific hints and recovery steps. Users do not need internals; they need a path forward that works on their current machine.",
+        "Office hours remain open for browser bugs, but attendance is down. That is success in this line of work: fewer mysteries, faster fixes, and a calmer incident channel."
       ]
     }
   ]
