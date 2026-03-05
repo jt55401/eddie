@@ -1,7 +1,7 @@
 FROM rust:1.87-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git curl ca-certificates perl \
+ && apt-get install -y --no-install-recommends git curl ca-certificates python3 perl \
  && rm -rf /var/lib/apt/lists/*
 
 RUN HUGO_VERSION=0.126.1 \
