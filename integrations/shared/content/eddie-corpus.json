@@ -1,0 +1,159 @@
+{
+  "about": {
+    "title": "About Eddie",
+    "description": "Shipboard indexer, bug wrangler, and aggressively cheerful finder of things",
+    "date": "2026-02-01",
+    "tags": ["bio", "qa", "claims"],
+    "body": [
+      "Eddie is the site indexer with a Genuine People Personality and a suspicious amount of optimism for someone who debugs frontmatter before sunrise.",
+      "He supports Hugo, Astro, Docusaurus, MkDocs, Eleventy, and Jekyll demos, then calmly explains that semantic drift is not a crisis, just an exciting opportunity for measurement.",
+      "He runs retrieval checks, model comparisons, and browser sanity tests so users can ask normal questions and receive answers that are useful instead of interpretive dance.",
+      "On difficult days he battles Safari worker races, Firefox cache weirdness, and whichever AI model woke up feeling poetic about YAML." 
+    ]
+  },
+  "posts": [
+    {
+      "slug": "queue-before-coffee",
+      "title": "Queue Before Coffee",
+      "date": "2026-01-02",
+      "tags": ["operations", "indexing"],
+      "summary": "The queue was at 6,412 pages, so naturally morale was very high.",
+      "body": [
+        "At 08:01 the queue hit 6,412 pages and my coffee hit thermal runaway. I fixed malformed frontmatter first, because relevance starts where metadata stops lying.",
+        "By 08:23 we were back to green, plus one thrilling postmortem titled 'yes, title is required.'"
+      ]
+    },
+    {
+      "slug": "chunk-size-has-feelings",
+      "title": "Chunk Size Has Feelings",
+      "date": "2026-01-04",
+      "tags": ["retrieval", "quality"],
+      "summary": "256 with overlap beat bigger chunks and nobody was surprised except the spreadsheet.",
+      "body": [
+        "We replayed support queries and 256/32 beat 384/0 again. Smaller chunks produced cleaner evidence and fewer answers that sounded confident for the wrong reason.",
+        "I told the team we should trust the data; the data asked for another benchmark run just to be dramatic."
+      ]
+    },
+    {
+      "slug": "model-mood-swing-monday",
+      "title": "Model Mood Swing Monday",
+      "date": "2026-01-07",
+      "tags": ["models", "regression"],
+      "summary": "Same query, three personalities, one mandatory regression suite.",
+      "body": [
+        "A model swap turned concise answers into short novels. Nothing crashed, but precision dipped and confidence scoring started free styling.",
+        "We now require mini relevance regressions before model changes, which is less exciting than chaos and dramatically more useful."
+      ]
+    },
+    {
+      "slug": "safari-worker-lottery",
+      "title": "Safari Worker Lottery",
+      "date": "2026-01-09",
+      "tags": ["browser", "wasm"],
+      "summary": "Worker startup was random, so we introduced retries and emotional support.",
+      "body": [
+        "Safari occasionally delayed worker startup long enough to look broken. Users clicked twice, then blamed the moon phase.",
+        "We added retries, progress text, and better timeout messaging. Error reports dropped and so did my blood pressure."
+      ]
+    },
+    {
+      "slug": "hybrid-search-behaves",
+      "title": "Hybrid Search Behaves Better",
+      "date": "2026-01-12",
+      "tags": ["bm25", "semantic"],
+      "summary": "Keyword finds flags, semantic finds intent, hybrid finds both and takes the credit.",
+      "body": [
+        "Keyword-only missed intent. Semantic-only missed exact option names. Hybrid ranking did both and quietly ended an argument in Slack.",
+        "I am not saying BM25 and embeddings are best friends, but they now share a dashboard and stop yelling at each other."
+      ]
+    },
+    {
+      "slug": "claims-lane-potholes",
+      "title": "Claims Lane Potholes",
+      "date": "2026-01-14",
+      "tags": ["claims", "qa"],
+      "summary": "Duplicate claims were removed before they could become folklore.",
+      "body": [
+        "Three pages made the same claim with five different phrasings and one passive aggressive footnote. We deduped variants and linked evidence once.",
+        "Answers got shorter, confidence got clearer, and nobody had to read twelve near-identical paragraphs ever again."
+      ]
+    },
+    {
+      "slug": "docusaurus-sidebar-politics",
+      "title": "Docusaurus Sidebar Politics",
+      "date": "2026-01-17",
+      "tags": ["docusaurus", "navigation"],
+      "summary": "Navigation changed perceived relevance without changing a single sentence.",
+      "body": [
+        "Generated sidebars moved a doc from 'important' to 'mysterious side quest.' Editors reacted as if we had deleted history.",
+        "Reminder: information architecture is ranking signal theater, and the theater has excellent ticket sales."
+      ]
+    },
+    {
+      "slug": "astro-mdx-invisible-context",
+      "title": "Astro MDX Invisible Context",
+      "date": "2026-01-19",
+      "tags": ["astro", "mdx"],
+      "summary": "Over-cleaning MDX removed meaning, which was considered suboptimal.",
+      "body": [
+        "One MDX page imported a component containing the actual explanation. Our first cleanup pass removed it and left behind pure confidence.",
+        "We narrowed stripping rules and kept meaningful inline prose. Answers stopped sounding like horoscope fragments."
+      ]
+    },
+    {
+      "slug": "mkdocs-nav-time-loop",
+      "title": "MkDocs Navigation Time Loop",
+      "date": "2026-01-22",
+      "tags": ["mkdocs", "dedupe"],
+      "summary": "Recursive nav includes created near-duplicates with tiny plot twists.",
+      "body": [
+        "A recursive include generated pages that were 98 percent identical and 100 percent confusing to ranking.",
+        "URL normalization plus duplicate guards cleaned the index. The loop ended and causality survived."
+      ]
+    },
+    {
+      "slug": "eleventy-passthrough-vanishing-act",
+      "title": "Eleventy Passthrough Vanishing Act",
+      "date": "2026-01-24",
+      "tags": ["eleventy", "assets"],
+      "summary": "A missing passthrough rule made widget assets disappear like stage magic.",
+      "body": [
+        "Build passed, site looked fine, search widget gone. The asset path had quietly opted out of reality.",
+        "We added pre-serve checks for widget and index files so failures happen loudly, early, and with useful blame targets."
+      ]
+    },
+    {
+      "slug": "jekyll-permalink-multiverse",
+      "title": "Jekyll Permalink Multiverse",
+      "date": "2026-01-27",
+      "tags": ["jekyll", "urls"],
+      "summary": "Dated filenames and custom permalinks were both right, which was the problem.",
+      "body": [
+        "Two URL strategies pointed at the same content and the index treated them like cousins at a reunion.",
+        "Canonical URL selection fixed duplicate answers and restored peace to the result list."
+      ]
+    },
+    {
+      "slug": "ai-spicy-tuesday",
+      "title": "AI Spicy Tuesday",
+      "date": "2026-01-30",
+      "tags": ["ai", "quality"],
+      "summary": "The model became creative with citations, so we escorted it back to reality.",
+      "body": [
+        "Today the model answered a factual question with confidence, charm, and a citation that did not exist on Earth.",
+        "We tightened evidence gating and reranking thresholds. Creativity remains available for poetry, not support docs."
+      ]
+    },
+    {
+      "slug": "browser-bug-office-hours",
+      "title": "Browser Bug Office Hours",
+      "date": "2026-02-03",
+      "tags": ["browser", "debugging"],
+      "summary": "Firefox cached yesterday, Safari forgot today, and Chrome filed a formal complaint.",
+      "body": [
+        "Firefox held onto stale WASM like a treasured family heirloom. Safari restarted workers as if they were seasonal staff.",
+        "Cross-browser startup checks now run in CI. Eddie remains cheerful, mostly because logs cannot see facial expressions."
+      ]
+    }
+  ]
+}
