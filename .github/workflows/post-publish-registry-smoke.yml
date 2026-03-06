@@ -116,7 +116,7 @@ jobs:
               wait_for_npm "@jt55401/eddie-eleventy"
               ;;
             mkdocs)
-              wait_for_pypi "eddie-cli"
+              wait_for_pypi "jt55401-eddie-cli"
               wait_for_pypi "eddie-mkdocs"
               ;;
             jekyll)

@@ -37,7 +37,9 @@ def resolve_asset() -> str:
 
 
 def package_version() -> str:
-    return os.environ.get("EDDIE_CLI_VERSION") or importlib.metadata.version("eddie-cli")
+    return os.environ.get("EDDIE_CLI_VERSION") or importlib.metadata.version(
+        "jt55401-eddie-cli"
+    )
 
 
 def cache_root() -> Path:

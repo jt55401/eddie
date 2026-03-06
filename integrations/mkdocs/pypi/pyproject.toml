@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only"
 ]
 dependencies = [
-  "eddie-cli>=0.2.0,<0.3.0"
+  "jt55401-eddie-cli>=0.2.0,<0.3.0"
 ]
 
 [project.scripts]

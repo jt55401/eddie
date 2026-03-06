@@ -85,7 +85,7 @@ For each PyPI project, add a trusted publisher that matches:
 
 At minimum this now includes:
 
-- `eddie-cli`
+- `jt55401-eddie-cli`
 - `eddie-mkdocs`
 
 ### RubyGems

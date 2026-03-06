@@ -1,6 +1,6 @@
-# eddie-cli
+# jt55401-eddie-cli
 
-`eddie-cli` exposes the `eddie` command for Python-based workflows.
+`jt55401-eddie-cli` exposes the `eddie` command for Python-based workflows.
 
 On first run it downloads the native Eddie binary for this package version from:
 
@@ -9,7 +9,7 @@ On first run it downloads the native Eddie binary for this package version from:
 ## Usage
 
 ```bash
-python -m pip install eddie-cli==0.2.0
+python -m pip install jt55401-eddie-cli==0.2.0
 eddie --help
 eddie index --cms mkdocs --content-dir docs --output docs/eddie/index.ed
 ```
