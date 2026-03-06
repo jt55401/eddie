@@ -1,0 +1,104 @@
+name: Publish PyPI Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      package_path:
+        description: "Optional single package path containing pyproject.toml or setup.py"
+        required: false
+        type: string
+      dry_run:
+        description: "Build and validate with twine check only"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve publish targets
+        id: matrix
+        env:
+          INPUT_PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${INPUT_PACKAGE_PATH:-}" ]]; then
+            MATRIX="$(jq -cn --arg path "$INPUT_PACKAGE_PATH" '[{"path":$path}]')"
+          else
+            MATRIX="$(jq -c '.pypi // []' .github/publish-packages.json)"
+          fi
+
+          COUNT="$(echo "$MATRIX" | jq 'length')"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Resolved PyPI publish targets: $COUNT"
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate package path
+        run: |
+          set -euo pipefail
+          if [[ ! -f "${{ matrix.path }}/pyproject.toml" && ! -f "${{ matrix.path }}/setup.py" ]]; then
+            echo "Expected pyproject.toml or setup.py under ${{ matrix.path }}" >&2
+            exit 1
+          fi
+
+      - name: Build distribution
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Publish distribution to PyPI
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: ${{ matrix.path }}/dist
+
+      - name: Dry run complete
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+        run: echo "Dry run enabled; distribution built and validated, publish step skipped."
+
+  no-packages:
+    needs: plan
+    if: needs.plan.outputs.count == '0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No PyPI publish targets configured
+        run: echo "No PyPI packages configured in .github/publish-packages.json (or via workflow_dispatch input)."

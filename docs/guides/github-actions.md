@@ -1,10 +1,15 @@
 # GitHub Actions Guide
 
-This repository ships three workflows:
+This repository ships six workflows:
 
 - `ci.yml`: runs Rust tests and verifies widget build output on pushes and pull requests.
 - `release.yml`: builds release artifacts for Eddie and publishes them on `v*` tags.
 - `publish-hugo-module.yml`: optionally syncs `hugo-module/` to `jt55401/eddie-hugo`.
+- `publish-npm.yml`: publishes npm packages with trusted publishing (OIDC).
+- `publish-pypi.yml`: publishes PyPI packages with trusted publishing (OIDC).
+- `publish-rubygems.yml`: publishes gems with trusted publishing (OIDC).
+
+See also: [Package Publishing Guide](package-publishing.md) for setup details.
 
 ## Release artifacts
 

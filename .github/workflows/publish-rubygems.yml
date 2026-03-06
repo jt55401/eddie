@@ -1,0 +1,124 @@
+name: Publish RubyGems Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      package_path:
+        description: "Optional single package path containing a .gemspec"
+        required: false
+        type: string
+      dry_run:
+        description: "Build gem only; skip gem push"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve publish targets
+        id: matrix
+        env:
+          INPUT_PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${INPUT_PACKAGE_PATH:-}" ]]; then
+            MATRIX="$(jq -cn --arg path "$INPUT_PACKAGE_PATH" '[{"path":$path}]')"
+          else
+            MATRIX="$(jq -c '.rubygems // []' .github/publish-packages.json)"
+          fi
+
+          COUNT="$(echo "$MATRIX" | jq 'length')"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Resolved RubyGems publish targets: $COUNT"
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "ruby"
+
+      - name: Validate package path
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          COUNT="$(find . -maxdepth 1 -type f -name '*.gemspec' | wc -l | tr -d ' ')"
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "No .gemspec found in ${{ matrix.path }}" >&2
+            exit 1
+          fi
+          if [[ "$COUNT" -gt 1 ]]; then
+            echo "Multiple .gemspec files found in ${{ matrix.path }}; keep one per publish target." >&2
+            exit 1
+          fi
+
+      - name: Install gem dependencies
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          if [[ -f Gemfile ]]; then
+            bundle install --jobs 4 --retry 3
+          fi
+
+      - name: Build gem artifact
+        id: build
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          GEMSPEC="$(find . -maxdepth 1 -type f -name '*.gemspec' | head -n1)"
+          gem build "$GEMSPEC"
+          GEM_FILE="$(ls -t ./*.gem | head -n1)"
+          echo "gem_file=$GEM_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Configure RubyGems credentials via OIDC
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        uses: rubygems/configure-rubygems-credentials@v1.0.0
+
+      - name: Publish gem to RubyGems.org
+        if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          gem push "${{ steps.build.outputs.gem_file }}"
+
+      - name: Dry run complete
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+        run: echo "Dry run enabled; gem was built but not pushed."
+
+  no-packages:
+    needs: plan
+    if: needs.plan.outputs.count == '0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No RubyGems publish targets configured
+        run: echo "No RubyGems packages configured in .github/publish-packages.json (or via workflow_dispatch input)."

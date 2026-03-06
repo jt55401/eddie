@@ -1,0 +1,102 @@
+name: Publish npm Packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      package_path:
+        description: "Optional single package path containing package.json"
+        required: false
+        type: string
+      dry_run:
+        description: "Run npm publish with --dry-run"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve publish targets
+        id: matrix
+        env:
+          INPUT_PACKAGE_PATH: ${{ github.event.inputs.package_path }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${INPUT_PACKAGE_PATH:-}" ]]; then
+            MATRIX="$(jq -cn --arg path "$INPUT_PACKAGE_PATH" '[{"path":$path}]')"
+          else
+            MATRIX="$(jq -c '.npm // []' .github/publish-packages.json)"
+          fi
+
+          COUNT="$(echo "$MATRIX" | jq 'length')"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Resolved npm publish targets: $COUNT"
+
+  publish:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate package path
+        run: test -f "${{ matrix.path }}/package.json"
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.path }}
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+            npm ci
+          else
+            npm install --no-package-lock
+          fi
+
+      - name: Publish package to npm
+        working-directory: ${{ matrix.path }}
+        env:
+          IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+        run: |
+          set -euo pipefail
+          if [[ "$IS_DRY_RUN" == "true" ]]; then
+            npm publish --access public --provenance --dry-run
+          else
+            npm publish --access public --provenance
+          fi
+
+  no-packages:
+    needs: plan
+    if: needs.plan.outputs.count == '0'
+    runs-on: ubuntu-latest
+    steps:
+      - name: No npm publish targets configured
+        run: echo "No npm packages configured in .github/publish-packages.json (or via workflow_dispatch input)."
