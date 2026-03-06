@@ -62,5 +62,8 @@ if ! grep -q "eddie-widget.js" /tmp/eleventy-home.html; then
   find "$SITE_ROOT/_site" -maxdepth 4 -type f | grep -E "eddie|index.ed" >&2 || true
   exit 1
 fi
+curl -fsS http://127.0.0.1:8080/eddie/eddie-worker.js >/tmp/eleventy-worker.js
+curl -fsS http://127.0.0.1:8080/eddie/eddie-wasm.js >/tmp/eleventy-wasm.js
+curl -fsS http://127.0.0.1:8080/eddie/eddie.wasm >/tmp/eleventy-engine.wasm
 
 echo "Eleventy E2E passed"

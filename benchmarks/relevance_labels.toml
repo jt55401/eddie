@@ -1,0 +1,144 @@
+# Human-maintainable relevance labels for deterministic retrieval metrics.
+# Edit `relevant_urls` and optional `graded_urls` as you refine expectations.
+#
+# URL matching is path-based and normalized (scheme/host ignored, trailing slash normalized).
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q001"
+relevant_urls = ["/tutorial/first-steps/"]
+graded_urls = { "/tutorial/first-steps/" = 3 }
+notes = "Create app instance."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q002"
+relevant_urls = ["/tutorial/path-params/"]
+graded_urls = { "/tutorial/path-params/" = 3 }
+notes = "Path parameters."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q003"
+relevant_urls = ["/tutorial/query-params/"]
+graded_urls = { "/tutorial/query-params/" = 3, "/tutorial/query-params-str-validations/" = 2 }
+notes = "Query params with defaults."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q004"
+relevant_urls = ["/tutorial/body/"]
+graded_urls = { "/tutorial/body/" = 3, "/tutorial/body-multiple-params/" = 2 }
+notes = "Pydantic request bodies."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q005"
+relevant_urls = ["/tutorial/dependencies/"]
+graded_urls = { "/tutorial/dependencies/" = 3, "/tutorial/dependencies/classes-as-dependencies/" = 2 }
+notes = "Depends / DI."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q006"
+relevant_urls = ["/tutorial/security/oauth2-jwt/"]
+graded_urls = { "/tutorial/security/oauth2-jwt/" = 3, "/tutorial/security/first-steps/" = 2 }
+notes = "OAuth2 password flow."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q007"
+relevant_urls = ["/tutorial/background-tasks/"]
+graded_urls = { "/tutorial/background-tasks/" = 3 }
+notes = "BackgroundTasks."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q008"
+relevant_urls = ["/tutorial/middleware/", "/tutorial/cors/"]
+graded_urls = { "/tutorial/middleware/" = 3, "/tutorial/cors/" = 2 }
+notes = "Middleware and CORS."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q009"
+relevant_urls = ["/tutorial/handling-errors/"]
+graded_urls = { "/tutorial/handling-errors/" = 3 }
+notes = "Custom exception handlers."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q010"
+relevant_urls = ["/tutorial/response-model/"]
+graded_urls = { "/tutorial/response-model/" = 3 }
+notes = "response_model and validation."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q011"
+relevant_urls = ["/tutorial/static-files/"]
+graded_urls = { "/tutorial/static-files/" = 3 }
+notes = "Serve static files."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q012"
+relevant_urls = ["/tutorial/request-files/"]
+graded_urls = { "/tutorial/request-files/" = 3 }
+notes = "File uploads."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q013"
+relevant_urls = ["/advanced/websockets/"]
+graded_urls = { "/advanced/websockets/" = 3 }
+notes = "WebSockets."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q014"
+relevant_urls = ["/tutorial/testing/"]
+graded_urls = { "/tutorial/testing/" = 3 }
+notes = "TestClient."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q015"
+relevant_urls = ["/deployment/"]
+graded_urls = { "/deployment/" = 3, "/deployment/server-workers/" = 2 }
+notes = "Deployment overview."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q016"
+relevant_urls = ["/advanced/events/"]
+graded_urls = { "/advanced/events/" = 3 }
+notes = "Lifespan, startup/shutdown."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q017"
+relevant_urls = ["/tutorial/cors/"]
+graded_urls = { "/tutorial/cors/" = 3, "/tutorial/middleware/" = 1 }
+notes = "CORS config."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q018"
+relevant_urls = ["/tutorial/cookie-params/", "/tutorial/header-params/"]
+graded_urls = { "/tutorial/cookie-params/" = 3, "/tutorial/header-params/" = 3 }
+notes = "Cookie and header parameters."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q019"
+relevant_urls = ["/tutorial/bigger-applications/"]
+graded_urls = { "/tutorial/bigger-applications/" = 3, "/tutorial/path-operation-configuration/" = 1 }
+notes = "APIRouter + include_router."
+
+[[labels]]
+dataset = "fastapi_docs"
+query_id = "q020"
+relevant_urls = ["/tutorial/metadata/"]
+graded_urls = { "/tutorial/metadata/" = 3 }
+notes = "OpenAPI docs / Swagger UI."

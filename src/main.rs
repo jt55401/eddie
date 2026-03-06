@@ -31,7 +31,7 @@ use eddie::qa::{
 };
 use eddie::search::search;
 
-const DEFAULT_MODEL: &str = "sentence-transformers/all-MiniLM-L6-v2";
+const DEFAULT_MODEL: &str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
 
 #[derive(Parser)]
 #[command(name = "eddie", about = "Semantic search indexer for static sites")]

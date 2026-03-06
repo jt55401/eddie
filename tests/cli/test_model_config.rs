@@ -11,7 +11,7 @@ fn index_help_shows_default_embedding_model() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
     assert!(
-        stdout.contains("sentence-transformers/all-MiniLM-L6-v2"),
+        stdout.contains("sentence-transformers/multi-qa-MiniLM-L6-cos-v1"),
         "expected default model in help output, got:\n{stdout}"
     );
 }

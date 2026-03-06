@@ -8,7 +8,7 @@ As the CLI indexer, I run a sentence-transformer model against each chunk to pro
 
 ## Key Fields/Parameters
 
-- model: configurable via `--model <name-or-path>` (default: `all-MiniLM-L6-v2`)
+- model: configurable via `--model <name-or-path>` (default: `multi-qa-MiniLM-L6-cos-v1`)
 - runtime: Candle (Rust) with safetensors weights
 - output: one float32 vector per chunk (384-dim for MiniLM)
 - model source: downloaded from HuggingFace Hub on first run, cached locally

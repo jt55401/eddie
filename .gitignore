@@ -7,5 +7,7 @@ pkg/
 !src/**/*.wasm
 .DS_Store
 .worktrees/
+.bench/
+__pycache__/
 hugo-module/static/eddie/*.js
 hugo-module/static/eddie/*.wasm

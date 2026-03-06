@@ -1,0 +1,88 @@
+[suite]
+name = "eddie-benchmark-v1"
+runs_per_combo = 2
+output_root = ".bench/results"
+cache_root = ".bench/cache"
+eddie_bin = "target/release/eddie"
+keep_indexes = false
+
+[index]
+chunk_size = 256
+overlap = 32
+chunk_strategy = "heading"
+summary_lane = false
+qa = false
+claims = false
+
+[search]
+mode = "hybrid"
+scope = "chunks"
+top_k = 5
+
+[judge]
+enabled = true
+model = "openai/gpt-4.1-mini"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+max_queries_per_combo = 12
+temperature = 0.0
+
+[query_generation]
+model = "openai/gpt-4.1"
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+queries_per_dataset = 30
+sample_files = 40
+sample_chars_per_file = 1200
+temperature = 0.1
+
+[relevance]
+enabled = true
+labels_file = "benchmarks/relevance_labels.toml"
+k_values = [1, 3, 5]
+ndcg_k = 5
+
+[[models]]
+id = "sentence-transformers/all-MiniLM-L6-v2"
+
+[[models]]
+id = "sentence-transformers/all-MiniLM-L12-v2"
+
+[[models]]
+id = "sentence-transformers/paraphrase-MiniLM-L6-v2"
+
+[[models]]
+id = "intfloat/e5-base-v2"
+
+[[models]]
+id = "BAAI/bge-base-en-v1.5"
+
+[[models]]
+id = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
+
+[[datasets]]
+id = "fastapi_docs"
+size_tier = "small"
+source = "git"
+repo = "https://github.com/tiangolo/fastapi.git"
+ref = "master"
+subdir = "docs/en/docs"
+query_file = "benchmarks/queries/fastapi_docs.json"
+
+[[datasets]]
+id = "kubernetes_docs"
+size_tier = "medium"
+source = "git"
+repo = "https://github.com/kubernetes/website.git"
+ref = "main"
+subdir = "content/en/docs"
+query_file = "benchmarks/queries/kubernetes_docs.json"
+
+[[datasets]]
+id = "azure_docs"
+size_tier = "large"
+source = "git"
+repo = "https://github.com/MicrosoftDocs/azure-docs.git"
+ref = "main"
+subdir = "articles"
+query_file = "benchmarks/queries/azure_docs.json"

@@ -10,7 +10,7 @@ As a site owner, I can choose which sentence-transformer model to use for embedd
 
 - config key: `embedding.model` in `eddie.toml`
 - CLI flag: `--model <huggingface-model-id>`
-- default: `sentence-transformers/all-MiniLM-L6-v2`
+- default: `sentence-transformers/multi-qa-MiniLM-L6-cos-v1`
 - the same model ID is used by both the CLI indexer and the browser WASM module
 
 ## Acceptance Criteria
@@ -30,7 +30,7 @@ As a site owner, I can choose which sentence-transformer model to use for embedd
 
 ## Licensing Notes
 
-The default model (`all-MiniLM-L6-v2`) is Apache 2.0 licensed but was trained on MS MARCO data which has non-commercial restrictions. Models are fetched from HuggingFace CDN at runtime (not redistributed by this project). Users concerned about training data provenance should consider alternatives:
+The default model (`multi-qa-MiniLM-L6-cos-v1`) is Apache 2.0 licensed and retrieval-focused. Models are fetched from HuggingFace CDN at runtime (not redistributed by this project). Users concerned about training data provenance should consider alternatives:
 
 - `BAAI/bge-small-en-v1.5` — MIT license, 33M params
 - `Snowflake/snowflake-arctic-embed-s` — Apache 2.0, 33M params

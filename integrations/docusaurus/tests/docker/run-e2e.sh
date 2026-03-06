@@ -49,5 +49,8 @@ done
 
 curl -fsS http://127.0.0.1:3000 >/tmp/docusaurus-home.html
 grep -q "eddie-widget.js" /tmp/docusaurus-home.html
+curl -fsS http://127.0.0.1:3000/eddie/eddie-worker.js >/tmp/docusaurus-worker.js
+curl -fsS http://127.0.0.1:3000/eddie/eddie-wasm.js >/tmp/docusaurus-wasm.js
+curl -fsS http://127.0.0.1:3000/eddie/eddie.wasm >/tmp/docusaurus-engine.wasm
 
 echo "Docusaurus E2E passed"

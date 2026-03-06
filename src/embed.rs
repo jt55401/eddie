@@ -102,6 +102,10 @@ impl Embedder {
 
             let ids = encoding.get_ids();
             let attention = encoding.get_attention_mask();
+            let max_len = self.config.max_position_embeddings.max(1);
+            let use_len = ids.len().min(max_len);
+            let ids = &ids[..use_len];
+            let attention = &attention[..use_len];
 
             let input_ids = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
             let token_type_ids = input_ids.zeros_like()?;

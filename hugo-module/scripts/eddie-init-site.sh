@@ -70,7 +70,7 @@ EDDIE_CONTENT_DIR=content
 EDDIE_OUTPUT=static/eddie/index.ed
 
 # Embedding/index settings
-EDDIE_MODEL=sentence-transformers/all-MiniLM-L6-v2
+EDDIE_MODEL=sentence-transformers/multi-qa-MiniLM-L6-cos-v1
 EDDIE_CHUNK_SIZE=256
 EDDIE_OVERLAP=32
 EDDIE_CHUNK_STRATEGY=heading
@@ -136,7 +136,7 @@ set +a
 BIN="${EDDIE_BIN:-eddie}"
 CONTENT_DIR="${EDDIE_CONTENT_DIR:-content}"
 OUTPUT_PATH="${EDDIE_OUTPUT:-static/eddie/index.ed}"
-MODEL="${EDDIE_MODEL:-sentence-transformers/all-MiniLM-L6-v2}"
+MODEL="${EDDIE_MODEL:-sentence-transformers/multi-qa-MiniLM-L6-cos-v1}"
 CHUNK_SIZE="${EDDIE_CHUNK_SIZE:-256}"
 OVERLAP="${EDDIE_OVERLAP:-32}"
 CHUNK_STRATEGY="${EDDIE_CHUNK_STRATEGY:-heading}"

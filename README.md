@@ -37,7 +37,27 @@ eddie index --content-dir content/ --output static/eddie/index.ed
 
 ### 3. Share and Enjoy
 
-Visitors see a floating search button. First search triggers a one-time model download (~23MB), then searches are instant. The answer to how long subsequent queries take is not 42 — it's closer to 42 milliseconds.
+Visitors see a floating search button. First search triggers a one-time model download (~87MB cache footprint with the default model), then searches are instant. The answer to how long subsequent queries take is not 42 — it's closer to 42 milliseconds.
+
+## CMS Demo Gallery
+
+Search-in-progress screenshots with Eddie installed on each supported CMS integration:
+
+| Hugo | Astro | Docusaurus |
+| --- | --- | --- |
+| <img src="assets/gallery/hugo-search-readme.png" alt="Eddie search on Hugo" width="320"> | <img src="assets/gallery/astro-search-readme.png" alt="Eddie search on Astro" width="320"> | <img src="assets/gallery/docusaurus-search-readme.png" alt="Eddie search on Docusaurus" width="320"> |
+
+| MkDocs | Eleventy | Jekyll |
+| --- | --- | --- |
+| <img src="assets/gallery/mkdocs-search-readme.png" alt="Eddie search on MkDocs" width="320"> | <img src="assets/gallery/eleventy-search-readme.png" alt="Eddie search on Eleventy" width="320"> | <img src="assets/gallery/jekyll-search-readme.png" alt="Eddie search on Jekyll" width="320"> |
+
+Refresh these screenshots with:
+
+```bash
+bash scripts/capture-cms-gallery.sh
+```
+
+See [docs/guides/cms-gallery.md](docs/guides/cms-gallery.md) for full workflow and options.
 
 ### Precompressed Runtime Assets
 
@@ -77,7 +97,7 @@ bash scripts/eddie-index.sh
 You can tune index quality by trading off build time:
 
 ```bash
-# Fast/default-ish
+# Fast profile
 EDDIE_MODEL=sentence-transformers/all-MiniLM-L6-v2
 EDDIE_CHUNK_SIZE=256
 EDDIE_OVERLAP=32
@@ -128,6 +148,60 @@ eddie tune \
   --content-dir content/ \
   --interactive \
   --save-eval eddie.acceptance.json
+```
+
+## Benchmark Suite (Tickets 8 + 14)
+
+Eddie now includes a configurable benchmark harness for model/dataset matrix runs.
+
+What it does:
+
+1. Caches benchmark corpora locally (git sparse checkouts, excluded from git).
+2. Runs clean index/search timing loops across any dataset/model combination.
+3. Optionally uses OpenRouter:
+   - larger model to generate stable query sets per dataset
+   - smaller model to judge retrieval quality for sampled queries
+4. Writes machine-friendly outputs (`CSV`, optional `Parquet`) plus markdown summary tables.
+5. Computes deterministic retrieval metrics (`Hit@k`, `MRR`, `nDCG@k`) from human-maintained labels in `benchmarks/relevance_labels.toml`.
+
+Default benchmark config: `benchmarks/benchmark.toml`
+Deterministic relevance labels: `benchmarks/relevance_labels.toml`
+
+Prepare datasets:
+
+```bash
+python3 scripts/benchmark_suite.py prepare
+```
+
+Generate stored query files (stable benchmark inputs):
+
+```bash
+export OPENROUTER_API_KEY=...
+python3 scripts/benchmark_suite.py generate-queries
+```
+
+Run full matrix:
+
+```bash
+python3 scripts/benchmark_suite.py run --generate-queries
+```
+
+Filter example (single dataset/model quick run):
+
+```bash
+python3 scripts/benchmark_suite.py run \
+  --dataset fastapi_docs \
+  --model sentence-transformers/multi-qa-MiniLM-L6-cos-v1 \
+  --runs-per-combo 1 \
+  --query-limit 10
+```
+
+Render benchmark table:
+
+```bash
+python3 scripts/benchmark_suite.py render-report .bench/results/<run_id>
+# or:
+python3 scripts/render_benchmark_report.py .bench/results/<run_id>
 ```
 
 ## Single `index.ed` With Sections
@@ -258,7 +332,7 @@ Create `eddie.toml` in your site root (optional — defaults are carefully chose
 
 ```toml
 [embedding]
-model = "sentence-transformers/all-MiniLM-L6-v2"
+model = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
 
 [qa]
 enabled = true
@@ -283,7 +357,7 @@ Use `offsetX`/`offsetY` (pixels, can be negative) to nudge the launcher away fro
 
 ### Embedding Model Alternatives
 
-The default model (`all-MiniLM-L6-v2`) is Apache 2.0 but was trained on MS MARCO data with non-commercial restrictions. Models are fetched from HuggingFace CDN at runtime — Eddie doesn't redistribute model weights. If training data provenance matters to you:
+The default model (`multi-qa-MiniLM-L6-cos-v1`) is Apache 2.0 and tuned for retrieval tasks. Models are fetched from HuggingFace CDN at runtime — Eddie doesn't redistribute model weights. If training data provenance matters to you:
 
 | Model | License | Params |
 |-------|---------|--------|

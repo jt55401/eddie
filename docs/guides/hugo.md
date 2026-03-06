@@ -45,7 +45,7 @@ This will:
 4. Strip Hugo shortcodes (`rawhtml`, `ref`, `certimage`, `mermaid`, `closing`, and any others)
 5. Strip markdown formatting to produce clean text
 6. Split content into chunks by section headings, with paragraph/sentence splitting for long sections
-7. Generate 384-dimensional embeddings using the `all-MiniLM-L6-v2` model (downloaded automatically from HuggingFace Hub on first run, ~23MB, cached)
+7. Generate 384-dimensional embeddings using the `multi-qa-MiniLM-L6-cos-v1` model (downloaded automatically from HuggingFace Hub on first run, ~87MB cached model footprint)
 8. Build a BM25 keyword index alongside the semantic embeddings
 9. Write a single Brotli-compressed Eddie index file (`.ed`)
 
@@ -55,7 +55,7 @@ This will:
 |------|---------|-------------|
 | `--content-dir` | (required) | Path to your Hugo `content/` directory |
 | `--output` | `index.ed` | Output path for the index file (`.ed` for Brotli-compressed format) |
-| `--model` | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace model ID |
+| `--model` | `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | HuggingFace model ID |
 | `--chunk-size` | `256` | Maximum tokens per chunk |
 | `--overlap` | `32` | Overlap tokens between consecutive chunks |
 
@@ -149,7 +149,7 @@ eddie search \
 | `--index` | (required) | Path to the index file |
 | `--query` | (required) | Search query text |
 | `--top-k` | `5` | Number of results to return |
-| `--model` | `sentence-transformers/all-MiniLM-L6-v2` | Must match the model used during indexing |
+| `--model` | `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | Must match the model used during indexing |
 | `--mode` | `hybrid` | Search mode: `semantic`, `keyword`, or `hybrid` |
 
 ## What gets indexed
@@ -176,7 +176,8 @@ The default model works well for general English content. For different needs:
 
 | Model | License | Dimensions | Notes |
 |-------|---------|------------|-------|
-| `sentence-transformers/all-MiniLM-L6-v2` | Apache 2.0 | 384 | Default, good balance of speed and quality |
+| `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | Apache 2.0 | 384 | Default, retrieval-focused quality profile |
+| `sentence-transformers/all-MiniLM-L6-v2` | Apache 2.0 | 384 | Faster indexing/query profile |
 | `BAAI/bge-small-en-v1.5` | MIT | 384 | MIT licensed alternative |
 | `Snowflake/snowflake-arctic-embed-s` | Apache 2.0 | 384 | Clean training data provenance |
 
@@ -194,7 +195,7 @@ eddie search --index index.ed --query "test" \
 
 ### First run is slow
 
-The embedding model (~23MB) is downloaded from HuggingFace Hub on first run and cached in `~/.cache/huggingface/`. Subsequent runs use the cache.
+The embedding model is downloaded from HuggingFace Hub on first run and cached in `~/.cache/huggingface/` (about ~87MB cached footprint with the default model). Subsequent runs use the cache.
 
 ### Model mismatch errors
 

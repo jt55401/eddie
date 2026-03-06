@@ -1,0 +1,151 @@
+{
+  "dataset_id": "fastapi_docs",
+  "size_tier": "small",
+  "generator_model": "manual-seeded",
+  "generated_at_utc": "2026-03-04T22:40:00Z",
+  "source_repo": "https://github.com/tiangolo/fastapi.git",
+  "source_ref": "master",
+  "source_revision": "cached",
+  "queries": [
+    {
+      "id": "q001",
+      "query": "how to create a FastAPI app instance",
+      "intent": "factual",
+      "difficulty": "easy",
+      "expected_terms": ["FastAPI()", "first steps"]
+    },
+    {
+      "id": "q002",
+      "query": "define path parameters in FastAPI",
+      "intent": "factual",
+      "difficulty": "easy",
+      "expected_terms": ["path parameters", "item_id"]
+    },
+    {
+      "id": "q003",
+      "query": "query parameters with default values in FastAPI",
+      "intent": "factual",
+      "difficulty": "easy",
+      "expected_terms": ["query parameters", "skip", "limit"]
+    },
+    {
+      "id": "q004",
+      "query": "request body models with pydantic in FastAPI",
+      "intent": "conceptual",
+      "difficulty": "easy",
+      "expected_terms": ["Pydantic", "BaseModel", "request body"]
+    },
+    {
+      "id": "q005",
+      "query": "how to use Depends dependency injection FastAPI",
+      "intent": "conceptual",
+      "difficulty": "medium",
+      "expected_terms": ["Depends", "dependencies"]
+    },
+    {
+      "id": "q006",
+      "query": "security OAuth2 password flow in FastAPI",
+      "intent": "troubleshooting",
+      "difficulty": "medium",
+      "expected_terms": ["OAuth2PasswordBearer", "token"]
+    },
+    {
+      "id": "q007",
+      "query": "background tasks in FastAPI",
+      "intent": "factual",
+      "difficulty": "medium",
+      "expected_terms": ["BackgroundTasks"]
+    },
+    {
+      "id": "q008",
+      "query": "middleware support in FastAPI",
+      "intent": "navigation",
+      "difficulty": "medium",
+      "expected_terms": ["middleware", "CORS"]
+    },
+    {
+      "id": "q009",
+      "query": "custom exception handlers FastAPI",
+      "intent": "troubleshooting",
+      "difficulty": "medium",
+      "expected_terms": ["exception handlers", "HTTPException"]
+    },
+    {
+      "id": "q010",
+      "query": "response model and validation FastAPI",
+      "intent": "conceptual",
+      "difficulty": "medium",
+      "expected_terms": ["response_model", "validation"]
+    },
+    {
+      "id": "q011",
+      "query": "how to serve static files in FastAPI",
+      "intent": "factual",
+      "difficulty": "medium",
+      "expected_terms": ["StaticFiles"]
+    },
+    {
+      "id": "q012",
+      "query": "file uploads with FastAPI",
+      "intent": "factual",
+      "difficulty": "medium",
+      "expected_terms": ["UploadFile", "File"]
+    },
+    {
+      "id": "q013",
+      "query": "websocket support in FastAPI",
+      "intent": "navigation",
+      "difficulty": "medium",
+      "expected_terms": ["WebSocket"]
+    },
+    {
+      "id": "q014",
+      "query": "testing FastAPI with TestClient",
+      "intent": "factual",
+      "difficulty": "easy",
+      "expected_terms": ["TestClient", "testing"]
+    },
+    {
+      "id": "q015",
+      "query": "deployment options for FastAPI",
+      "intent": "navigation",
+      "difficulty": "medium",
+      "expected_terms": ["deployment", "uvicorn", "gunicorn"]
+    },
+    {
+      "id": "q016",
+      "query": "lifespan events startup shutdown FastAPI",
+      "intent": "conceptual",
+      "difficulty": "hard",
+      "expected_terms": ["lifespan", "startup", "shutdown"]
+    },
+    {
+      "id": "q017",
+      "query": "cors configuration in FastAPI",
+      "intent": "troubleshooting",
+      "difficulty": "medium",
+      "expected_terms": ["CORS", "CORSMiddleware"]
+    },
+    {
+      "id": "q018",
+      "query": "cookie and header parameters in FastAPI",
+      "intent": "factual",
+      "difficulty": "medium",
+      "expected_terms": ["Cookie", "Header"]
+    },
+    {
+      "id": "q019",
+      "query": "how to include APIRouter in FastAPI app",
+      "intent": "factual",
+      "difficulty": "easy",
+      "expected_terms": ["APIRouter", "include_router"]
+    },
+    {
+      "id": "q020",
+      "query": "openapi docs and swagger ui in FastAPI",
+      "intent": "navigation",
+      "difficulty": "easy",
+      "expected_terms": ["OpenAPI", "Swagger UI", "docs"]
+    }
+  ]
+}
