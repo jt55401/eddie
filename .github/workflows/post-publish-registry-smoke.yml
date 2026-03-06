@@ -1,0 +1,169 @@
+name: Post-Publish Registry Smoke
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published package version without leading v (for example 0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        cms: [hugo, astro, docusaurus, mkdocs, eleventy, jekyll]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+
+          if [[ -z "$VERSION" ]]; then
+            echo "Unable to resolve package version." >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for published package availability
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          wait_for_npm() {
+            local pkg="$1"
+            local tries=50
+            for i in $(seq 1 "$tries"); do
+              local found
+              found="$(timeout 20s npm view "${pkg}@${VERSION}" version 2>/dev/null || true)"
+              if [[ "$found" == "$VERSION" ]]; then
+                echo "Found npm package ${pkg}@${VERSION}"
+                return 0
+              fi
+              sleep 6
+            done
+            echo "Timed out waiting for npm package ${pkg}@${VERSION}" >&2
+            return 1
+          }
+
+          wait_for_pypi() {
+            local pkg="$1"
+            local tries=50
+            for i in $(seq 1 "$tries"); do
+              local found
+              found="$(curl -fsS "https://pypi.org/pypi/${pkg}/json" 2>/dev/null | jq -r '.info.version' || true)"
+              if [[ "$found" == "$VERSION" ]]; then
+                echo "Found PyPI package ${pkg}==${VERSION}"
+                return 0
+              fi
+              sleep 6
+            done
+            echo "Timed out waiting for PyPI package ${pkg}==${VERSION}" >&2
+            return 1
+          }
+
+          wait_for_rubygems() {
+            local pkg="$1"
+            local tries=50
+            for i in $(seq 1 "$tries"); do
+              local found
+              found="$(curl -fsS "https://rubygems.org/api/v1/gems/${pkg}.json" 2>/dev/null | jq -r '.version' || true)"
+              if [[ "$found" == "$VERSION" ]]; then
+                echo "Found RubyGem ${pkg}-${VERSION}"
+                return 0
+              fi
+              sleep 6
+            done
+            echo "Timed out waiting for RubyGem ${pkg}-${VERSION}" >&2
+            return 1
+          }
+
+          case "${{ matrix.cms }}" in
+            hugo)
+              wait_for_npm "@jt55401/eddie-hugo"
+              ;;
+            astro)
+              wait_for_npm "@jt55401/eddie-astro"
+              ;;
+            docusaurus)
+              wait_for_npm "@jt55401/eddie-docusaurus"
+              ;;
+            eleventy)
+              wait_for_npm "@jt55401/eddie-eleventy"
+              ;;
+            mkdocs)
+              wait_for_pypi "eddie-mkdocs"
+              ;;
+            jekyll)
+              wait_for_rubygems "eddie-jekyll"
+              ;;
+            *)
+              echo "Unsupported CMS matrix value: ${{ matrix.cms }}" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Download release runtime assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          download_asset() {
+            local pattern="$1"
+            local tries=40
+            for i in $(seq 1 "$tries"); do
+              if gh release download "$TAG" --repo jt55401/eddie --pattern "$pattern" --dir dist --clobber >/dev/null 2>&1; then
+                return 0
+              fi
+              sleep 6
+            done
+            echo "Timed out downloading asset $pattern from release $TAG" >&2
+            return 1
+          }
+
+          download_asset "eddie.wasm"
+          download_asset "eddie-wasm.js"
+          download_asset "eddie-worker.js"
+          download_asset "eddie-widget.js"
+
+      - name: Build CMS E2E image
+        run: |
+          set -euo pipefail
+          docker build \
+            -f "integrations/${{ matrix.cms }}/tests/docker/Dockerfile" \
+            -t "eddie-${{ matrix.cms }}-registry-smoke" \
+            .
+
+      - name: Run registry smoke E2E
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/repo" \
+            -e EDDIE_INSTALL_SOURCE=registry \
+            -e EDDIE_PACKAGE_VERSION="$VERSION" \
+            "eddie-${{ matrix.cms }}-registry-smoke"

@@ -4,6 +4,43 @@ set -euo pipefail
 REPO_ROOT="/repo"
 WORKDIR="/tmp/astro-e2e"
 SITE_ROOT="$WORKDIR/site"
+INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
+PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
+
+npm_package_spec() {
+  local package_name="$1"
+  if [[ -n "$PACKAGE_VERSION" ]]; then
+    printf "%s@%s" "$package_name" "$PACKAGE_VERSION"
+  else
+    printf "%s" "$package_name"
+  fi
+}
+
+install_eddie_astro() {
+  case "$INSTALL_SOURCE" in
+    local)
+      bash "$REPO_ROOT/integrations/astro/plugin/install.sh" "$SITE_ROOT"
+      ;;
+    registry)
+      npx -y "$(npm_package_spec "@jt55401/eddie-astro")" "$SITE_ROOT" "$REPO_ROOT/dist"
+      ;;
+    *)
+      echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2
+      exit 2
+      ;;
+  esac
+}
+
+verify_index_and_search() {
+  local index_path="$1"
+  local output
+  output="$("$REPO_ROOT/target/release/eddie" search \
+    --index "$index_path" \
+    --query "Revelance" \
+    --mode keyword \
+    --top-k 10 2>&1)"
+  echo "$output" | grep -qi "Queue Before Coffee"
+}
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
@@ -19,7 +56,7 @@ cd "$SITE_ROOT"
 npm install
 
 echo "==> Integrating Eddie Astro plugin"
-bash "$REPO_ROOT/integrations/astro/plugin/install.sh" "$SITE_ROOT"
+install_eddie_astro
 
 echo "==> Building Eddie binary"
 cd "$REPO_ROOT"
@@ -34,6 +71,7 @@ fi
   --cms astro \
   --content-dir "$CONTENT_DIR" \
   --output "$SITE_ROOT/public/eddie/index.ed"
+verify_index_and_search "$SITE_ROOT/public/eddie/index.ed"
 
 echo "==> Starting Astro dev server"
 cd "$SITE_ROOT"

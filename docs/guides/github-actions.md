@@ -1,6 +1,6 @@
 # GitHub Actions Guide
 
-This repository ships six workflows:
+This repository ships seven workflows:
 
 - `ci.yml`: runs Rust tests and verifies widget build output on pushes and pull requests.
 - `release.yml`: builds release artifacts for Eddie and publishes them on `v*` tags.
@@ -8,6 +8,7 @@ This repository ships six workflows:
 - `publish-npm.yml`: publishes npm packages with trusted publishing (OIDC).
 - `publish-pypi.yml`: publishes PyPI packages with trusted publishing (OIDC).
 - `publish-rubygems.yml`: publishes gems with trusted publishing (OIDC).
+- `post-publish-registry-smoke.yml`: runs CMS Docker E2E in `registry` mode against published packages and release assets.
 
 See also: [Package Publishing Guide](package-publishing.md) for setup details.
 
