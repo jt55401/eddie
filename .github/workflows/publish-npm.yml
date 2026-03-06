@@ -68,18 +68,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Validate package path
-        run: test -f "${{ matrix.path }}/package.json"
-
-      - name: Install dependencies
-        working-directory: ${{ matrix.path }}
+      - name: Build package artifacts
+        if: ${{ matrix.build != null && matrix.build != '' }}
         run: |
           set -euo pipefail
-          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
-            npm ci
-          else
-            npm install --no-package-lock
-          fi
+          ${{ matrix.build }}
+
+      - name: Validate package path
+        run: test -f "${{ matrix.path }}/package.json"
 
       - name: Publish package to npm
         working-directory: ${{ matrix.path }}

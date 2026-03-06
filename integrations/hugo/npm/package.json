@@ -1,0 +1,25 @@
+{
+  "name": "@jt55401/eddie-hugo",
+  "version": "0.2.0",
+  "description": "Eddie installer for hugo sites",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jt55401/eddie",
+    "directory": "integrations/hugo/npm"
+  },
+  "bin": {
+    "eddie-hugo-install": "bin/install.js"
+  },
+  "files": [
+    "bin/install.js",
+    "scripts/install.sh",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

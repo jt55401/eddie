@@ -1,0 +1,16 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "pathname"
+
+site_dir = ARGV[0]
+unless site_dir
+  warn "usage: eddie-jekyll-install <site-dir> [asset-root]"
+  exit 1
+end
+
+root = Pathname.new(__dir__).join("..").expand_path
+script = root.join("scripts", "install.sh")
+asset_root = ARGV[1] || "/repo/dist"
+
+exec("bash", script.to_s, File.expand_path(site_dir), File.expand_path(asset_root))
