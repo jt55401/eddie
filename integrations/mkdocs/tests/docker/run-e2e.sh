@@ -6,6 +6,7 @@ WORKDIR="/tmp/mkdocs-e2e"
 SITE_ROOT="$WORKDIR/site"
 INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
 PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
+EDDIE_CLI_BIN="${EDDIE_CLI_BIN:-$REPO_ROOT/dist/eddie-linux-amd64}"
 
 install_eddie_mkdocs() {
   case "$INSTALL_SOURCE" in
@@ -27,10 +28,24 @@ install_eddie_mkdocs() {
   esac
 }
 
+ensure_eddie_cli() {
+  if [[ -f "$EDDIE_CLI_BIN" ]]; then
+    chmod +x "$EDDIE_CLI_BIN" || true
+  fi
+  if [[ -x "$EDDIE_CLI_BIN" ]]; then
+    return 0
+  fi
+
+  echo "==> Building Eddie binary"
+  cd "$REPO_ROOT"
+  cargo build --release --locked --bin eddie
+  EDDIE_CLI_BIN="$REPO_ROOT/target/release/eddie"
+}
+
 verify_index_and_search() {
   local index_path="$1"
   local output
-  output="$("$REPO_ROOT/target/release/eddie" search \
+  output="$("$EDDIE_CLI_BIN" search \
     --index "$index_path" \
     --query "Revelance" \
     --mode keyword \
@@ -56,12 +71,11 @@ pip3 install --break-system-packages --no-cache-dir mkdocs mkdocs-material mkdoc
 echo "==> Integrating Eddie MkDocs plugin"
 install_eddie_mkdocs
 
-echo "==> Building Eddie binary"
-cd "$REPO_ROOT"
-cargo build --release
+echo "==> Resolving Eddie CLI"
+ensure_eddie_cli
 
 echo "==> Indexing MkDocs docs"
-"$REPO_ROOT/target/release/eddie" index \
+"$EDDIE_CLI_BIN" index \
   --cms mkdocs \
   --content-dir "$SITE_ROOT/docs" \
   --output "$SITE_ROOT/docs/eddie/index.ed"
