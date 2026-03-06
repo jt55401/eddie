@@ -1,6 +1,6 @@
 {
   "name": "@jt55401/eddie-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Cross-platform launcher for the Eddie CLI",
   "license": "GPL-3.0-only",
   "repository": {

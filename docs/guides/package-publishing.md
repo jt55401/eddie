@@ -125,7 +125,7 @@ Optional input:
 
 For registry smoke tests:
 
-- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.0`)
+- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.1`)
 - or rely on automatic trigger from tag pushes (`v*`)
 
 ## Secrets

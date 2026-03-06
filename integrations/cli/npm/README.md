@@ -9,8 +9,8 @@ On first run it downloads the native Eddie binary for this package version from:
 ## Usage
 
 ```bash
-npx -y @jt55401/eddie-cli@0.2.0 --help
-npx -y @jt55401/eddie-cli@0.2.0 index --cms hugo --content-dir content --output static/eddie/index.ed
+npx -y @jt55401/eddie-cli@0.2.1 --help
+npx -y @jt55401/eddie-cli@0.2.1 index --cms hugo --content-dir content --output static/eddie/index.ed
 ```
 
 ## Environment

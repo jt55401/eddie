@@ -1,6 +1,6 @@
 {
   "name": "@jt55401/eddie-hugo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Eddie installer for hugo sites",
   "license": "GPL-3.0-only",
   "repository": {
@@ -23,6 +23,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@jt55401/eddie-cli": "^0.2.0"
+    "@jt55401/eddie-cli": "^0.2.1"
   }
 }
