@@ -15,13 +15,20 @@ Edit `.github/publish-packages.json` and add package directories:
 ```json
 {
   "npm": [
-    { "path": "integrations/astro/npm" }
+    {
+      "path": "widget/pkg",
+      "build": "bash widget/build.sh"
+    },
+    { "path": "integrations/hugo/npm" },
+    { "path": "integrations/astro/npm" },
+    { "path": "integrations/docusaurus/npm" },
+    { "path": "integrations/eleventy/npm" }
   ],
   "pypi": [
-    { "path": "integrations/mkdocs/python" }
+    { "path": "integrations/mkdocs/pypi" }
   ],
   "rubygems": [
-    { "path": "integrations/jekyll/ruby" }
+    { "path": "integrations/jekyll/gem" }
   ]
 }
 ```
@@ -31,6 +38,8 @@ Each target path should contain exactly one package:
 - npm: `package.json`
 - PyPI: `pyproject.toml` (or `setup.py`)
 - RubyGems: exactly one `*.gemspec`
+
+For npm targets, `build` is optional and runs before validation/publish. Use it for generated packages (for example `wasm-pack` output under `widget/pkg`).
 
 ## 2) Create a GitHub Environment
 

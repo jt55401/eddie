@@ -1,5 +1,30 @@
 {
-  "npm": [],
-  "pypi": [],
-  "rubygems": []
+  "npm": [
+    {
+      "path": "widget/pkg",
+      "build": "bash widget/build.sh"
+    },
+    {
+      "path": "integrations/hugo/npm"
+    },
+    {
+      "path": "integrations/astro/npm"
+    },
+    {
+      "path": "integrations/docusaurus/npm"
+    },
+    {
+      "path": "integrations/eleventy/npm"
+    }
+  ],
+  "pypi": [
+    {
+      "path": "integrations/mkdocs/pypi"
+    }
+  ],
+  "rubygems": [
+    {
+      "path": "integrations/jekyll/gem"
+    }
+  ]
 }

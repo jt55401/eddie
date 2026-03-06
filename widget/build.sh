@@ -8,9 +8,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+NPM_SCOPE="${NPM_SCOPE:-jt55401}"
+
+WASM_PACK_SCOPE_ARGS=()
+if [[ -n "$NPM_SCOPE" ]]; then
+  WASM_PACK_SCOPE_ARGS+=(--scope "$NPM_SCOPE")
+fi
 
 echo "==> Building WASM module..."
 wasm-pack build "$PROJECT_ROOT" \
+  "${WASM_PACK_SCOPE_ARGS[@]}" \
   --target no-modules \
   --out-dir "$SCRIPT_DIR/pkg" \
   --out-name eddie \
