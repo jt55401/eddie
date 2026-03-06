@@ -15,10 +15,13 @@ install_eddie_mkdocs() {
       ;;
     registry)
       local spec="eddie-mkdocs"
+      local cli_spec="jt55401-eddie-cli"
       if [[ -n "$PACKAGE_VERSION" ]]; then
         spec="${spec}==${PACKAGE_VERSION}"
+        cli_spec="${cli_spec}==${PACKAGE_VERSION}"
       fi
       pip3 install --break-system-packages --no-cache-dir "$spec"
+      pip3 install --break-system-packages --no-cache-dir "$cli_spec"
       eddie-mkdocs-install "$SITE_ROOT" "$REPO_ROOT/dist"
       ;;
     *)
