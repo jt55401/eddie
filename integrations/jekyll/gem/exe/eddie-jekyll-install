@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 
 require "pathname"
+require "eddie/jekyll"
 
 site_dir = ARGV[0]
 unless site_dir
@@ -11,6 +12,12 @@ end
 
 root = Pathname.new(__dir__).join("..").expand_path
 script = root.join("scripts", "install.sh")
-asset_root = ARGV[1] || "/repo/dist"
+env = {
+  "EDDIE_RELEASE_VERSION" => ENV.fetch("EDDIE_RELEASE_VERSION", Eddie::Jekyll::VERSION)
+}
 
-exec("bash", script.to_s, File.expand_path(site_dir), File.expand_path(asset_root))
+if ARGV[1]
+  exec(env, "bash", script.to_s, File.expand_path(site_dir), File.expand_path(ARGV[1]))
+else
+  exec(env, "bash", script.to_s, File.expand_path(site_dir))
+end

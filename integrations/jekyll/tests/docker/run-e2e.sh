@@ -21,7 +21,7 @@ install_eddie_jekyll() {
         gem install eddie-jekyll --no-document
         gem install eddie-cli --no-document
       fi
-      eddie-jekyll-install "$SITE_ROOT" "$REPO_ROOT/dist"
+      eddie-jekyll-install "$SITE_ROOT"
       ;;
     *)
       echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2

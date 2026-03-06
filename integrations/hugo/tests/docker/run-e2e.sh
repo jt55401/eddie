@@ -23,7 +23,7 @@ install_eddie_hugo() {
       bash "$REPO_ROOT/integrations/hugo/plugin/install.sh" "$SITE_ROOT"
       ;;
     registry)
-      npx -y "$(npm_package_spec "@jt55401/eddie-hugo")" "$SITE_ROOT" "$REPO_ROOT/dist"
+      npx -y "$(npm_package_spec "@jt55401/eddie-hugo")" "$SITE_ROOT"
       ;;
     *)
       echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2

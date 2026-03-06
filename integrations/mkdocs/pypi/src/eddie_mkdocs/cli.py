@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import os
 import subprocess
 import sys
@@ -18,7 +19,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "asset_root",
         nargs="?",
-        default="/repo/dist",
         help="Directory containing Eddie runtime assets",
     )
     return parser.parse_args()
@@ -27,15 +27,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     script_path = resources.files("eddie_mkdocs").joinpath("scripts/install.sh")
+    env = os.environ.copy()
+    env.setdefault("EDDIE_RELEASE_VERSION", importlib.metadata.version("eddie-mkdocs"))
+    cmd = [
+        "bash",
+        os.fspath(script_path),
+        os.path.abspath(args.site_dir),
+    ]
+    if args.asset_root:
+        cmd.append(os.path.abspath(args.asset_root))
 
     result = subprocess.run(
-        [
-            "bash",
-            os.fspath(script_path),
-            os.path.abspath(args.site_dir),
-            os.path.abspath(args.asset_root),
-        ],
+        cmd,
         check=False,
+        env=env,
     )
     return result.returncode
 

@@ -22,7 +22,7 @@ install_eddie_mkdocs() {
       fi
       pip3 install --break-system-packages --no-cache-dir "$spec"
       pip3 install --break-system-packages --no-cache-dir "$cli_spec"
-      eddie-mkdocs-install "$SITE_ROOT" "$REPO_ROOT/dist"
+      eddie-mkdocs-install "$SITE_ROOT"
       ;;
     *)
       echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2

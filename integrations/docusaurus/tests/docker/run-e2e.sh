@@ -23,7 +23,7 @@ install_eddie_docusaurus() {
       bash "$REPO_ROOT/integrations/docusaurus/plugin/install.sh" "$SITE_ROOT"
       ;;
     registry)
-      npx -y "$(npm_package_spec "@jt55401/eddie-docusaurus")" "$SITE_ROOT" "$REPO_ROOT/dist"
+      npx -y "$(npm_package_spec "@jt55401/eddie-docusaurus")" "$SITE_ROOT"
       ;;
     *)
       echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2
