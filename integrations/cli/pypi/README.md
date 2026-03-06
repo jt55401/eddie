@@ -9,7 +9,7 @@ On first run it downloads the native Eddie binary for this package version from:
 ## Usage
 
 ```bash
-python -m pip install jt55401-eddie-cli==0.2.1
+python -m pip install jt55401-eddie-cli==0.2.2
 eddie --help
 eddie index --cms mkdocs --content-dir docs --output docs/eddie/index.ed
 ```

@@ -14,7 +14,7 @@ See also: [Package Publishing Guide](package-publishing.md) for setup details.
 
 ## Release artifacts
 
-When you push a tag like `v0.2.1`, `release.yml` produces and uploads:
+When you push a tag like `v0.2.2`, `release.yml` produces and uploads:
 
 - `eddie-linux-amd64`
 - `eddie.wasm`

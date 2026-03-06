@@ -9,7 +9,7 @@ On first run it downloads the native Eddie binary for this gem version from:
 ## Usage
 
 ```bash
-gem install eddie-cli -v 0.2.1
+gem install eddie-cli -v 0.2.2
 eddie --help
 eddie index --cms jekyll --content-dir . --output assets/eddie/index.ed
 ```

@@ -1,6 +1,6 @@
 {
   "name": "@jt55401/eddie-docusaurus",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Eddie installer for docusaurus sites",
   "license": "GPL-3.0-only",
   "repository": {
@@ -23,6 +23,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@jt55401/eddie-cli": "^0.2.1"
+    "@jt55401/eddie-cli": "^0.2.2"
   }
 }
