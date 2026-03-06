@@ -5,6 +5,7 @@ This repo now includes OIDC-first release workflows:
 - `.github/workflows/publish-npm.yml`
 - `.github/workflows/publish-pypi.yml`
 - `.github/workflows/publish-rubygems.yml`
+- `.github/workflows/post-publish-registry-smoke.yml`
 
 All three workflows read publish targets from `.github/publish-packages.json`.
 
@@ -87,6 +88,8 @@ Push a tag (example: `v0.3.0`).
 
 All three publish workflows trigger on `v*` tags and publish targets from `.github/publish-packages.json`.
 
+After publish, `post-publish-registry-smoke.yml` runs CMS Docker E2E against registry packages + release runtime assets to verify install, indexing, and CLI search all succeed.
+
 ### Manual publish / dry-run
 
 Run each workflow with `workflow_dispatch`.
@@ -98,6 +101,11 @@ Optional input:
   - npm: runs `npm publish --dry-run`
   - PyPI: builds and runs `twine check`, skips upload
   - RubyGems: builds gem, skips `gem push`
+
+For registry smoke tests:
+
+- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.0`)
+- or rely on automatic trigger from tag pushes (`v*`)
 
 ## Secrets
 

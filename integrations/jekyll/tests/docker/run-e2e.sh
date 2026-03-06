@@ -4,6 +4,39 @@ set -euo pipefail
 REPO_ROOT="/repo"
 WORKDIR="/tmp/jekyll-e2e"
 SITE_ROOT="$WORKDIR/site"
+INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
+PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
+
+install_eddie_jekyll() {
+  case "$INSTALL_SOURCE" in
+    local)
+      bash "$REPO_ROOT/integrations/jekyll/plugin/install.sh" "$SITE_ROOT"
+      ;;
+    registry)
+      if [[ -n "$PACKAGE_VERSION" ]]; then
+        gem install eddie-jekyll -v "$PACKAGE_VERSION" --no-document
+      else
+        gem install eddie-jekyll --no-document
+      fi
+      eddie-jekyll-install "$SITE_ROOT" "$REPO_ROOT/dist"
+      ;;
+    *)
+      echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2
+      exit 2
+      ;;
+  esac
+}
+
+verify_index_and_search() {
+  local index_path="$1"
+  local output
+  output="$("$REPO_ROOT/target/release/eddie" search \
+    --index "$index_path" \
+    --query "Revelance" \
+    --mode keyword \
+    --top-k 10 2>&1)"
+  echo "$output" | grep -qi "Queue Before Coffee"
+}
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
@@ -19,7 +52,7 @@ cd "$SITE_ROOT"
 bundle install
 
 echo "==> Integrating Eddie Jekyll plugin"
-bash "$REPO_ROOT/integrations/jekyll/plugin/install.sh" "$SITE_ROOT"
+install_eddie_jekyll
 
 echo "==> Building Eddie binary"
 cd "$REPO_ROOT"
@@ -30,6 +63,7 @@ echo "==> Indexing Jekyll content"
   --cms jekyll \
   --content-dir "$SITE_ROOT" \
   --output "$SITE_ROOT/assets/eddie/index.ed"
+verify_index_and_search "$SITE_ROOT/assets/eddie/index.ed"
 
 echo "==> Building Jekyll site"
 cd "$SITE_ROOT"

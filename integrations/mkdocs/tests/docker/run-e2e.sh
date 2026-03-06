@@ -4,6 +4,39 @@ set -euo pipefail
 REPO_ROOT="/repo"
 WORKDIR="/tmp/mkdocs-e2e"
 SITE_ROOT="$WORKDIR/site"
+INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
+PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
+
+install_eddie_mkdocs() {
+  case "$INSTALL_SOURCE" in
+    local)
+      bash "$REPO_ROOT/integrations/mkdocs/plugin/install.sh" "$SITE_ROOT"
+      ;;
+    registry)
+      local spec="eddie-mkdocs"
+      if [[ -n "$PACKAGE_VERSION" ]]; then
+        spec="${spec}==${PACKAGE_VERSION}"
+      fi
+      pip3 install --break-system-packages --no-cache-dir "$spec"
+      eddie-mkdocs-install "$SITE_ROOT" "$REPO_ROOT/dist"
+      ;;
+    *)
+      echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2
+      exit 2
+      ;;
+  esac
+}
+
+verify_index_and_search() {
+  local index_path="$1"
+  local output
+  output="$("$REPO_ROOT/target/release/eddie" search \
+    --index "$index_path" \
+    --query "Revelance" \
+    --mode keyword \
+    --top-k 10 2>&1)"
+  echo "$output" | grep -qi "Queue Before Coffee"
+}
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
@@ -21,7 +54,7 @@ fi
 pip3 install --break-system-packages --no-cache-dir mkdocs mkdocs-material mkdocs-minify-plugin
 
 echo "==> Integrating Eddie MkDocs plugin"
-bash "$REPO_ROOT/integrations/mkdocs/plugin/install.sh" "$SITE_ROOT"
+install_eddie_mkdocs
 
 echo "==> Building Eddie binary"
 cd "$REPO_ROOT"
@@ -32,6 +65,7 @@ echo "==> Indexing MkDocs docs"
   --cms mkdocs \
   --content-dir "$SITE_ROOT/docs" \
   --output "$SITE_ROOT/docs/eddie/index.ed"
+verify_index_and_search "$SITE_ROOT/docs/eddie/index.ed"
 
 echo "==> Building MkDocs site"
 cd "$SITE_ROOT"
