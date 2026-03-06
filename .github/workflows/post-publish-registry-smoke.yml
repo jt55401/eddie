@@ -100,21 +100,27 @@ jobs:
 
           case "${{ matrix.cms }}" in
             hugo)
+              wait_for_npm "@jt55401/eddie-cli"
               wait_for_npm "@jt55401/eddie-hugo"
               ;;
             astro)
+              wait_for_npm "@jt55401/eddie-cli"
               wait_for_npm "@jt55401/eddie-astro"
               ;;
             docusaurus)
+              wait_for_npm "@jt55401/eddie-cli"
               wait_for_npm "@jt55401/eddie-docusaurus"
               ;;
             eleventy)
+              wait_for_npm "@jt55401/eddie-cli"
               wait_for_npm "@jt55401/eddie-eleventy"
               ;;
             mkdocs)
+              wait_for_pypi "eddie-cli"
               wait_for_pypi "eddie-mkdocs"
               ;;
             jekyll)
+              wait_for_rubygems "eddie-cli"
               wait_for_rubygems "eddie-jekyll"
               ;;
             *)
@@ -148,8 +154,6 @@ jobs:
           download_asset "eddie-wasm.js"
           download_asset "eddie-worker.js"
           download_asset "eddie-widget.js"
-          download_asset "eddie-linux-amd64"
-          chmod +x dist/eddie-linux-amd64 || true
 
       - name: Build CMS E2E image
         run: |

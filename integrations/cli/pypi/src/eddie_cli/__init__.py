@@ -1,0 +1,1 @@
+"""Eddie CLI launcher package."""

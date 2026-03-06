@@ -6,7 +6,7 @@ WORKDIR="/tmp/eleventy-e2e"
 SITE_ROOT="$WORKDIR/site"
 INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
 PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
-EDDIE_CLI_BIN="${EDDIE_CLI_BIN:-$REPO_ROOT/dist/eddie-linux-amd64}"
+LOCAL_EDDIE_CLI_BIN="$REPO_ROOT/target/release/eddie"
 
 npm_package_spec() {
   local package_name="$1"
@@ -32,24 +32,28 @@ install_eddie_eleventy() {
   esac
 }
 
-ensure_eddie_cli() {
-  if [[ -f "$EDDIE_CLI_BIN" ]]; then
-    chmod +x "$EDDIE_CLI_BIN" || true
-  fi
-  if [[ -x "$EDDIE_CLI_BIN" ]]; then
+ensure_local_eddie_cli() {
+  if [[ -x "$LOCAL_EDDIE_CLI_BIN" ]]; then
     return 0
   fi
-
   echo "==> Building Eddie binary"
   cd "$REPO_ROOT"
   cargo build --release --locked --bin eddie
-  EDDIE_CLI_BIN="$REPO_ROOT/target/release/eddie"
+}
+
+run_eddie() {
+  if [[ "$INSTALL_SOURCE" == "registry" ]]; then
+    npx -y "$(npm_package_spec "@jt55401/eddie-cli")" "$@"
+  else
+    ensure_local_eddie_cli
+    "$LOCAL_EDDIE_CLI_BIN" "$@"
+  fi
 }
 
 verify_index_and_search() {
   local index_path="$1"
   local output
-  output="$("$EDDIE_CLI_BIN" search \
+  output="$(run_eddie search \
     --index "$index_path" \
     --query "Revelance" \
     --mode keyword \
@@ -73,11 +77,8 @@ npm install
 echo "==> Integrating Eddie Eleventy plugin"
 install_eddie_eleventy
 
-echo "==> Resolving Eddie CLI"
-ensure_eddie_cli
-
 echo "==> Indexing Eleventy content"
-"$EDDIE_CLI_BIN" index \
+run_eddie index \
   --cms eleventy \
   --content-dir "$SITE_ROOT/src" \
   --output "$SITE_ROOT/public/eddie/index.ed"

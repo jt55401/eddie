@@ -1,0 +1,9 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "eddie/cli/runner"
+
+bin = Eddie::CLI::Runner.ensure_binary
+success = system(bin, *ARGV)
+status = $?
+exit(status&.exitstatus || (success ? 0 : 1))

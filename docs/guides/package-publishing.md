@@ -20,15 +20,18 @@ Edit `.github/publish-packages.json` and add package directories:
       "path": "widget/pkg",
       "build": "bash widget/build.sh"
     },
+    { "path": "integrations/cli/npm" },
     { "path": "integrations/hugo/npm" },
     { "path": "integrations/astro/npm" },
     { "path": "integrations/docusaurus/npm" },
     { "path": "integrations/eleventy/npm" }
   ],
   "pypi": [
+    { "path": "integrations/cli/pypi" },
     { "path": "integrations/mkdocs/pypi" }
   ],
   "rubygems": [
+    { "path": "integrations/cli/gem" },
     { "path": "integrations/jekyll/gem" }
   ]
 }
@@ -64,6 +67,14 @@ For each npm package, add a trusted publisher that matches:
 - Workflow file: `.github/workflows/publish-npm.yml`
 - Environment: `release`
 
+At minimum this now includes:
+
+- `@jt55401/eddie-cli`
+- `@jt55401/eddie-hugo`
+- `@jt55401/eddie-astro`
+- `@jt55401/eddie-docusaurus`
+- `@jt55401/eddie-eleventy`
+
 ### PyPI
 
 For each PyPI project, add a trusted publisher that matches:
@@ -72,6 +83,11 @@ For each PyPI project, add a trusted publisher that matches:
 - Workflow file: `.github/workflows/publish-pypi.yml`
 - Environment: `release` (recommended)
 
+At minimum this now includes:
+
+- `eddie-cli`
+- `eddie-mkdocs`
+
 ### RubyGems
 
 For each gem, add a trusted publisher that matches:
@@ -79,6 +95,11 @@ For each gem, add a trusted publisher that matches:
 - GitHub repository: this repo
 - Workflow file: `.github/workflows/publish-rubygems.yml`
 - Environment: `release`
+
+At minimum this now includes:
+
+- `eddie-cli`
+- `eddie-jekyll`
 
 ## 4) Release flow
 

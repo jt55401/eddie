@@ -1,19 +1,18 @@
 {
-  "name": "@jt55401/eddie-hugo",
+  "name": "@jt55401/eddie-cli",
   "version": "0.2.0",
-  "description": "Eddie installer for hugo sites",
+  "description": "Cross-platform launcher for the Eddie CLI",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/jt55401/eddie",
-    "directory": "integrations/hugo/npm"
+    "directory": "integrations/cli/npm"
   },
   "bin": {
-    "eddie-hugo-install": "bin/install.js"
+    "eddie": "bin/eddie.js"
   },
   "files": [
-    "bin/install.js",
-    "scripts/install.sh",
+    "bin/eddie.js",
     "README.md"
   ],
   "publishConfig": {
@@ -21,8 +20,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "@jt55401/eddie-cli": "^0.2.0"
   }
 }

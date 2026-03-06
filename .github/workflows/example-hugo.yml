@@ -16,15 +16,13 @@ jobs:
           hugo-version: latest
           extended: true
 
-      - name: Download Eddie CLI (latest release)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download --repo jt55401/eddie --pattern 'eddie-linux-amd64' --output eddie
-          chmod +x eddie
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Generate Eddie index into Hugo static/
-        run: ./eddie index --content-dir content/ --output static/eddie/index.ed
+        run: npx -y @jt55401/eddie-cli@latest index --cms hugo --content-dir content/ --output static/eddie/index.ed
 
       - name: Build Hugo site
         run: hugo --minify

@@ -6,7 +6,7 @@ WORKDIR="/tmp/jekyll-e2e"
 SITE_ROOT="$WORKDIR/site"
 INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
 PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
-EDDIE_CLI_BIN="${EDDIE_CLI_BIN:-$REPO_ROOT/dist/eddie-linux-amd64}"
+LOCAL_EDDIE_CLI_BIN="$REPO_ROOT/target/release/eddie"
 
 install_eddie_jekyll() {
   case "$INSTALL_SOURCE" in
@@ -28,24 +28,32 @@ install_eddie_jekyll() {
   esac
 }
 
-ensure_eddie_cli() {
-  if [[ -f "$EDDIE_CLI_BIN" ]]; then
-    chmod +x "$EDDIE_CLI_BIN" || true
-  fi
-  if [[ -x "$EDDIE_CLI_BIN" ]]; then
+ensure_local_eddie_cli() {
+  if [[ -x "$LOCAL_EDDIE_CLI_BIN" ]]; then
     return 0
   fi
-
   echo "==> Building Eddie binary"
   cd "$REPO_ROOT"
   cargo build --release --locked --bin eddie
-  EDDIE_CLI_BIN="$REPO_ROOT/target/release/eddie"
+}
+
+run_eddie() {
+  if [[ "$INSTALL_SOURCE" == "registry" ]]; then
+    if ! command -v eddie >/dev/null 2>&1; then
+      echo "Expected eddie CLI to be installed via RubyGems packages." >&2
+      exit 1
+    fi
+    eddie "$@"
+  else
+    ensure_local_eddie_cli
+    "$LOCAL_EDDIE_CLI_BIN" "$@"
+  fi
 }
 
 verify_index_and_search() {
   local index_path="$1"
   local output
-  output="$("$EDDIE_CLI_BIN" search \
+  output="$(run_eddie search \
     --index "$index_path" \
     --query "Revelance" \
     --mode keyword \
@@ -69,11 +77,8 @@ bundle install
 echo "==> Integrating Eddie Jekyll plugin"
 install_eddie_jekyll
 
-echo "==> Resolving Eddie CLI"
-ensure_eddie_cli
-
 echo "==> Indexing Jekyll content"
-"$EDDIE_CLI_BIN" index \
+run_eddie index \
   --cms jekyll \
   --content-dir "$SITE_ROOT" \
   --output "$SITE_ROOT/assets/eddie/index.ed"

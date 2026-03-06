@@ -5,6 +5,9 @@
       "build": "bash widget/build.sh"
     },
     {
+      "path": "integrations/cli/npm"
+    },
+    {
       "path": "integrations/hugo/npm"
     },
     {
@@ -19,10 +22,16 @@
   ],
   "pypi": [
     {
+      "path": "integrations/cli/pypi"
+    },
+    {
       "path": "integrations/mkdocs/pypi"
     }
   ],
   "rubygems": [
+    {
+      "path": "integrations/cli/gem"
+    },
     {
       "path": "integrations/jekyll/gem"
     }
