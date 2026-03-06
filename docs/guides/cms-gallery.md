@@ -51,6 +51,8 @@ Notes:
 - `WAIT_FIRST_MS` is longer to absorb first-run model warmup.
 - The script reuses a persistent Playwright profile in `/tmp` to keep browser/model caches warm.
 - The capture flow uses `Ctrl+K` for most frameworks and click-open for MkDocs to avoid theme-native search hotkey conflicts.
+- Installer source defaults to local repo scripts. To exercise published packages instead:
+  - `EDDIE_INSTALL_SOURCE=registry EDDIE_PACKAGE_VERSION=0.2.0 bash scripts/capture-cms-gallery.sh`
 - Run a subset during iteration with `EDDIE_GALLERY_CMS`, for example:
   - `EDDIE_GALLERY_CMS=jekyll bash scripts/capture-cms-gallery.sh`
   - `EDDIE_GALLERY_CMS=hugo,astro bash scripts/capture-cms-gallery.sh`

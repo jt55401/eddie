@@ -5,6 +5,8 @@ CMS="${1:?usage: start-cms-demo.sh <cms>}"
 REPO_ROOT="/repo"
 WORKDIR="/tmp/${CMS}-gallery"
 SITE_ROOT="$WORKDIR/site"
+INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
+PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
 
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
@@ -15,6 +17,66 @@ build_eddie() {
     cat /tmp/${CMS}-cargo.log >&2
     return 1
   }
+}
+
+npm_package_spec() {
+  local package_name="$1"
+  if [[ -n "$PACKAGE_VERSION" ]]; then
+    printf "%s@%s" "$package_name" "$PACKAGE_VERSION"
+  else
+    printf "%s" "$package_name"
+  fi
+}
+
+install_eddie_for_cms() {
+  local cms="$1"
+  local site_root="$2"
+
+  case "$INSTALL_SOURCE" in
+    local)
+      bash "$REPO_ROOT/integrations/$cms/plugin/install.sh" "$site_root"
+      ;;
+    registry)
+      case "$cms" in
+        hugo|astro|docusaurus|eleventy)
+          npx -y "$(npm_package_spec "@jt55401/eddie-$cms")" "$site_root" "$REPO_ROOT/dist"
+          ;;
+        mkdocs)
+          local spec="eddie-mkdocs"
+          if [[ -n "$PACKAGE_VERSION" ]]; then
+            spec="${spec}==${PACKAGE_VERSION}"
+          fi
+          pip3 install --break-system-packages --no-cache-dir "$spec" >/tmp/${CMS}-pip-install-plugin.log 2>&1 || {
+            cat /tmp/${CMS}-pip-install-plugin.log >&2
+            exit 1
+          }
+          eddie-mkdocs-install "$site_root" "$REPO_ROOT/dist"
+          ;;
+        jekyll)
+          if [[ -n "$PACKAGE_VERSION" ]]; then
+            gem install eddie-jekyll -v "$PACKAGE_VERSION" --no-document >/tmp/${CMS}-gem-install-plugin.log 2>&1 || {
+              cat /tmp/${CMS}-gem-install-plugin.log >&2
+              exit 1
+            }
+          else
+            gem install eddie-jekyll --no-document >/tmp/${CMS}-gem-install-plugin.log 2>&1 || {
+              cat /tmp/${CMS}-gem-install-plugin.log >&2
+              exit 1
+            }
+          fi
+          eddie-jekyll-install "$site_root" "$REPO_ROOT/dist"
+          ;;
+        *)
+          echo "Unsupported CMS for registry install: $cms" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    *)
+      echo "Unsupported EDDIE_INSTALL_SOURCE: $INSTALL_SOURCE" >&2
+      exit 2
+      ;;
+  esac
 }
 
 case "$CMS" in
@@ -129,7 +191,7 @@ HTML
 {{ end }}
 HTML
     bash "$REPO_ROOT/integrations/hugo/tests/docker/seed-content.sh" "$SITE_ROOT"
-    bash "$REPO_ROOT/integrations/hugo/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "hugo" "$SITE_ROOT"
     build_eddie
     "$REPO_ROOT/target/release/eddie" index --cms hugo --content-dir "$SITE_ROOT/content" --output "$SITE_ROOT/static/eddie/index.ed"
     cd "$SITE_ROOT"
@@ -142,7 +204,7 @@ HTML
     bash "$REPO_ROOT/integrations/astro/tests/docker/seed-content.sh" "$SITE_ROOT"
     cd "$SITE_ROOT"
     npm install >/tmp/${CMS}-npm-install.log 2>&1 || { cat /tmp/${CMS}-npm-install.log >&2; exit 1; }
-    bash "$REPO_ROOT/integrations/astro/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "astro" "$SITE_ROOT"
     build_eddie
     CONTENT_DIR="$SITE_ROOT/src/content"
     if [[ ! -d "$CONTENT_DIR" ]]; then CONTENT_DIR="$SITE_ROOT/src/pages"; fi
@@ -156,7 +218,7 @@ HTML
     bash "$REPO_ROOT/integrations/docusaurus/tests/docker/seed-content.sh" "$SITE_ROOT"
     cd "$SITE_ROOT"
     npm install >/tmp/${CMS}-npm-install.log 2>&1 || { cat /tmp/${CMS}-npm-install.log >&2; exit 1; }
-    bash "$REPO_ROOT/integrations/docusaurus/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "docusaurus" "$SITE_ROOT"
     build_eddie
     "$REPO_ROOT/target/release/eddie" index --cms docusaurus --content-dir "$SITE_ROOT/docs" --output "$SITE_ROOT/static/eddie/index.ed"
     cd "$SITE_ROOT"
@@ -171,7 +233,7 @@ HTML
       pip3 install --break-system-packages --no-cache-dir -r "$SITE_ROOT/requirements.txt" >/tmp/${CMS}-pip.log 2>&1 || { cat /tmp/${CMS}-pip.log >&2; exit 1; }
     fi
     pip3 install --break-system-packages --no-cache-dir mkdocs mkdocs-material mkdocs-minify-plugin >/tmp/${CMS}-pip-extra.log 2>&1 || { cat /tmp/${CMS}-pip-extra.log >&2; exit 1; }
-    bash "$REPO_ROOT/integrations/mkdocs/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "mkdocs" "$SITE_ROOT"
     build_eddie
     "$REPO_ROOT/target/release/eddie" index --cms mkdocs --content-dir "$SITE_ROOT/docs" --output "$SITE_ROOT/docs/eddie/index.ed"
     cd "$SITE_ROOT"
@@ -185,7 +247,7 @@ HTML
     bash "$REPO_ROOT/integrations/eleventy/tests/docker/seed-content.sh" "$SITE_ROOT"
     cd "$SITE_ROOT"
     npm install >/tmp/${CMS}-npm-install.log 2>&1 || { cat /tmp/${CMS}-npm-install.log >&2; exit 1; }
-    bash "$REPO_ROOT/integrations/eleventy/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "eleventy" "$SITE_ROOT"
     build_eddie
     "$REPO_ROOT/target/release/eddie" index --cms eleventy --content-dir "$SITE_ROOT/src" --output "$SITE_ROOT/public/eddie/index.ed"
     cd "$SITE_ROOT"
@@ -199,7 +261,7 @@ HTML
     bash "$REPO_ROOT/integrations/jekyll/tests/docker/seed-content.sh" "$SITE_ROOT"
     cd "$SITE_ROOT"
     bundle install >/tmp/${CMS}-bundle-install.log 2>&1 || { cat /tmp/${CMS}-bundle-install.log >&2; exit 1; }
-    bash "$REPO_ROOT/integrations/jekyll/plugin/install.sh" "$SITE_ROOT"
+    install_eddie_for_cms "jekyll" "$SITE_ROOT"
     build_eddie
     "$REPO_ROOT/target/release/eddie" index --cms jekyll --content-dir "$SITE_ROOT" --output "$SITE_ROOT/assets/eddie/index.ed"
     cd "$SITE_ROOT"

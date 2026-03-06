@@ -39,6 +39,8 @@ WAIT_FIRST_MS="${EDDIE_GALLERY_WAIT_FIRST_MS:-70000}"
 HOST_PORT="${EDDIE_GALLERY_PORT:-14100}"
 WIDTH="${EDDIE_GALLERY_WIDTH:-640}"
 HEIGHT="${EDDIE_GALLERY_HEIGHT:-360}"
+INSTALL_SOURCE="${EDDIE_INSTALL_SOURCE:-local}"
+PACKAGE_VERSION="${EDDIE_PACKAGE_VERSION:-}"
 
 CMS_DEFAULT=(hugo astro docusaurus mkdocs eleventy jekyll)
 CMS_FILTER_RAW="${EDDIE_GALLERY_CMS:-}"
@@ -139,6 +141,8 @@ capture_one() {
     --name "gallery-$cms" \
     -p "$HOST_PORT:$internal_port" \
     -v "$REPO_ROOT:/repo" \
+    -e EDDIE_INSTALL_SOURCE="$INSTALL_SOURCE" \
+    -e EDDIE_PACKAGE_VERSION="$PACKAGE_VERSION" \
     "$image" \
     bash /repo/scripts/gallery/start-cms-demo.sh "$cms" >/dev/null
 
