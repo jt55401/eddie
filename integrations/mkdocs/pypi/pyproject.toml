@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eddie-mkdocs"
-version = "0.2.2"
+version = "0.2.3"
 description = "Installer for integrating Eddie into MkDocs sites"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only"
 ]
 dependencies = [
-  "jt55401-eddie-cli>=0.2.2,<0.3.0"
+  "jt55401-eddie-cli>=0.2.3,<0.3.0"
 ]
 
 [project.scripts]
@@ -34,4 +34,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-eddie_mkdocs = ["scripts/install.sh"]
+eddie_mkdocs = ["scripts/install.sh", "assets/*"]

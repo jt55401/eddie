@@ -16,10 +16,10 @@ install_eddie_jekyll() {
     registry)
       if [[ -n "$PACKAGE_VERSION" ]]; then
         gem install eddie-jekyll -v "$PACKAGE_VERSION" --no-document
-        gem install eddie-cli -v "$PACKAGE_VERSION" --no-document
+        gem install jt55401-eddie-cli -v "$PACKAGE_VERSION" --no-document
       else
         gem install eddie-jekyll --no-document
-        gem install eddie-cli --no-document
+        gem install jt55401-eddie-cli --no-document
       fi
       eddie-jekyll-install "$SITE_ROOT"
       ;;

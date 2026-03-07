@@ -3,35 +3,17 @@ set -euo pipefail
 
 SITE_DIR="${1:?usage: install.sh <hugo-site-dir>}"
 ASSET_ROOT="${2:-}"
-TEMP_ASSET_ROOT=""
+PACKAGE_ROOT="${EDDIE_PACKAGE_ROOT:-}"
 ASSETS=(eddie-widget.js eddie-worker.js eddie-wasm.js eddie.wasm)
 
-cleanup() {
-  if [[ -n "$TEMP_ASSET_ROOT" && -d "$TEMP_ASSET_ROOT" ]]; then
-    rm -rf "$TEMP_ASSET_ROOT"
-  fi
-}
-trap cleanup EXIT
-
-download_public_assets() {
-  local version="${EDDIE_RELEASE_VERSION:-}"
-  if [[ -z "$version" ]]; then
-    echo "No asset root provided and EDDIE_RELEASE_VERSION is unset." >&2
-    exit 1
-  fi
-
-  TEMP_ASSET_ROOT="$(mktemp -d)"
-  ASSET_ROOT="$TEMP_ASSET_ROOT"
-
-  for asset in "${ASSETS[@]}"; do
-    curl -fLSs --retry 3 \
-      -o "$ASSET_ROOT/$asset" \
-      "https://github.com/jt55401/eddie/releases/download/v${version}/${asset}"
-  done
-}
+if [[ -z "$ASSET_ROOT" && -n "$PACKAGE_ROOT" ]]; then
+  ASSET_ROOT="$PACKAGE_ROOT/assets"
+fi
 
 if [[ -z "$ASSET_ROOT" ]]; then
-  download_public_assets
+  echo "No asset root provided and no packaged assets found." >&2
+  echo "Pass an explicit asset-root or set EDDIE_PACKAGE_ROOT." >&2
+  exit 1
 fi
 
 require_asset() {

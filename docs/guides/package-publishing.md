@@ -98,7 +98,7 @@ For each gem, add a trusted publisher that matches:
 
 At minimum this now includes:
 
-- `eddie-cli`
+- `jt55401-eddie-cli`
 - `eddie-jekyll`
 
 ## 4) Release flow
@@ -109,7 +109,7 @@ Push a tag (example: `v0.3.0`).
 
 All three publish workflows trigger on `v*` tags and publish targets from `.github/publish-packages.json`.
 
-After publish, `post-publish-registry-smoke.yml` runs CMS Docker E2E against registry packages + release runtime assets to verify install, indexing, and CLI search all succeed.
+After publish, `post-publish-registry-smoke.yml` runs CMS Docker E2E against registry packages to verify install, indexing, and CLI search all succeed.
 
 ### Manual publish / dry-run
 
@@ -125,7 +125,7 @@ Optional input:
 
 For registry smoke tests:
 
-- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.2`)
+- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.3`)
 - or rely on automatic trigger from tag pushes (`v*`)
 
 ## Secrets

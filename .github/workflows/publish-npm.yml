@@ -67,6 +67,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install Rust + wasm target for package builds
+        if: ${{ matrix.build != null && matrix.build != '' }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        if: ${{ matrix.build != null && matrix.build != '' }}
+        uses: jetli/wasm-pack-action@v0.4.0
 
       - name: Build package artifacts
         if: ${{ matrix.build != null && matrix.build != '' }}

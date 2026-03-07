@@ -1,6 +1,6 @@
-# eddie-cli
+# jt55401-eddie-cli
 
-`eddie-cli` exposes the `eddie` command for Ruby workflows.
+`jt55401-eddie-cli` exposes the `eddie` command for Ruby workflows.
 
 On first run it downloads the native Eddie binary for this gem version from:
 
@@ -9,7 +9,7 @@ On first run it downloads the native Eddie binary for this gem version from:
 ## Usage
 
 ```bash
-gem install eddie-cli -v 0.2.2
+gem install jt55401-eddie-cli -v 0.2.3
 eddie --help
 eddie index --cms jekyll --content-dir . --output assets/eddie/index.ed
 ```

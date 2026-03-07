@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import os
 import subprocess
 import sys
@@ -26,9 +25,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    script_path = resources.files("eddie_mkdocs").joinpath("scripts/install.sh")
+    package_root = resources.files("eddie_mkdocs")
+    script_path = package_root.joinpath("scripts/install.sh")
     env = os.environ.copy()
-    env.setdefault("EDDIE_RELEASE_VERSION", importlib.metadata.version("eddie-mkdocs"))
+    env.setdefault("EDDIE_PACKAGE_ROOT", os.fspath(package_root))
     cmd = [
         "bash",
         os.fspath(script_path),

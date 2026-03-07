@@ -1,6 +1,6 @@
 {
   "name": "@jt55401/eddie-eleventy",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Eddie installer for eleventy sites",
   "license": "GPL-3.0-only",
   "repository": {
@@ -13,6 +13,7 @@
   },
   "files": [
     "bin/install.js",
+    "assets/*",
     "scripts/install.sh",
     "README.md"
   ],
@@ -23,6 +24,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@jt55401/eddie-cli": "^0.2.2"
+    "@jt55401/eddie-cli": "^0.2.3"
   }
 }

@@ -82,14 +82,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install gem dependencies
-        working-directory: ${{ matrix.path }}
-        run: |
-          set -euo pipefail
-          if [[ -f Gemfile ]]; then
-            bundle install --jobs 4 --retry 3
-          fi
-
       - name: Build gem artifact
         id: build
         working-directory: ${{ matrix.path }}

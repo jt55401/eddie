@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "eddie-jekyll"
-  spec.version       = "0.2.2"
+  spec.version       = "0.2.3"
   spec.authors       = ["Jason Grey"]
   spec.summary       = "Installer for integrating Eddie into Jekyll sites"
   spec.description   = "Provides a CLI helper that runs Eddie's Jekyll installer script."
@@ -14,11 +14,11 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = "https://github.com/jt55401/eddie"
 
   spec.files = Dir.chdir(__dir__) do
-    Dir["lib/**/*.rb", "exe/*", "scripts/install.sh", "README.md", "LICENSE.txt"]
+    Dir["lib/**/*.rb", "exe/*", "scripts/install.sh", "assets/*", "README.md", "LICENSE.txt"]
   end
 
   spec.bindir = "exe"
   spec.executables = ["eddie-jekyll-install"]
   spec.require_paths = ["lib"]
-  spec.add_runtime_dependency "eddie-cli", "~> 0.2", ">= 0.2.2"
+  spec.add_runtime_dependency "jt55401-eddie-cli", "~> 0.2", ">= 0.2.3"
 end

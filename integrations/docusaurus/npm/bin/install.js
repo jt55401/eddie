@@ -3,7 +3,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const pkg = require('../package.json');
 
 const [, , siteDirArg, assetRootArg] = process.argv;
 
@@ -21,10 +20,7 @@ if (!fs.existsSync(scriptPath)) {
   process.exit(1);
 }
 
-const env = {
-  ...process.env,
-  EDDIE_RELEASE_VERSION: process.env.EDDIE_RELEASE_VERSION || pkg.version
-};
+const env = { ...process.env, EDDIE_PACKAGE_ROOT: packageRoot };
 const args = [scriptPath, siteDir];
 if (assetRootArg) {
   args.push(path.resolve(assetRootArg));

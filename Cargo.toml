@@ -1,6 +1,6 @@
 [package]
 name = "eddie"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Semantic search and simple Q&A for static sites — index at build time, query in the browser via WASM"
