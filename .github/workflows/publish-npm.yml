@@ -51,7 +51,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
-    environment: release
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && 'dry-run' || 'release' }}
     permissions:
       contents: read
       id-token: write
