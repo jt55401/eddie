@@ -21,9 +21,6 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
       - name: Install wasm-pack
         uses: jetli/wasm-pack-action@v0.4.0
 
