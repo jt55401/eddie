@@ -1,6 +1,6 @@
 {
   "name": "@jt55401/eddie-astro",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Eddie installer for astro sites",
   "license": "GPL-3.0-only",
   "repository": {
@@ -24,6 +24,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@jt55401/eddie-cli": "^0.2.3"
+    "@jt55401/eddie-cli": "^0.2.4"
   }
 }

@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "jt55401-eddie-cli"
-  spec.version       = "0.2.3"
+  spec.version       = "0.2.4"
   spec.authors       = ["Jason Grey"]
   spec.summary       = "Cross-platform launcher for the Eddie CLI"
   spec.description   = "Provides an eddie executable that downloads and runs tagged Eddie release binaries."
