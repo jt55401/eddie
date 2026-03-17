@@ -98,6 +98,25 @@ jobs:
             return 1
           }
 
+          wait_for_release_asset() {
+            local asset="$1"
+            local tries=50
+            for i in $(seq 1 "$tries"); do
+              if curl -fsSI \
+                "https://github.com/jt55401/eddie/releases/download/v${VERSION}/${asset}" \
+                >/dev/null; then
+                echo "Found release asset ${asset} for v${VERSION}"
+                return 0
+              fi
+              sleep 6
+            done
+            echo "Timed out waiting for release asset ${asset} for v${VERSION}" >&2
+            return 1
+          }
+
+          # CLI wrappers currently download native binaries from GitHub releases.
+          wait_for_release_asset "eddie-linux-amd64"
+
           case "${{ matrix.cms }}" in
             hugo)
               wait_for_npm "@jt55401/eddie-cli"
