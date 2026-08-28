@@ -498,8 +498,10 @@ fn cmd_index(
 
     // Embed all chunks
     eprintln!("Embedding {} chunks...", all_chunks.len());
+    let embed_inputs: Vec<String> = all_chunks.iter().map(|c| c.embed_text()).collect();
+    let embed_refs: Vec<&str> = embed_inputs.iter().map(String::as_str).collect();
+    let all_embeddings = embed_texts(&embedder, &embed_refs)?;
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
-    let all_embeddings = embed_texts(&embedder, &texts)?;
 
     // Build BM25 index
     eprintln!("Building BM25 keyword index...");
@@ -666,6 +668,7 @@ fn build_summary_chunk(doc: &Document) -> Option<Chunk> {
 
     Some(Chunk {
         text: picked.join(" "),
+        overlap: String::new(),
         meta: ChunkMeta {
             title: doc.meta.title.clone(),
             url: doc.meta.url.clone(),
