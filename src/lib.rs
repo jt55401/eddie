@@ -13,6 +13,7 @@ pub mod embed;
 pub mod eval;
 pub mod index;
 pub mod manifest;
+pub mod models;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parse;
 pub mod qa;

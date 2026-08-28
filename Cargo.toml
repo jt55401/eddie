@@ -14,39 +14,58 @@ crate-type = ["cdylib", "rlib"]
 name = "eddie"
 path = "src/main.rs"
 
+[features]
+default = []
+# NVIDIA GPU inference at index time (native only). Requires the CUDA toolkit
+# at build time; see docs for the environment variables cudarc expects.
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn", "candle-transformers/cudnn"]
+
 # --- Shared dependencies (all targets) ---
 [dependencies]
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 anyhow = "1"
 brotli = "8"
+sha2 = "0.10"
 
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 walkdir = "2"
-hf-hub = "0.4"
-tokenizers = { version = "0.21", features = ["onig", "esaxx_fast"] }
+hf-hub = { version = "1", features = ["blocking"] }
+# 0.22 matches the pin inside candle-core 0.11 so only one copy is compiled.
+tokenizers = { version = "0.22", features = ["onig", "esaxx_fast"] }
 ureq = { version = "2", features = ["json"] }
 
 # --- WASM dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tokenizers = { version = "0.21", default-features = false, features = ["unstable_wasm"] }
+tokenizers = { version = "0.22", default-features = false, features = ["unstable_wasm"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console", "WorkerGlobalScope"] }
 serde-wasm-bindgen = "0.6"
-getrandom = { version = "0.2", features = ["js"] }
+# getrandom 0.3 needs the wasm_js backend on wasm32; the matching
+# `--cfg getrandom_backend="wasm_js"` lives in .cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 strip = true
+codegen-units = 1
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
+
+# candle-core 0.11.0 does not compile for wasm32 with `+simd128` (its f16/bf16
+# vec_add paths reference SIMD types that the simd128 backend never defines).
+# vendor/candle-core is the crates.io 0.11.0 source with a cfg fix (f16/bf16 vec_add paths) in
+# src/cpu/mod.rs; drop the patch once upstream ships the fix.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
