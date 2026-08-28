@@ -12,6 +12,7 @@ pub mod embed;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod eval;
 pub mod index;
+pub mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parse;
 pub mod qa;
