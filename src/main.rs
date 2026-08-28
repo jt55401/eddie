@@ -2,7 +2,6 @@
 
 //! Eddie CLI: build-time indexer for static site content.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -10,7 +9,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use eddie::bm25::{Bm25Index, hybrid_rrf};
 use eddie::chunk::{Chunk, ChunkMeta, ChunkStrategy, Document, chunk_document_with_strategy};
 use eddie::claims::{
     ClaimEntry, apply_claim_edits, build_claim_corpus_from_chunks, parse_claim_edits_toml,
@@ -19,7 +17,8 @@ use eddie::embed::Embedder;
 use eddie::eval::{
     AcceptanceCase, AcceptanceSuite, evaluate_case, load_suite, summarize, write_suite,
 };
-use eddie::index::SearchIndex;
+use eddie::index::{DenseLane, IndexBuilder, SCOPE_CHUNKS, SCOPE_CLAIMS, SCOPE_QA, SearchIndex};
+use eddie::manifest::{DenseSpec, Family, Pooling, Quant, RuntimeSpec, SparseTerm, TextKind};
 use eddie::parse::{
     AstroParser, ContentParser, DocusaurusParser, EleventyParser, HugoParser, JekyllParser,
     MkDocsParser, parse_content_dir,
@@ -29,7 +28,10 @@ use eddie::qa::{
     build_qa_entries_from_chunks, synthesize_with_ollama_from_chunks,
     synthesize_with_openrouter_from_chunks,
 };
-use eddie::search::search;
+use eddie::search::{
+    Mode, PageResult, Query, Retrieval, Weights, group_pages, query_terms, retrieve,
+    sparse_query_terms_local,
+};
 
 const DEFAULT_MODEL: &str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
 
@@ -139,21 +141,59 @@ enum Command {
         #[arg(long)]
         query: String,
 
-        /// Number of results to return.
-        #[arg(long, default_value = "5")]
+        /// Number of pages to return.
+        #[arg(long, default_value = "8")]
         top_k: usize,
 
-        /// HuggingFace model ID (must match the model used during indexing).
-        #[arg(long, default_value = DEFAULT_MODEL)]
-        model: String,
-
-        /// Search mode: semantic, keyword, or hybrid (default).
+        /// Search mode: hybrid (default), dense, sparse, or keyword.
         #[arg(long, default_value = "hybrid")]
         mode: SearchMode,
 
-        /// Which lanes to search: chunks, qa, claims, or all.
-        #[arg(long, default_value = "all")]
-        scope: SearchScope,
+        /// Dense lane id to embed the query with (default: the index's first wasm-candle lane).
+        #[arg(long)]
+        lane: Option<String>,
+
+        /// Print the result set as JSON instead of a table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Print the manifest and section sizes of an index.
+    Stats {
+        /// Path to the index file.
+        #[arg(long)]
+        index: PathBuf,
+
+        /// Print as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Score an index against a labelled query set (Hit@k, MRR, nDCG@k).
+    Eval {
+        /// Path to the index file.
+        #[arg(long)]
+        index: PathBuf,
+
+        /// TOML file with `[[cases]] query = "..." relevant = ["/url/", ...]`.
+        #[arg(long)]
+        labels: PathBuf,
+
+        /// Cut-off k for Hit@k and nDCG@k.
+        #[arg(long, default_value = "10")]
+        top_k: usize,
+
+        /// Search mode to evaluate.
+        #[arg(long, default_value = "hybrid")]
+        mode: SearchMode,
+
+        /// Dense lane id (default: the index's first wasm-candle lane).
+        #[arg(long)]
+        lane: Option<String>,
+
+        /// Print the per-query report as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     /// Tune chunking parameters against a site-owned acceptance suite.
@@ -252,17 +292,21 @@ enum Command {
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum SearchMode {
-    Semantic,
-    Keyword,
     Hybrid,
+    Dense,
+    Sparse,
+    Keyword,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum SearchScope {
-    Chunks,
-    Qa,
-    Claims,
-    All,
+impl From<SearchMode> for Mode {
+    fn from(m: SearchMode) -> Self {
+        match m {
+            SearchMode::Hybrid => Mode::Hybrid,
+            SearchMode::Dense => Mode::Dense,
+            SearchMode::Sparse => Mode::Sparse,
+            SearchMode::Keyword => Mode::Keyword,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -358,10 +402,19 @@ fn main() -> Result<()> {
             index,
             query,
             top_k,
-            model,
             mode,
-            scope,
-        } => cmd_search(index, &query, top_k, &model, mode, scope),
+            lane,
+            json,
+        } => cmd_search(index, &query, top_k, mode.into(), lane.as_deref(), json),
+        Command::Stats { index, json } => cmd_stats(index, json),
+        Command::Eval {
+            index,
+            labels,
+            top_k,
+            mode,
+            lane,
+            json,
+        } => cmd_eval(index, labels, top_k, mode.into(), lane.as_deref(), json),
         Command::Tune {
             content_dir,
             cms,
@@ -503,10 +556,6 @@ fn cmd_index(
     let all_embeddings = embed_texts(&embedder, &embed_refs)?;
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
 
-    // Build BM25 index
-    eprintln!("Building BM25 keyword index...");
-    let bm25 = Bm25Index::build(&texts);
-
     // Build optional QA/claims sections
     let metadata: Vec<_> = all_chunks.iter().map(|c| c.meta.clone()).collect();
     let chunk_texts: Vec<String> = all_chunks.iter().map(|c| c.text.clone()).collect();
@@ -585,64 +634,125 @@ fn cmd_index(
         eprintln!("  Claims entries: {}", claims.len());
     }
 
-    // Embed QA and claim sections (same model as chunk embeddings)
-    let (qa_dim, qa_embeddings) = if !qa_entries.is_empty() {
-        eprintln!("Embedding QA section...");
+    // --- Index assembly (format v5) -------------------------------------
+    // TODO(integrator): the `--summary-lane` chunk built above by
+    // `build_summary_chunk` is the page's first four sentences, which
+    // duplicates fine chunk 0 and games BM25 length normalisation
+    // (adversarial review). Drop the lane or restrict it to
+    // `doc.meta.description` when the chunking region is reworked.
+    let dim = embedder.dim();
+    let spec = dense_spec_for_model(model_id, dim);
+    let n = metadata.len();
+    // TODO(integrator): once `Chunk` carries `overlap`, pass
+    // `word_count(chunk.overlap)` here (texts as embedded, overlap prefix
+    // included); the builder strips the prefix from the stored text.
+    let overlap_words: Vec<u16> = vec![0; n];
+
+    let mut builder = IndexBuilder::new();
+    builder.add_chunks(metadata, chunk_texts, overlap_words)?;
+    builder.add_dense_lane(
+        SCOPE_CHUNKS,
+        DenseLane::from_f32(spec.clone(), dim, n, &all_embeddings, Quant::Int8)?,
+    )?;
+    drop(all_embeddings);
+    // TODO(integrator): `--sparse` / `--sparse-model`: encode `chunk_texts`
+    // with `sparse::SparseDocEncoder` and call
+    // `builder.add_sparse(&docs, encoder.idf(), SparseSpec { .. })`.
+
+    if !qa_entries.is_empty() {
+        eprintln!("Embedding QA section ({} entries)...", qa_entries.len());
         let qa_texts: Vec<String> = qa_entries
             .iter()
             .map(|q| format!("Q: {} A: {}", q.question, q.answer))
             .collect();
         let refs: Vec<&str> = qa_texts.iter().map(String::as_str).collect();
-        (embedder.dim(), embed_texts(&embedder, &refs)?)
-    } else {
-        (0usize, Vec::new())
-    };
+        let vectors = embed_texts(&embedder, &refs)?;
+        builder.add_dense_lane(
+            SCOPE_QA,
+            DenseLane::from_f32(spec.clone(), dim, qa_entries.len(), &vectors, Quant::Int8)?,
+        )?;
+        builder.add_qa(qa_entries);
+    }
 
-    let (claim_dim, claim_embeddings) = if !claims.is_empty() {
-        eprintln!("Embedding claims section...");
+    if !claims.is_empty() {
+        eprintln!("Embedding claims section ({} claims)...", claims.len());
         let claim_texts: Vec<String> = claims
             .iter()
             .map(|c| format!("{} {} {} {}", c.subject, c.predicate, c.object, c.evidence))
             .collect();
         let refs: Vec<&str> = claim_texts.iter().map(String::as_str).collect();
-        (embedder.dim(), embed_texts(&embedder, &refs)?)
-    } else {
-        (0usize, Vec::new())
-    };
+        let vectors = embed_texts(&embedder, &refs)?;
+        builder.add_dense_lane(
+            SCOPE_CLAIMS,
+            DenseLane::from_f32(spec.clone(), dim, claims.len(), &vectors, Quant::Int8)?,
+        )?;
+        builder.add_claims(claims);
+    }
 
-    // Build and write index
-    let index = SearchIndex::new(
-        model_id.to_string(),
-        embedder.dim(),
-        metadata,
-        all_embeddings,
-        bm25,
-        chunk_texts,
-    )
-    .with_qa_section(qa_entries, qa_dim, qa_embeddings)
-    .with_claims_section(claims, claim_dim, claim_embeddings);
+    let index = builder.finish()?;
 
     eprintln!("Writing index to {}...", output.display());
     let file = fs::File::create(&output)
         .with_context(|| format!("creating output file {}", output.display()))?;
-    let writer = BufWriter::new(file);
-    let is_ed_output = output
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ed"));
-    if is_ed_output {
-        index.write_ed_to(writer)?;
-    } else {
-        index.write_to(writer)?;
-    }
+    let mut writer = BufWriter::new(file);
+    index.write_ed_to(&mut writer)?;
+    writer.flush()?;
 
     eprintln!(
-        "Done! Index contains {} chunks, {} qa entries, {} claims.",
-        all_chunks.len(),
-        index.qa_entries.len(),
-        index.claims.len()
+        "Done! Index contains {} chunks over {} pages, {} qa entries, {} claims; lanes: {}.",
+        index.manifest.chunks,
+        index.manifest.pages,
+        index.qa.len(),
+        index.claims.len(),
+        index
+            .manifest
+            .dense
+            .iter()
+            .map(|d| format!("{} ({}-d {:?})", d.id, d.dim, d.quant))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
+}
+
+/// Lane description for a sentence-transformers BERT model loaded through the
+/// current `Embedder` (mean pooling, L2-normalised, no prefixes).
+// TODO(integrator): replace with the `models.rs` registry entry for
+// `model_id` (pooling, max_seq_len, prefixes, revision, runtime files).
+fn dense_spec_for_model(model_id: &str, dim: usize) -> DenseSpec {
+    let short = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    DenseSpec {
+        id: short,
+        model: model_id.to_string(),
+        family: Family::Bert,
+        dim,
+        pooling: Pooling::Mean,
+        normalize: true,
+        query_prefix: String::new(),
+        doc_prefix: String::new(),
+        max_seq_len: 512,
+        revision: None,
+        quant: Quant::Int8,
+        runtime: RuntimeSpec::WasmCandle {
+            files: vec![
+                "config.json".to_string(),
+                "tokenizer.json".to_string(),
+                "model.safetensors".to_string(),
+            ],
+        },
+    }
 }
 
 fn build_summary_chunk(doc: &Document) -> Option<Chunk> {
@@ -689,99 +799,524 @@ fn split_sentences_for_summary(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Embeds queries with one of the index's own dense lanes.
+struct QueryEmbedder {
+    lane: usize,
+    spec: DenseSpec,
+    embedder: Embedder,
+}
+
+impl QueryEmbedder {
+    /// Pick `lane_id` (or the first wasm-candle lane) and load its model.
+    fn for_index(index: &SearchIndex, lane_id: Option<&str>) -> Result<Self> {
+        if index.manifest.dense.is_empty() {
+            bail!("index has no dense lane; use --mode keyword or --mode sparse");
+        }
+        let spec = match lane_id {
+            Some(id) => index
+                .manifest
+                .dense_lane(id)
+                .with_context(|| {
+                    format!(
+                        "lane {:?} is not in the index (lanes: {})",
+                        id,
+                        lane_list(index)
+                    )
+                })?
+                .clone(),
+            None => index
+                .manifest
+                .first_wasm_lane()
+                .with_context(|| {
+                    format!(
+                        "index has only webgpu lanes ({}); the CLI can embed queries only for wasm-candle (BERT) lanes",
+                        lane_list(index)
+                    )
+                })?
+                .clone(),
+        };
+        if !matches!(spec.runtime, RuntimeSpec::WasmCandle { .. }) {
+            bail!(
+                "lane {:?} is a webgpu-onnx lane; the CLI can embed queries only for wasm-candle (BERT) lanes",
+                spec.id
+            );
+        }
+        let lane = index
+            .dense_lane(&spec.id)
+            .with_context(|| format!("index has no dense section for lane {:?}", spec.id))?;
+        eprintln!(
+            "Loading embedding model for lane {}: {}...",
+            spec.id, spec.model
+        );
+        // TODO(integrator): use `embed::load_dense(&spec.model, device, ..)` with
+        // `spec.revision` so the CLI resolves the same pinned files as the worker.
+        let embedder = Embedder::new(&spec.model)?;
+        if embedder.dim() != spec.dim {
+            bail!(
+                "model {} produces {}-d vectors but lane {:?} stores {}-d",
+                spec.model,
+                embedder.dim(),
+                spec.id,
+                spec.dim
+            );
+        }
+        Ok(Self {
+            lane,
+            spec,
+            embedder,
+        })
+    }
+
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        embed_query(&self.embedder, &self.spec, text)
+    }
+}
+
+/// One query embedding with the lane's query prefix applied.
+// TODO(integrator): swap `Embedder` for `DenseEncoder::embed(&[text], TextKind::Query)`.
+fn embed_query(embedder: &Embedder, spec: &DenseSpec, text: &str) -> Result<Vec<f32>> {
+    let prefixed = spec.prefixed(TextKind::Query, text);
+    let mut vecs = embedder.embed_batch(&[prefixed.as_str()])?;
+    vecs.pop().context("embedder returned no vector")
+}
+
+fn lane_list(index: &SearchIndex) -> String {
+    index
+        .manifest
+        .dense
+        .iter()
+        .map(|d| {
+            let kind = match d.runtime {
+                RuntimeSpec::WasmCandle { .. } => "wasm-candle",
+                RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
+            };
+            format!("{} [{}]", d.id, kind)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Fetch the sparse arm's `tokenizer.json` from HuggingFace (pinned to the
+/// manifest revision). Returns `None`, with a warning, when it cannot be
+/// loaded so the search degrades instead of failing.
+fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
+    let spec = index.manifest.sparse.as_ref()?;
+    let fetch = || -> Result<tokenizers::Tokenizer> {
+        let api = hf_hub::api::sync::Api::new().context("creating HuggingFace Hub API client")?;
+        let repo = api.repo(hf_hub::Repo::with_revision(
+            spec.tokenizer.clone(),
+            hf_hub::RepoType::Model,
+            spec.revision.clone().unwrap_or_else(|| "main".to_string()),
+        ));
+        let path = repo
+            .get("tokenizer.json")
+            .with_context(|| format!("downloading tokenizer.json from {}", spec.tokenizer))?;
+        tokenizers::Tokenizer::from_file(&path).map_err(|e| anyhow::anyhow!("{}", e))
+    };
+    match fetch() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("warning: sparse arm skipped: {:#}", e);
+            None
+        }
+    }
+}
+
+/// Everything the CLI needs to run queries against an index the way the
+/// widget does.
+struct QueryRuntime {
+    dense: Option<QueryEmbedder>,
+    sparse_tokenizer: Option<tokenizers::Tokenizer>,
+    mode: Mode,
+}
+
+impl QueryRuntime {
+    fn new(index: &SearchIndex, mode: Mode, lane: Option<&str>) -> Result<Self> {
+        let dense = if matches!(mode, Mode::Hybrid | Mode::Dense) {
+            Some(QueryEmbedder::for_index(index, lane)?)
+        } else {
+            None
+        };
+        let sparse_tokenizer =
+            if matches!(mode, Mode::Hybrid | Mode::Sparse) && index.sparse.is_some() {
+                load_sparse_tokenizer(index)
+            } else {
+                None
+            };
+        Ok(Self {
+            dense,
+            sparse_tokenizer,
+            mode,
+        })
+    }
+
+    fn sparse_terms(&self, index: &SearchIndex, text: &str) -> Result<Option<Vec<SparseTerm>>> {
+        match (&index.sparse, &self.sparse_tokenizer) {
+            (Some(sparse), Some(tok)) => Ok(Some(sparse_query_terms_local(
+                tok,
+                &|id| sparse.idf_of(id),
+                text,
+            )?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Retrieve and group pages exactly like the widget.
+    fn run(
+        &self,
+        index: &SearchIndex,
+        text: &str,
+        top_k: usize,
+    ) -> Result<(Vec<PageResult>, Retrieval)> {
+        let dense = match &self.dense {
+            Some(e) => Some((e.lane, e.embed(text)?)),
+            None => None,
+        };
+        let q = Query {
+            text,
+            dense,
+            sparse: self.sparse_terms(index, text)?,
+            mode: self.mode,
+            top_k,
+            weights: Weights::default(),
+        };
+        let retrieval = retrieve(index, &q)?;
+        let pages = group_pages(index, &retrieval.ranked, &query_terms(text), top_k);
+        Ok((pages, retrieval))
+    }
+}
+
+fn load_index(path: &PathBuf) -> Result<SearchIndex> {
+    eprintln!("Loading index from {}...", path.display());
+    let bytes = fs::read(path).with_context(|| format!("opening index file {}", path.display()))?;
+    let index = SearchIndex::from_bytes(&bytes)?;
+    eprintln!(
+        "  {} chunks, {} pages, lanes: {}, sparse terms: {}",
+        index.manifest.chunks,
+        index.manifest.pages,
+        if index.manifest.dense.is_empty() {
+            "none".to_string()
+        } else {
+            lane_list(&index)
+        },
+        index.sparse.as_ref().map(|s| s.term_count()).unwrap_or(0)
+    );
+    Ok(index)
+}
+
+#[derive(serde::Serialize)]
+struct SearchOutput<'a> {
+    query: &'a str,
+    mode: Mode,
+    dense_lane: Option<&'a str>,
+    arms: eddie::search::Arms,
+    degraded: &'a [String],
+    results: &'a [PageResult],
+}
+
 fn cmd_search(
     index_path: PathBuf,
     query: &str,
     top_k: usize,
-    model_id: &str,
-    mode: SearchMode,
-    scope: SearchScope,
+    mode: Mode,
+    lane: Option<&str>,
+    json: bool,
 ) -> Result<()> {
-    // Load index
-    eprintln!("Loading index from {}...", index_path.display());
+    if top_k == 0 {
+        bail!("--top-k must be > 0");
+    }
+    let index = load_index(&index_path)?;
+    let runtime = QueryRuntime::new(&index, mode, lane)?;
+    let (pages, retrieval) = runtime.run(&index, query, top_k)?;
+
+    if json {
+        let out = SearchOutput {
+            query,
+            mode,
+            dense_lane: runtime.dense.as_ref().map(|d| d.spec.id.as_str()),
+            arms: retrieval.arms,
+            degraded: &retrieval.degraded,
+            results: &pages,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!(
+        "\n{} results for: \"{}\"  (arms: dense={} sparse={} bm25={})",
+        mode.as_str(),
+        query,
+        retrieval.arms.dense,
+        retrieval.arms.sparse,
+        retrieval.arms.bm25
+    );
+    for note in &retrieval.degraded {
+        println!("  note: {}", note);
+    }
+    println!("{}", "-".repeat(60));
+    if pages.is_empty() {
+        println!("(no results)");
+    }
+    for (rank, page) in pages.iter().enumerate() {
+        println!(
+            "{}. [{:.4}] {} — {}",
+            rank + 1,
+            page.score,
+            page.title,
+            page.url
+        );
+        if let Some(section) = &page.section {
+            println!("   Section: {}", section);
+        }
+        let ranks = retrieval
+            .ranked
+            .iter()
+            .find(|c| c.chunk == page.chunk)
+            .map(|c| {
+                format!(
+                    "chunk {} (dense {} / sparse {} / bm25 {}), {} chunk(s) on page",
+                    c.chunk,
+                    c.dense_rank.map_or("-".to_string(), |r| r.to_string()),
+                    c.sparse_rank.map_or("-".to_string(), |r| r.to_string()),
+                    c.bm25_rank.map_or("-".to_string(), |r| r.to_string()),
+                    page.chunks.len()
+                )
+            })
+            .unwrap_or_default();
+        println!("   {}", ranks);
+        println!("   {}", page.snippet);
+    }
+    Ok(())
+}
+
+fn cmd_stats(index_path: PathBuf, json: bool) -> Result<()> {
     let bytes = fs::read(&index_path)
         .with_context(|| format!("opening index file {}", index_path.display()))?;
-    let index = SearchIndex::from_bytes(&bytes)?;
-    eprintln!(
-        "  {} chunks, {} dimensions",
-        index.metadata.len(),
-        index.dim
+    let info = SearchIndex::inspect(&bytes, Some(9))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+    println!("Manifest:");
+    println!("{}", serde_json::to_string_pretty(&info.manifest)?);
+    println!();
+    println!(
+        "File: {} bytes = header {} + manifest {} + compressed payload {} (raw payload {})",
+        info.file_bytes,
+        info.file_bytes - info.manifest_bytes - info.payload_compressed_bytes,
+        info.manifest_bytes,
+        info.payload_compressed_bytes,
+        info.payload_bytes
     );
+    println!();
+    println!(
+        "{:<28} {:>12} {:>14}",
+        "section", "raw bytes", "brotli (est.)"
+    );
+    println!("{}", "-".repeat(56));
+    for s in &info.sections {
+        println!(
+            "{:<28} {:>12} {:>14}",
+            s.name,
+            s.raw_bytes,
+            s.compressed_bytes
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+    println!();
+    for lane in &info.manifest.dense {
+        let kind = match &lane.runtime {
+            RuntimeSpec::WasmCandle { .. } => "wasm-candle".to_string(),
+            RuntimeSpec::WebgpuOnnx { repo, dtype, .. } => {
+                format!("webgpu-onnx {} {}", repo, dtype)
+            }
+        };
+        println!(
+            "lane {:<12} {}  {}-d {:?} pooling={:?}  [{}]",
+            lane.id, lane.model, lane.dim, lane.quant, lane.pooling, kind
+        );
+    }
+    match &info.manifest.sparse {
+        Some(s) => println!(
+            "sparse: {} terms, tokenizer {} (vocab {})",
+            s.terms, s.tokenizer, s.vocab_hash
+        ),
+        None => println!("sparse: none"),
+    }
+    Ok(())
+}
 
-    let query_vec = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        eprintln!("Loading embedding model: {}...", model_id);
-        let embedder = Embedder::new(model_id)?;
-        let query_vecs = embedder.embed_batch(&[query])?;
-        Some(query_vecs[0].clone())
-    } else {
-        None
+#[derive(Debug, serde::Deserialize)]
+struct LabelSet {
+    cases: Vec<LabelCase>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LabelCase {
+    #[serde(default)]
+    id: Option<String>,
+    query: String,
+    /// Relevant page URLs.
+    relevant: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CaseMetrics {
+    id: String,
+    query: String,
+    hit: f64,
+    rr: f64,
+    ndcg: f64,
+    first_relevant_rank: Option<usize>,
+    top: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct EvalReport {
+    k: usize,
+    mode: Mode,
+    cases: usize,
+    hit_at_k: f64,
+    mrr: f64,
+    ndcg_at_k: f64,
+    per_case: Vec<CaseMetrics>,
+}
+
+fn cmd_eval(
+    index_path: PathBuf,
+    labels: PathBuf,
+    top_k: usize,
+    mode: Mode,
+    lane: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if top_k == 0 {
+        bail!("--top-k must be > 0");
+    }
+    let raw = fs::read_to_string(&labels)
+        .with_context(|| format!("reading labels {}", labels.display()))?;
+    let set: LabelSet = toml::from_str(&raw)
+        .with_context(|| format!("parsing labels {} as TOML", labels.display()))?;
+    if set.cases.is_empty() {
+        bail!("labels file has no [[cases]]");
+    }
+    for (i, c) in set.cases.iter().enumerate() {
+        if c.query.trim().is_empty() || c.relevant.is_empty() {
+            bail!("case {} needs a query and at least one relevant url", i + 1);
+        }
+    }
+
+    let index = load_index(&index_path)?;
+    let runtime = QueryRuntime::new(&index, mode, lane)?;
+
+    let mut per_case = Vec::with_capacity(set.cases.len());
+    for (i, case) in set.cases.iter().enumerate() {
+        let (pages, _) = runtime.run(&index, &case.query, top_k)?;
+        let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
+        per_case.push(CaseMetrics {
+            id: case.id.clone().unwrap_or_else(|| format!("case-{}", i + 1)),
+            query: case.query.clone(),
+            hit: hit_at_k(&urls, &case.relevant, top_k),
+            rr: mrr(&urls, &case.relevant),
+            ndcg: ndcg_at_k(&urls, &case.relevant, top_k),
+            first_relevant_rank: urls
+                .iter()
+                .position(|u| case.relevant.iter().any(|r| r == u))
+                .map(|p| p + 1),
+            top: urls,
+        });
+    }
+    let n = per_case.len() as f64;
+    let report = EvalReport {
+        k: top_k,
+        mode,
+        cases: per_case.len(),
+        hit_at_k: per_case.iter().map(|c| c.hit).sum::<f64>() / n,
+        mrr: per_case.iter().map(|c| c.rr).sum::<f64>() / n,
+        ndcg_at_k: per_case.iter().map(|c| c.ndcg).sum::<f64>() / n,
+        per_case,
     };
 
-    if matches!(scope, SearchScope::Chunks | SearchScope::All) {
-        let ids = retrieve_chunk_ids(&index, query, query_vec.as_deref(), top_k, mode)?;
-        match mode {
-            SearchMode::Semantic => println!("\nChunk semantic results for: \"{}\"", query),
-            SearchMode::Keyword => println!("\nChunk keyword results for: \"{}\"", query),
-            SearchMode::Hybrid => println!("\nChunk hybrid results for: \"{}\"", query),
-        }
-        println!("{}", "-".repeat(60));
-        for (rank, chunk_idx) in ids.iter().enumerate() {
-            let meta = &index.metadata[*chunk_idx];
-            println!("{}. {} — {}", rank + 1, meta.title, meta.url);
-            if let Some(section) = &meta.section {
-                println!("   Section: {}", section);
-            }
-            if let Some(text) = index.texts.get(*chunk_idx) {
-                let snippet = text.chars().take(180).collect::<String>();
-                println!("   {}", snippet.replace('\n', " "));
-            }
-        }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
     }
-
-    if matches!(scope, SearchScope::Qa | SearchScope::All) {
-        println!("\nQA lane results:");
-        println!("{}", "-".repeat(60));
-        if index.qa_entries.is_empty() || index.qa_embeddings.is_empty() {
-            println!("(no QA section embedded in index)");
-        } else if let Some(qvec) = query_vec.as_deref() {
-            let hits = semantic_top_n(&index.qa_embeddings, index.qa_dim, qvec, top_k);
-            for (rank, (idx, score)) in hits.into_iter().enumerate() {
-                let item = &index.qa_entries[idx];
-                println!("{}. [{:.4}] {}", rank + 1, score, item.question);
-                println!("   {}", item.answer);
-                println!("   source: {}", item.source_url);
-            }
-        } else {
-            println!("(QA semantic lane requires semantic/hybrid mode)");
-        }
+    println!(
+        "\n{:<24} {:>6} {:>6} {:>6}  first relevant",
+        "case", "hit", "rr", "ndcg"
+    );
+    println!("{}", "-".repeat(60));
+    for c in &report.per_case {
+        println!(
+            "{:<24} {:>6.2} {:>6.2} {:>6.2}  {}",
+            truncate_label(&c.id, 24),
+            c.hit,
+            c.rr,
+            c.ndcg,
+            c.first_relevant_rank
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
     }
-
-    if matches!(scope, SearchScope::Claims | SearchScope::All) {
-        println!("\nClaims lane results:");
-        println!("{}", "-".repeat(60));
-        if index.claims.is_empty() || index.claim_embeddings.is_empty() {
-            println!("(no claims section embedded in index)");
-        } else if let Some(qvec) = query_vec.as_deref() {
-            let hits = semantic_top_n(&index.claim_embeddings, index.claim_dim, qvec, top_k);
-            for (rank, (idx, score)) in hits.into_iter().enumerate() {
-                let c = &index.claims[idx];
-                println!(
-                    "{}. [{:.4}] {} {} {}",
-                    rank + 1,
-                    score,
-                    c.subject,
-                    c.predicate,
-                    c.object
-                );
-                println!("   evidence: {}", c.evidence);
-                println!("   source: {}", c.source_url);
-            }
-        } else {
-            println!("(claims semantic lane requires semantic/hybrid mode)");
-        }
-    }
-
+    println!("{}", "-".repeat(60));
+    println!(
+        "{} cases, mode {}: Hit@{} {:.3}  MRR {:.3}  nDCG@{} {:.3}",
+        report.cases,
+        report.mode.as_str(),
+        report.k,
+        report.hit_at_k,
+        report.mrr,
+        report.k,
+        report.ndcg_at_k
+    );
     Ok(())
+}
+
+fn truncate_label(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max - 1).collect();
+        out.push('…');
+        out
+    }
+}
+
+// TODO(integrator): the synthesis workstream adds `hit_at_k`, `mrr`,
+// `ndcg_at_k` to `eval.rs`; delete these three and import them.
+/// 1.0 when any relevant url appears in the first `k` results.
+fn hit_at_k(ranked: &[String], relevant: &[String], k: usize) -> f64 {
+    if ranked.iter().take(k).any(|u| relevant.contains(u)) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Reciprocal rank of the first relevant result (0 when none).
+fn mrr(ranked: &[String], relevant: &[String]) -> f64 {
+    ranked
+        .iter()
+        .position(|u| relevant.contains(u))
+        .map(|p| 1.0 / (p as f64 + 1.0))
+        .unwrap_or(0.0)
+}
+
+/// Binary-gain nDCG over the first `k` results.
+fn ndcg_at_k(ranked: &[String], relevant: &[String], k: usize) -> f64 {
+    let dcg: f64 = ranked
+        .iter()
+        .take(k)
+        .enumerate()
+        .filter(|(_, u)| relevant.contains(u))
+        .map(|(i, _)| 1.0 / ((i as f64 + 2.0).log2()))
+        .sum();
+    let ideal_hits = relevant.len().min(k);
+    let idcg: f64 = (0..ideal_hits)
+        .map(|i| 1.0 / ((i as f64 + 2.0).log2()))
+        .sum();
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -798,6 +1333,7 @@ fn cmd_tune(
     mode: SearchMode,
     report: Option<PathBuf>,
 ) -> Result<()> {
+    let mode: Mode = mode.into();
     let parser = parser_for(cms);
     eprintln!(
         "Parsing content from {} with {} parser...",
@@ -901,11 +1437,11 @@ fn cmd_qa_corpus(
         .with_context(|| format!("opening index file {}", index_path.display()))?;
     let index = SearchIndex::from_bytes(&bytes)?;
 
-    let mut corpus = if !index.qa_entries.is_empty() {
+    let mut corpus = if !index.qa.is_empty() {
         eprintln!("Using embedded QA section from index...");
         QaCorpus {
             version: 1,
-            entries: index.qa_entries.clone(),
+            entries: index.qa.clone(),
         }
     } else {
         if index.texts.is_empty() {
@@ -996,23 +1532,31 @@ fn run_tuning(
     chunk_sizes: &str,
     overlaps: &str,
     default_top_k: usize,
-    mode: SearchMode,
+    mode: Mode,
 ) -> Result<Vec<TuneCandidate>> {
     let chunk_values = parse_usize_csv(chunk_sizes)?;
     let overlap_values = parse_usize_csv(overlaps)?;
 
-    let queries: Vec<&str> = suite.cases.iter().map(|c| c.query.as_str()).collect();
-    let embedder = if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
+    let embedder = if matches!(mode, Mode::Dense | Mode::Hybrid) {
         eprintln!("Loading embedding model {} for tuning...", model_id);
         Some(Embedder::new(model_id)?)
     } else {
         None
     };
+    if mode == Mode::Sparse {
+        bail!("tune cannot build the sparse arm yet; use --mode hybrid, dense, or keyword");
+    }
 
-    let query_embeddings = if let Some(embedder) = &embedder {
-        Some(embedder.embed_batch(&queries)?)
-    } else {
-        None
+    let query_embeddings: Option<Vec<Vec<f32>>> = match &embedder {
+        Some(embedder) => {
+            let spec = dense_spec_for_model(model_id, embedder.dim());
+            let mut rows = Vec::with_capacity(suite.cases.len());
+            for case in &suite.cases {
+                rows.push(embed_query(embedder, &spec, &case.query)?);
+            }
+            Some(rows)
+        }
+        None => None,
     };
 
     let mut candidates = Vec::new();
@@ -1052,13 +1596,8 @@ fn run_tuning(
 
     candidates.sort_by(|a, b| {
         b.weighted_score
-            .partial_cmp(&a.weighted_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.pass_rate
-                    .partial_cmp(&a.pass_rate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .total_cmp(&a.weighted_score)
+            .then_with(|| b.pass_rate.total_cmp(&a.pass_rate))
             .then_with(|| a.chunk_size.cmp(&b.chunk_size))
             .then_with(|| a.overlap.cmp(&b.overlap))
     });
@@ -1066,6 +1605,8 @@ fn run_tuning(
     Ok(candidates)
 }
 
+/// Build the index `eddie index` would ship for these parameters (int8
+/// dense lane, BM25), without writing it.
 fn build_index_in_memory(
     docs: &[Document],
     chunk_size: usize,
@@ -1073,6 +1614,8 @@ fn build_index_in_memory(
     embedder: Option<&Embedder>,
     model_id: &str,
 ) -> Result<SearchIndex> {
+    // TODO(integrator): `tune` still hard-codes heading chunking and the fine
+    // lane; accept the same `--chunk-strategy` / coarse flags as `index`.
     let mut all_chunks = Vec::new();
     for doc in docs {
         let mut chunks =
@@ -1085,93 +1628,56 @@ fn build_index_in_memory(
 
     let metadata: Vec<_> = all_chunks.iter().map(|c| c.meta.clone()).collect();
     let texts: Vec<String> = all_chunks.iter().map(|c| c.text.clone()).collect();
-    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let bm25 = Bm25Index::build(&text_refs);
+    let n = texts.len();
+    // TODO(integrator): pass the real overlap word counts once `Chunk` carries them.
+    let overlap_words = vec![0u16; n];
 
-    let (dim, embeddings) = if let Some(embedder) = embedder {
-        (embedder.dim(), embed_texts(embedder, &text_refs)?)
-    } else {
-        (0usize, Vec::new())
-    };
-
-    Ok(SearchIndex::new(
-        model_id.to_string(),
-        dim,
-        metadata,
-        embeddings,
-        bm25,
-        texts,
-    ))
+    let mut builder = IndexBuilder::new();
+    if let Some(embedder) = embedder {
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let vectors = embed_texts(embedder, &text_refs)?;
+        let dim = embedder.dim();
+        builder.add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(
+                dense_spec_for_model(model_id, dim),
+                dim,
+                n,
+                &vectors,
+                Quant::Int8,
+            )?,
+        )?;
+    }
+    builder.add_chunks(metadata, texts, overlap_words)?;
+    builder.finish()
 }
 
+/// Best chunk id of each of the `top_k` pages the widget would show.
 fn retrieve_chunk_ids(
     index: &SearchIndex,
     query: &str,
     query_vec: Option<&[f32]>,
     top_k: usize,
-    mode: SearchMode,
+    mode: Mode,
 ) -> Result<Vec<usize>> {
-    let ids = match mode {
-        SearchMode::Semantic => {
-            let vec = query_vec.context("semantic mode requires query embedding")?;
-            search(index, vec, top_k)
-                .into_iter()
-                .map(|r| r.chunk_index)
-                .collect::<Vec<_>>()
+    let dense = match (mode, query_vec) {
+        (Mode::Dense | Mode::Hybrid, Some(v)) => Some((0usize, v.to_vec())),
+        (Mode::Dense | Mode::Hybrid, None) => {
+            bail!("{} mode requires a query embedding", mode.as_str())
         }
-        SearchMode::Keyword => index
-            .bm25
-            .search(query, top_k)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>(),
-        SearchMode::Hybrid => {
-            let vec = query_vec.context("hybrid mode requires query embedding")?;
-            let fetch_k = top_k.saturating_mul(3).max(top_k);
-            let semantic = search(index, vec, fetch_k)
-                .into_iter()
-                .map(|r| (r.chunk_index, r.score))
-                .collect::<Vec<_>>();
-            let keyword = index.bm25.search(query, fetch_k);
-            hybrid_rrf(&semantic, &keyword, top_k)
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect::<Vec<_>>()
-        }
+        _ => None,
     };
-    Ok(dedupe_ids(ids))
-}
-
-fn semantic_top_n(flat: &[f32], dim: usize, query_vec: &[f32], top_k: usize) -> Vec<(usize, f32)> {
-    if dim == 0 || flat.is_empty() || query_vec.len() != dim {
-        return Vec::new();
-    }
-    let rows = flat.len() / dim;
-    let mut scored = Vec::with_capacity(rows);
-    for row in 0..rows {
-        let start = row * dim;
-        let emb = &flat[start..start + dim];
-        let score = emb
-            .iter()
-            .zip(query_vec.iter())
-            .map(|(a, b)| a * b)
-            .sum::<f32>();
-        scored.push((row, score));
-    }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top_k);
-    scored
-}
-
-fn dedupe_ids(ids: Vec<usize>) -> Vec<usize> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for id in ids {
-        if seen.insert(id) {
-            out.push(id);
-        }
-    }
-    out
+    let q = Query {
+        text: query,
+        dense,
+        sparse: None,
+        mode,
+        top_k,
+        weights: Weights::default(),
+    };
+    let retrieval = retrieve(index, &q)?;
+    let pages = group_pages(index, &retrieval.ranked, &query_terms(query), top_k);
+    Ok(pages.into_iter().map(|p| p.chunk).collect())
 }
 
 fn build_eval_context(index: &SearchIndex, ids: &[usize]) -> String {
@@ -1246,7 +1752,7 @@ fn interactive_collect_cases(
     chunk_sizes: &str,
     overlaps: &str,
     top_k: usize,
-    mode: SearchMode,
+    mode: Mode,
 ) -> Result<()> {
     eprintln!("Interactive tuning: press Enter on query to finish.");
 
