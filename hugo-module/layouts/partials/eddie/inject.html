@@ -1,7 +1,7 @@
 {{- $cfg := .Site.Params.eddie | default dict -}}
 {{- $enabled := $cfg.enabled | default true -}}
 {{- if $enabled -}}
-{{- $indexUrl := $cfg.indexUrl | default "/eddie/index.ed" -}}
+{{- $indexPath := $cfg.indexUrl | default "/eddie/index.ed" -}}
 {{- $position := $cfg.position | default "bottom-right" -}}
 {{- $theme := $cfg.theme | default "auto" -}}
 {{- $offsetY := $cfg.offsetY | default 0 -}}
@@ -10,6 +10,37 @@
 {{- $qaSubject := $cfg.qaSubject | default "" -}}
 {{- $topK := $cfg.topK | default 8 -}}
 {{- $answerTopK := $cfg.answerTopK | default 5 -}}
+{{- $agentMode := $cfg.agentMode | default "auto" -}}
+{{- $agentModel := $cfg.agentModel | default "auto" -}}
+{{- $denseRuntime := $cfg.denseRuntime | default "auto" -}}
+{{- $consentText := $cfg.consentText | default "" -}}
+{{/*
+  relURL/absURL only prepend the site's baseURL path prefix (e.g. "/blog/"
+  for a site served under https://example.com/blog/) to a *relative* path.
+  A leading "/" makes Hugo treat the value as already root-relative and
+  leaves it untouched -- which silently drops the subpath. Strip a leading
+  "/" before calling relURL so "/eddie/index.ed" and "eddie/index.ed" behave
+  the same; an absolute URL with a scheme has no leading "/" to strip and
+  passes through relURL unchanged either way.
+*/}}
+{{- $indexRelPath := strings.TrimPrefix "/" $indexPath -}}
+{{- $indexUrl := $indexRelPath | relURL -}}
+{{/*
+  Cache-bust the index URL with a `?v=` derived from its content so a
+  rebuilt index is fetched immediately instead of serving a stale cached
+  copy. When the index lives under assets/ (Hugo Pipes can read it via
+  resources.Get), the value is a content hash and only changes when the
+  index actually changes. When it lives under static/ (the common case;
+  Hugo templates can't read arbitrary static/ files), this falls back to
+  the build timestamp, which busts the cache on every build instead of
+  only on content changes -- acceptable since static/eddie/index.ed is
+  typically rebuilt only when the site itself is rebuilt.
+*/}}
+{{- $cacheBust := now.Unix -}}
+{{- with resources.Get $indexRelPath -}}
+  {{- $cacheBust = substr (crypto.SHA256 .Content) 0 12 -}}
+{{- end -}}
+{{- $indexUrl = printf "%s?v=%v" $indexUrl $cacheBust -}}
 <script src="{{ "eddie/eddie-widget.js" | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
@@ -20,5 +51,9 @@
         data-qa-subject="{{ $qaSubject }}"
         data-top-k="{{ $topK }}"
         data-answer-top-k="{{ $answerTopK }}"
+        data-agent-mode="{{ $agentMode }}"
+        data-agent-model="{{ $agentModel }}"
+        data-dense-runtime="{{ $denseRuntime }}"
+        data-consent-text="{{ $consentText }}"
         defer></script>
 {{- end -}}
