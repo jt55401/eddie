@@ -11,6 +11,18 @@
   qaSubject = ""
   topK = 8
   answerTopK = 5
+  # "off" disables the in-browser agent entirely; "auto" enables it when the
+  # visitor's browser can run a WebLLM lane (see agentModel).
+  agentMode = "auto"
+  # "auto" picks Qwen3.5-0.8B; "quality" picks Qwen3.5-2B; any other value is
+  # passed through as a literal WebLLM model id.
+  agentModel = "auto"
+  # "auto" picks WebGPU (transformers.js) when available, else the WASM
+  # candle lane; "wasm" and "webgpu" force one lane and skip the other.
+  denseRuntime = "auto"
+  # Shown before the first model download (search or agent). Empty string
+  # uses the widget's built-in default consent copy.
+  consentText = ""
 
 [module]
   [module.hugoVersion]

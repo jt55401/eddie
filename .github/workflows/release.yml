@@ -9,28 +9,110 @@ on:
 permissions:
   contents: write
 
+# Third-party actions are pinned to a full commit SHA (see the trailing
+# comment on each `uses:` line for the tag/branch that SHA resolves to).
+# Re-pin deliberately; don't restore a floating tag.
+#
+# workflow_dispatch runs the full matrix and assembly (a "dry run"); only a
+# `v*` tag push publishes the GitHub Release itself, gated per-job below.
+#
+# The CUDA-accelerated build is not part of this release matrix. Build it
+# locally with `cargo build --release --features cuda` when you have a CUDA
+# toolchain available (see CLAUDE.md's CUDA notes).
+
 jobs:
-  build-release-assets:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            asset_os: linux
+            asset_arch: x86_64
+            exe_suffix: ""
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            asset_os: linux
+            asset_arch: aarch64
+            exe_suffix: ""
+          - name: macos-aarch64
+            os: macos-14
+            asset_os: macos
+            asset_arch: aarch64
+            exe_suffix: ""
+          - name: macos-x86_64
+            os: macos-15-intel
+            asset_os: macos
+            asset_arch: x86_64
+            exe_suffix: ""
+          - name: windows-x86_64
+            os: windows-2022
+            asset_os: windows
+            asset_arch: x86_64
+            exe_suffix: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-${{ matrix.name }}
+
+      - name: Build CLI binary
+        run: cargo build --release --locked --bin eddie
+
+      - name: Collect platform asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          asset_name="eddie-${{ matrix.asset_os }}-${{ matrix.asset_arch }}${{ matrix.exe_suffix }}"
+          cp "target/release/eddie${{ matrix.exe_suffix }}" "release-assets/$asset_name"
+          echo "asset_name=$asset_name" >> "$GITHUB_ENV"
+
+      - name: Upload platform asset
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-asset-${{ matrix.name }}
+          path: release-assets/*
+
+  assemble:
+    needs: build
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust + wasm target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-assemble
+
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
 
       - name: Install binaryen + brotli
         run: |
           sudo apt-get update
           sudo apt-get install -y binaryen brotli
 
-      - name: Build CLI binary
-        run: cargo build --release --locked --bin eddie
+      - name: Download platform binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-asset-*
+          path: release-assets
+          merge-multiple: true
 
       - name: Build widget and assemble Hugo module
         run: bash scripts/publish-hugo-module.sh
@@ -40,8 +122,8 @@ jobs:
 
       - name: Collect release files
         run: |
-          mkdir -p release-assets
-          cp target/release/eddie release-assets/eddie-linux-amd64
+          set -euo pipefail
+          ls -l release-assets/
           cp dist/eddie.wasm release-assets/
           cp dist/eddie.wasm.br release-assets/
           cp dist/eddie.wasm.gz release-assets/
@@ -57,20 +139,28 @@ jobs:
           cp dist/ASSET_SIZES.md release-assets/
           cp dist/asset-sizes.csv release-assets/
           tar -czf release-assets/eddie-hugo-module.tar.gz -C hugo-module .
-          (cd release-assets && sha256sum * > SHA256SUMS)
+          # shellcheck disable=SC2035  # no release asset name starts with '-';
+          # a bare glob keeps SHA256SUMS filenames unprefixed for the launchers'
+          # SHA256SUMS parsers (integrations/cli/{npm,gem,pypi}).
+          (cd release-assets && sha256sum -- * > SHA256SUMS)
+          cat release-assets/SHA256SUMS
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets
           path: release-assets/*
 
       - name: Publish GitHub Release assets
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            release-assets/eddie-linux-amd64
+            release-assets/eddie-linux-x86_64
+            release-assets/eddie-linux-aarch64
+            release-assets/eddie-macos-aarch64
+            release-assets/eddie-macos-x86_64
+            release-assets/eddie-windows-x86_64.exe
             release-assets/eddie.wasm
             release-assets/eddie.wasm.br
             release-assets/eddie.wasm.gz

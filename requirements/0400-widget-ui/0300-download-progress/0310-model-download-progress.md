@@ -4,21 +4,22 @@
 
 ## User Story
 
-As a site visitor, I see a progress indicator when a model is downloading for the first time, so I understand why search or Q&A isn't instant.
+As a site visitor, I see a progress indicator when a model is downloading
+for the first time, so I understand why search or the agent isn't instant.
 
 ## Key Fields/Parameters
 
-- triggers: first search (embedding model ~23MB), first Q&A (LLM ~1-2GB)
-- display: progress bar with percentage and size (e.g., "Loading search model... 12/23 MB")
-- caching: after first download, model loads from browser cache instantly
+- triggers: first search (the index's dense lane model, size depends on the preset the site was indexed with — see the model table in README.md), first Ask (the agent model, see [0300-qa-runtime's agent story](../../0300-qa-runtime/0200-llm-synthesis/0210-llm-answer-synthesis.md) for size by `data-agent-model`)
+- display: `status` events (`loading_index`, `loading_model {file, progress}`, `ready {lanes, arms}`) drive a progress bar with percentage and size; falls back to an indeterminate spinner when `Content-Length` is missing
+- caching: model files are cached in IndexedDB keyed by `repo@revision/file`; after first download, subsequent loads read from cache
 
 ## Acceptance Criteria
 
-- Progress bar shows bytes downloaded vs total for each model.
+- Progress bar shows bytes downloaded vs total for each model file, when the server reports `Content-Length`.
 - Search model download is triggered on first search, not on page load.
-- LLM model download is triggered on first Q&A use, not on first search.
+- Agent model download is triggered on first Ask use (after consent, see [0320](0320-download-consent.md)), not on first search.
 - On subsequent visits, cached models load without showing download progress.
-- If download fails, an error message is shown with a retry option.
+- If a model fetch fails after its retry, an error message is shown with a retry action; a failed dense lane is reported once and search continues with the remaining arms.
 
 ## Evidence
 

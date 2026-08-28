@@ -1,9 +1,18 @@
 name: Post-Publish Registry Smoke
 
+# Runs after the three publish workflows complete instead of racing the same
+# tag push (registry propagation, and any "required reviewers" approval gate
+# on the release environment, can take far longer than a fixed post-tag
+# delay would survive). Fires once per publish workflow completion; each run
+# still waits for every registry/asset it needs, so whichever run happens to
+# land last is the one that succeeds. See docs/guides/package-publishing.md.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - "Publish npm Packages"
+      - "Publish PyPI Packages"
+      - "Publish RubyGems Packages"
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
@@ -14,26 +23,42 @@ on:
 permissions:
   contents: read
 
+# Third-party actions are pinned to a full commit SHA (see the trailing
+# comment on each `uses:` line for the tag/branch that SHA resolves to).
+# Re-pin deliberately; don't restore a floating tag.
+
 jobs:
   smoke:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    # Generous enough to survive a "required reviewers" approval gate on the
+    # release environment plus registry propagation delay, per CMS matrix leg.
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
         cms: [hugo, astro, docusaurus, mkdocs, eleventy, jekyll]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # workflow_run checks out the default branch by default; pin to the
+          # commit that triggered the publish run (the tagged release commit).
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            # For a tag-triggered run, head_branch carries the tag name.
+            VERSION="${HEAD_BRANCH#v}"
           else
-            VERSION="${{ github.event.inputs.version }}"
+            VERSION="$DISPATCH_VERSION"
           fi
 
           if [[ -z "$VERSION" ]]; then
@@ -50,17 +75,21 @@ jobs:
         run: |
           set -euo pipefail
 
+          # ~60 minutes per check: long enough to survive a manual-approval
+          # gate on the release environment plus normal registry propagation.
+          TRIES=240
+          SLEEP_SECONDS=15
+
           wait_for_npm() {
             local pkg="$1"
-            local tries=50
-            for i in $(seq 1 "$tries"); do
+            for _ in $(seq 1 "$TRIES"); do
               local found
               found="$(timeout 20s npm view "${pkg}@${VERSION}" version 2>/dev/null || true)"
               if [[ "$found" == "$VERSION" ]]; then
                 echo "Found npm package ${pkg}@${VERSION}"
                 return 0
               fi
-              sleep 6
+              sleep "$SLEEP_SECONDS"
             done
             echo "Timed out waiting for npm package ${pkg}@${VERSION}" >&2
             return 1
@@ -68,15 +97,14 @@ jobs:
 
           wait_for_pypi() {
             local pkg="$1"
-            local tries=50
-            for i in $(seq 1 "$tries"); do
+            for _ in $(seq 1 "$TRIES"); do
               local found
               found="$(curl -fsS "https://pypi.org/pypi/${pkg}/json" 2>/dev/null | jq -r '.info.version' || true)"
               if [[ "$found" == "$VERSION" ]]; then
                 echo "Found PyPI package ${pkg}==${VERSION}"
                 return 0
               fi
-              sleep 6
+              sleep "$SLEEP_SECONDS"
             done
             echo "Timed out waiting for PyPI package ${pkg}==${VERSION}" >&2
             return 1
@@ -84,15 +112,14 @@ jobs:
 
           wait_for_rubygems() {
             local pkg="$1"
-            local tries=50
-            for i in $(seq 1 "$tries"); do
+            for _ in $(seq 1 "$TRIES"); do
               local found
               found="$(curl -fsS "https://rubygems.org/api/v1/gems/${pkg}.json" 2>/dev/null | jq -r '.version' || true)"
               if [[ "$found" == "$VERSION" ]]; then
                 echo "Found RubyGem ${pkg}-${VERSION}"
                 return 0
               fi
-              sleep 6
+              sleep "$SLEEP_SECONDS"
             done
             echo "Timed out waiting for RubyGem ${pkg}-${VERSION}" >&2
             return 1
@@ -100,22 +127,22 @@ jobs:
 
           wait_for_release_asset() {
             local asset="$1"
-            local tries=50
-            for i in $(seq 1 "$tries"); do
+            for _ in $(seq 1 "$TRIES"); do
               if curl -fsSI \
                 "https://github.com/jt55401/eddie/releases/download/v${VERSION}/${asset}" \
                 >/dev/null; then
                 echo "Found release asset ${asset} for v${VERSION}"
                 return 0
               fi
-              sleep 6
+              sleep "$SLEEP_SECONDS"
             done
             echo "Timed out waiting for release asset ${asset} for v${VERSION}" >&2
             return 1
           }
 
-          # CLI wrappers currently download native binaries from GitHub releases.
-          wait_for_release_asset "eddie-linux-amd64"
+          # CLI wrappers download native binaries from GitHub releases; this
+          # runner is linux/x86_64, matching the eddie-linux-x86_64 asset.
+          wait_for_release_asset "eddie-linux-x86_64"
 
           case "${{ matrix.cms }}" in
             hugo)

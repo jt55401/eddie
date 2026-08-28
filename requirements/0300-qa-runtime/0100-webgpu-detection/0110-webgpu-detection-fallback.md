@@ -1,24 +1,26 @@
-# 0110 WebGPU Detection and Fallback
+# 0110 WebGPU and Device Gating
 
 [Requirements Home](../../0000-README.md) | [Area Overview](../0000-high-level-requirements.md)
 
 ## User Story
 
-As the widget, I detect whether the browser supports WebGPU and show or hide the Ask button accordingly.
+As the widget, I check whether the visitor's device can actually run the
+agent before offering it, so a capable-looking but too-weak device doesn't
+get an unusable download.
 
 ## Key Fields/Parameters
 
-- detection: `navigator.gpu` API check (also verify `requestAdapter()` succeeds)
-- fallback: Ask button not rendered — search works identically without it
-- no error: graceful degradation, no console errors on older browsers
+- gate: a WebGPU adapter exists (`navigator.gpu`, `requestAdapter()` succeeds) **and** `adapter.limits.maxBufferSize >= 1 GiB` **and** `navigator.connection.saveData` is not set
+- `data-agent-mode="off"` skips detection entirely and never renders the Ask affordance
+- fallback: when the gate fails, the Ask affordance is simply not rendered — search works identically without it, no error messages
 
 ## Acceptance Criteria
 
-- WebGPU detection runs when the modal is first opened.
-- When WebGPU is unavailable, the Ask button is simply not rendered (no error messages).
-- Search functionality is completely unaffected regardless of WebGPU support.
-- No console errors on browsers without WebGPU.
-- When `data-qa-enabled="false"`, detection is skipped and Ask button is not rendered.
+- Device gating runs when the widget is first opened, before any agent model is fetched.
+- When the gate fails, the Ask affordance is not rendered and no console errors appear.
+- Search functionality is completely unaffected regardless of whether the agent gate passes.
+- `data-agent-mode="off"` skips detection and disables the agent regardless of device capability.
+- A device with a WebGPU adapter but under the buffer-size floor is treated the same as no WebGPU at all (search-only, no error).
 
 ## Evidence
 
