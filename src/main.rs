@@ -549,6 +549,10 @@ fn cmd_index(
             spec.revision.as_deref().unwrap_or("main"),
             started.elapsed().as_secs_f64()
         );
+        lanes.push(lane);
+    }
+    if lanes.is_empty() {
+        bail!("at least one --dense-model is required");
     }
     let sparse_encoder = match &model_opts.sparse_model {
         Some(model_id) => {
