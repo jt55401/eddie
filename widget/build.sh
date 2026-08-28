@@ -15,7 +15,12 @@ if [[ -n "$NPM_SCOPE" ]]; then
   WASM_PACK_SCOPE_ARGS+=(--scope "$NPM_SCOPE")
 fi
 
-echo "==> Building WASM module..."
+# Cargo.toml's release profile is opt-level=3 for the native CLI; the WASM
+# build trades speed for size. Override either by exporting the variable.
+# (panic=abort was measured on 2026-08-28: +0 bytes after brotli, so it stays off.)
+export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-s}"
+
+echo "==> Building WASM module (opt-level=$CARGO_PROFILE_RELEASE_OPT_LEVEL)..."
 wasm-pack build "$PROJECT_ROOT" \
   "${WASM_PACK_SCOPE_ARGS[@]}" \
   --target no-modules \

@@ -30,7 +30,7 @@ use serde::Serialize;
 use tokenizers::Tokenizer;
 use wasm_bindgen::prelude::*;
 
-use crate::embed::Embedder;
+use crate::embed::{DenseEncoder, bert_from_bytes};
 use crate::index::SearchIndex;
 use crate::manifest::{DenseSpec, Family, RuntimeSpec, TextKind};
 use crate::search as rank;
@@ -39,7 +39,7 @@ use crate::search::{Mode, PageResult, Query, Weights};
 struct DenseRuntime {
     lane: usize,
     spec: DenseSpec,
-    embedder: Embedder,
+    embedder: Box<dyn DenseEncoder>,
 }
 
 struct Engine {
@@ -90,13 +90,11 @@ fn to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
     serde_json::to_string(value).map_err(|e| js_err("serializing result", e))
 }
 
-/// Embed one query with the lane's WASM embedder (prefix applied).
-// TODO(integrator): swap `Embedder` for the `DenseEncoder` from the new
-// embed.rs (`encoder.embed(&[text], TextKind::Query)`); this is the only
-// place the WASM module runs a model.
+/// Embed one query with the lane's WASM embedder; the encoder applies the
+/// lane's query prefix and truncation itself. This is the only place the
+/// WASM module runs a model.
 fn embed_query(rt: &DenseRuntime, text: &str) -> Result<Vec<f32>> {
-    let prefixed = rt.spec.prefixed(TextKind::Query, text);
-    let mut vecs = rt.embedder.embed_batch(&[prefixed.as_str()])?;
+    let mut vecs = rt.embedder.embed(&[text], TextKind::Query)?;
     vecs.pop().context("embedder returned no vector")
 }
 
@@ -167,8 +165,10 @@ pub fn init_dense_wasm(
                 format!("index has no dense/chunks/{} section", lane_id),
             )
         })?;
-        let embedder = Embedder::from_bytes(config, tokenizer, weights)
-            .map_err(|e| js_err("embedder init failed", e))?;
+        let embedder: Box<dyn DenseEncoder> = Box::new(
+            bert_from_bytes(spec.clone(), config, tokenizer, weights)
+                .map_err(|e| js_err("embedder init failed", e))?,
+        );
         if embedder.dim() != spec.dim {
             return Err(js_err(
                 "init_dense_wasm",
