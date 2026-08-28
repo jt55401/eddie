@@ -2,9 +2,13 @@
 
 [Requirements Home](../0000-README.md)
 
-Integration with static site generators and CI/CD pipelines. The indexer runs as a build step, the output ships as a static asset alongside the site.
+Integration with static site generators and CI/CD pipelines. The indexer
+runs as a build step, the output ships as a static asset alongside the
+site, and the CLI itself ships as a multi-platform release binary plus
+per-ecosystem launcher packages (npm, PyPI, RubyGems).
 
 ## Story Index
 
 - [0110 Hugo Integration](0100-hugo/0110-hugo-integration.md)
 - [0210 GitHub Actions Workflow](0200-github-actions/0210-github-actions-workflow.md)
+- [0220 Multi-Platform Release](0200-github-actions/0220-multi-platform-release.md)

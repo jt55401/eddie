@@ -1,28 +1,30 @@
-# 0410 Ask Button and Answer Card
+# 0410 Agent Ask Button and Answer Card
 
 [Requirements Home](../../0000-README.md) | [Area Overview](../0000-high-level-requirements.md)
 
 ## User Story
 
-As a site visitor, I can click an "Ask" button (or press Shift+Enter) to get a short AI-generated answer synthesized from my search results, displayed above the result list with source citations.
+As a site visitor on a device with a capable WebGPU adapter, I can click an
+"Ask" button (or press Shift+Enter) to get a streamed, cited answer from
+the in-browser agent, displayed above the result list with source
+citations, without leaving the search results behind.
 
 ## Key Fields/Parameters
 
-- trigger: "Ask" button to the right of the search input, or Shift+Enter keyboard shortcut
-- requires: WebGPU support (`navigator.gpu`)
-- output: 1-3 sentence answer + "Sources:" section with clickable links
+- trigger: "Ask" button next to the search input, or Shift+Enter using the current query (no re-entry needed)
+- gate: `data-agent-mode="auto"` and the device gate in [0300-qa-runtime's device gating story](../../0300-qa-runtime/0100-webgpu-detection/0110-webgpu-detection-fallback.md); `data-agent-mode="off"` hides the button unconditionally
+- output: streamed answer text with `[n]` citations, plus a sources list of the cited pages with clickable links
 - placement: answer card appears above the search results list; results remain visible below
-- search results already available (search is instant, runs on typing)
+- states: hidden (default), consent (see [0320](../0300-download-progress/0320-download-consent.md)), downloading model (progress bar), generating (streaming, stop button), complete (answer + sources), error (graceful message with retry)
 
 ## Acceptance Criteria
 
-- Ask button is only rendered when WebGPU is detected (no button = no Q&A, search unaffected).
-- Clicking Ask (or Shift+Enter) uses the current search query — no re-entry needed.
-- The generated answer includes a "Sources:" section with clickable page links.
-- The answer is streamed token-by-token as the LLM generates it (pulsing cursor during generation).
-- Ask button shows a spinner while the model is downloading or generating.
-- Answer card states: hidden (default), downloading model (progress bar), generating (streaming), complete (answer + sources), error (graceful message).
-- A new Ask on a different query replaces the previous answer card.
+- The Ask affordance is rendered only when the device gate passes and `data-agent-mode` is not `off` (see 0300-qa-runtime/0110); otherwise it is absent and search is unaffected.
+- Clicking Ask (or Shift+Enter) uses the current search query.
+- The generated answer includes a sources list with clickable page links, and inline `[n]` citations that resolve to that list.
+- The answer streams token-by-token as the model generates it, with a visible stop button that aborts generation.
+- A new query or a new Ask while generation is in progress aborts the previous generation before starting the next.
+- Answer card states transition exactly as listed above; an error state never leaves the UI stuck on a spinner.
 
 ## Evidence
 
