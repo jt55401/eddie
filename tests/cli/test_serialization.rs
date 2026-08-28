@@ -1,8 +1,29 @@
-use std::io::{BufReader, BufWriter, Cursor};
-
-use eddie::bm25::Bm25Index;
 use eddie::chunk::ChunkMeta;
-use eddie::index::SearchIndex;
+use eddie::index::{DenseLane, IndexBuilder, SCOPE_CHUNKS, SearchIndex};
+use eddie::manifest::{DenseSpec, Family, Pooling, Quant, RuntimeSpec};
+
+fn spec() -> DenseSpec {
+    DenseSpec {
+        id: "minilm".to_string(),
+        model: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1".to_string(),
+        family: Family::Bert,
+        dim: 3,
+        pooling: Pooling::Mean,
+        normalize: true,
+        query_prefix: String::new(),
+        doc_prefix: String::new(),
+        max_seq_len: 512,
+        revision: None,
+        quant: Quant::Int8,
+        runtime: RuntimeSpec::WasmCandle {
+            files: vec![
+                "config.json".into(),
+                "tokenizer.json".into(),
+                "model.safetensors".into(),
+            ],
+        },
+    }
+}
 
 #[test]
 fn search_index_round_trip_preserves_chunk_texts() {
@@ -14,21 +35,30 @@ fn search_index_round_trip_preserves_chunk_texts() {
         granularity: Some("fine".to_string()),
         chunk_index: 0,
     }];
-    let texts = vec!["hello world".to_string()];
-    let index = SearchIndex::new(
-        "test-model".to_string(),
-        3,
-        metadata,
-        vec![0.1, 0.2, 0.3],
-        Bm25Index::build(&["hello world"]),
-        texts,
-    );
+    let mut builder = IndexBuilder::new();
+    builder
+        .add_chunks(metadata, vec!["hello world".to_string()], vec![0])
+        .unwrap();
+    builder
+        .add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(spec(), 3, 1, &[0.1, 0.2, 0.3], Quant::Int8).unwrap(),
+        )
+        .unwrap();
+    let index = builder.finish().unwrap();
 
     let mut out = Vec::new();
-    index.write_to(BufWriter::new(&mut out)).unwrap();
+    index.write_ed_to(&mut out).unwrap();
 
-    let restored = SearchIndex::read_from(BufReader::new(Cursor::new(out))).unwrap();
-    assert_eq!(restored.model_id, "test-model");
-    assert_eq!(restored.dim, 3);
+    let manifest = SearchIndex::manifest_from_bytes(&out).unwrap();
+    assert_eq!(manifest.format, 5);
+    assert_eq!(manifest.dense[0].id, "minilm");
+    assert_eq!(manifest.dense[0].dim, 3);
+
+    let restored = SearchIndex::from_bytes(&out).unwrap();
     assert_eq!(restored.texts, vec!["hello world"]);
+    assert_eq!(restored.dense.len(), 1);
+    assert_eq!(restored.dense[0].rows, 1);
+    assert_eq!(restored.bm25.num_docs, 1);
+    assert!(restored.sparse.is_none());
 }
