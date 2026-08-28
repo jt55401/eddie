@@ -620,6 +620,7 @@ dependencies = [
  "serde_json",
  "tokenizers",
  "toml",
+ "unicode-segmentation",
  "ureq",
  "walkdir",
  "wasm-bindgen",

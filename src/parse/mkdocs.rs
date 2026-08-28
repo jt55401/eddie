@@ -7,8 +7,8 @@ use anyhow::Result;
 use crate::chunk::DocumentMeta;
 
 use super::{
-    ContentParser, derive_url, is_draft, meta, parse_yaml_frontmatter, strip_markdown,
-    yaml_extract, yaml_extract_list,
+    ContentParser, derive_url, is_frontmatter_draft, meta, parse_frontmatter_lines,
+    parse_yaml_frontmatter, strip_bom, strip_markdown, yaml_extract, yaml_extract_list,
 };
 
 /// Parser for MkDocs markdown docs.
@@ -21,13 +21,12 @@ impl ContentParser for MkDocsParser {
         file_path: &Path,
         content_root: &Path,
     ) -> Result<Option<(DocumentMeta, String)>> {
-        if is_draft(content) {
+        let content = strip_bom(content);
+        let Some((doc_meta, body)) = parse_frontmatter(content, file_path, content_root)? else {
             return Ok(None);
-        }
-
-        let (meta, body) = parse_frontmatter(content, file_path, content_root)?;
+        };
         let body = strip_markdown(&body);
-        Ok(Some((meta, body)))
+        Ok(Some((doc_meta, body)))
     }
 }
 
@@ -35,9 +34,14 @@ fn parse_frontmatter(
     content: &str,
     file_path: &Path,
     content_root: &Path,
-) -> Result<(DocumentMeta, String)> {
+) -> Result<Option<(DocumentMeta, String)>> {
     if content.starts_with("---") {
         let (yaml_str, body) = parse_yaml_frontmatter(content, file_path)?;
+        let fm = parse_frontmatter_lines(&yaml_str);
+        if is_frontmatter_draft(&fm) {
+            return Ok(None);
+        }
+
         let title = yaml_extract(&yaml_str, "title").unwrap_or_else(|| fallback_title(file_path));
         let description = yaml_extract(&yaml_str, "description");
         let date = yaml_extract(&yaml_str, "date");
@@ -47,7 +51,7 @@ fn parse_frontmatter(
             content_root,
             &["index.md", "README.md", "readme.md"],
         );
-        Ok((meta(title, url, description, tags, date), body))
+        Ok(Some((meta(title, url, description, tags, date), body)))
     } else {
         let title = fallback_title(file_path);
         let url = derive_url(
@@ -55,10 +59,10 @@ fn parse_frontmatter(
             content_root,
             &["index.md", "README.md", "readme.md"],
         );
-        Ok((
+        Ok(Some((
             meta(title, url, None, Vec::new(), None),
             content.to_string(),
-        ))
+        )))
     }
 }
 
@@ -82,5 +86,15 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.url, "/");
+    }
+
+    #[test]
+    fn mkdocs_skips_draft_marker_only_in_frontmatter() {
+        let parser = MkDocsParser;
+        let content = "---\ntitle: Tutorial\n---\n\n```\ndraft: true\n```\nBody.";
+        let result = parser
+            .parse_file(content, Path::new("docs/tutorial.md"), Path::new("docs"))
+            .unwrap();
+        assert!(result.is_some());
     }
 }
