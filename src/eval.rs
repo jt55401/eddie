@@ -69,10 +69,10 @@ impl AcceptanceSuite {
             if case.weight <= 0.0 {
                 bail!("case '{}' has non-positive weight", case.id);
             }
-            if let Some(rating) = case.user_rating {
-                if !(1..=5).contains(&rating) {
-                    bail!("case '{}' has user_rating outside 1..=5", case.id);
-                }
+            if let Some(rating) = case.user_rating
+                && !(1..=5).contains(&rating)
+            {
+                bail!("case '{}' has user_rating outside 1..=5", case.id);
             }
         }
 
@@ -170,6 +170,65 @@ fn default_weight() -> f32 {
     1.0
 }
 
+/// Hit@k: 1.0 if any of the first `k` retrieved ids appears in `relevant`,
+/// else 0.0. Returns 0.0 (never NaN or a divide-by-zero panic) when
+/// `relevant` is empty, `retrieved` is empty, or `k` is 0 — there is
+/// nothing to hit in any of those cases.
+pub fn hit_at_k(retrieved: &[String], relevant: &[String], k: usize) -> f64 {
+    if relevant.is_empty() || retrieved.is_empty() || k == 0 {
+        return 0.0;
+    }
+    let top = &retrieved[..retrieved.len().min(k)];
+    if top.iter().any(|r| relevant.iter().any(|rel| rel == r)) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Reciprocal rank of the first relevant id in `retrieved` (1-indexed), or
+/// 0.0 if none is found or `relevant` is empty. Callers average this across
+/// queries to get a mean reciprocal rank (MRR).
+pub fn mrr(retrieved: &[String], relevant: &[String]) -> f64 {
+    if relevant.is_empty() {
+        return 0.0;
+    }
+    for (i, r) in retrieved.iter().enumerate() {
+        if relevant.iter().any(|rel| rel == r) {
+            return 1.0 / (i as f64 + 1.0);
+        }
+    }
+    0.0
+}
+
+/// Normalized Discounted Cumulative Gain at `k`, using binary relevance.
+/// Returns 0.0 when `relevant` is empty or `k` is 0 rather than dividing by
+/// zero (there is no possible gain to normalize against).
+pub fn ndcg_at_k(retrieved: &[String], relevant: &[String], k: usize) -> f64 {
+    if relevant.is_empty() || k == 0 {
+        return 0.0;
+    }
+
+    let top = &retrieved[..retrieved.len().min(k)];
+    let dcg: f64 = top
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let gain = if relevant.iter().any(|rel| rel == r) {
+                1.0
+            } else {
+                0.0
+            };
+            gain / (i as f64 + 2.0).log2()
+        })
+        .sum();
+
+    let ideal_hits = relevant.len().min(k);
+    let idcg: f64 = (0..ideal_hits).map(|i| 1.0 / (i as f64 + 2.0).log2()).sum();
+
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +265,62 @@ mod tests {
         let out = evaluate_case(&case, "The subject worked for Common Crawl and Nike.");
         assert!(!out.passed);
         assert_eq!(out.missing_all, vec!["kagi".to_string()]);
+    }
+
+    fn ids(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn hit_at_k_finds_hit_within_window() {
+        let retrieved = ids(&["a", "b", "c"]);
+        let relevant = ids(&["c"]);
+        assert_eq!(hit_at_k(&retrieved, &relevant, 3), 1.0);
+        assert_eq!(hit_at_k(&retrieved, &relevant, 2), 0.0);
+    }
+
+    #[test]
+    fn hit_at_k_empty_relevant_is_zero_not_nan() {
+        let retrieved = ids(&["a", "b"]);
+        let relevant: Vec<String> = Vec::new();
+        assert_eq!(hit_at_k(&retrieved, &relevant, 5), 0.0);
+    }
+
+    #[test]
+    fn mrr_scores_reciprocal_of_first_hit_rank() {
+        let retrieved = ids(&["a", "b", "c"]);
+        let relevant = ids(&["b"]);
+        assert!((mrr(&retrieved, &relevant) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mrr_no_hit_or_empty_relevant_is_zero() {
+        let retrieved = ids(&["a", "b"]);
+        assert_eq!(mrr(&retrieved, &ids(&["z"])), 0.0);
+        assert_eq!(mrr(&retrieved, &[]), 0.0);
+    }
+
+    #[test]
+    fn ndcg_perfect_ranking_is_one() {
+        let retrieved = ids(&["a", "b", "c"]);
+        let relevant = ids(&["a", "b"]);
+        let score = ndcg_at_k(&retrieved, &relevant, 3);
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ndcg_empty_relevant_is_zero_not_nan() {
+        let retrieved = ids(&["a", "b"]);
+        let score = ndcg_at_k(&retrieved, &[], 3);
+        assert_eq!(score, 0.0);
+        assert!(!score.is_nan());
+    }
+
+    #[test]
+    fn ndcg_zero_k_is_zero() {
+        let retrieved = ids(&["a", "b"]);
+        let relevant = ids(&["a"]);
+        assert_eq!(ndcg_at_k(&retrieved, &relevant, 0), 0.0);
     }
 
     #[test]
