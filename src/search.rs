@@ -456,7 +456,7 @@ fn split_sentences(text: &str) -> Vec<String> {
     let mut current = String::new();
     let mut prev_was_terminator = false;
     for ch in text.chars() {
-        if ch == '\n' || (prev_was_terminator && ch.is_whitespace()) {
+        if ch == '\n' || (prev_was_terminator && ch.is_whitespace() && !is_list_marker(&current)) {
             push_sentence(&mut out, &mut current);
             prev_was_terminator = false;
             continue;
@@ -466,6 +466,19 @@ fn split_sentences(text: &str) -> Vec<String> {
     }
     push_sentence(&mut out, &mut current);
     out
+}
+
+/// `1.`, `12.`, `a.` at the end of the buffer: an ordered-list marker, not a
+/// sentence end.
+fn is_list_marker(current: &str) -> bool {
+    let tail = current.rsplit(char::is_whitespace).next().unwrap_or("");
+    let Some(body) = tail.strip_suffix('.') else {
+        return false;
+    };
+    !body.is_empty()
+        && body.chars().count() <= 3
+        && (body.chars().all(|c| c.is_ascii_digit())
+            || (body.chars().count() == 1 && body.chars().all(|c| c.is_ascii_alphabetic())))
 }
 
 fn push_sentence(out: &mut Vec<String>, current: &mut String) {
@@ -867,6 +880,23 @@ mod tests {
         assert!(s.contains("needle"), "{}", s);
         assert!(s.starts_with('…'));
         assert!(s.chars().count() <= 40);
+    }
+
+    #[test]
+    fn list_markers_do_not_split_sentences() {
+        assert_eq!(
+            split_sentences("Steps: 1. Fetch the index. 2. Pick a lane. Done."),
+            vec!["Steps: 1. Fetch the index.", "2. Pick a lane.", "Done."]
+        );
+        assert_eq!(
+            split_sentences("See v0.4. Then a. Next"),
+            vec!["See v0.4.", "Then a. Next"]
+        );
+        assert!(is_list_marker("foo 12."));
+        assert!(is_list_marker("b."));
+        assert!(!is_list_marker("1234."));
+        assert!(!is_list_marker("end."));
+        assert!(!is_list_marker(""));
     }
 
     #[test]

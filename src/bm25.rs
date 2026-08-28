@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! u32 num_docs | f32 avg_len | u32 doc_lengths[num_docs] | u32 terms
-//! per term: u16 len | UTF-8 bytes | u32 postings | (varint doc_delta, u32 tf)*
+//! per term: u16 len | UTF-8 bytes | u32 postings | (varint doc_delta, varint tf)*
 //! ```
 //!
 //! Terms are sorted bytewise; postings are sorted by document id and stored
@@ -172,7 +172,7 @@ impl Bm25Index {
             for (i, &(doc, tf)) in postings.iter().enumerate() {
                 let delta = if i == 0 { doc } else { doc - prev };
                 write_varint(&mut out, delta);
-                out.extend_from_slice(&tf.to_le_bytes());
+                write_varint(&mut out, tf);
                 prev = doc;
             }
         }
@@ -220,7 +220,7 @@ impl Bm25Index {
             if count == 0 {
                 bail!("bm25 term {:?} has no postings", term);
             }
-            let mut list = Vec::with_capacity(count.min(c.remaining() / 5));
+            let mut list = Vec::with_capacity(count.min(c.remaining() / 2));
             let mut prev = 0u32;
             for j in 0..count {
                 let delta = c
@@ -241,7 +241,7 @@ impl Bm25Index {
                         num_docs
                     );
                 }
-                let tf = c.u32().context("bm25 tf")?;
+                let tf = c.varint().context("bm25 tf")?;
                 if tf == 0 {
                     bail!("bm25 posting with zero tf for {:?}", term);
                 }
@@ -534,6 +534,11 @@ mod tests {
         let offset = 4 + 4 + 8 + 4 + 2 + 3 + 4;
         bad[offset] = 200;
         assert!(Bm25Index::from_bytes(&bad, 2, Bm25Params::default()).is_err());
+
+        // Two docs x two terms: 4 postings, each varint delta + varint tf = 2 bytes.
+        let postings_bytes: usize = index.postings.iter().map(|p| p.len() * 2).sum();
+        let dict_bytes: usize = index.terms.iter().map(|t| 2 + t.len() + 4).sum();
+        assert_eq!(bytes.len(), 4 + 4 + 8 + 4 + dict_bytes + postings_bytes);
 
         // Any truncation must be an error, never a panic.
         for cut in 0..bytes.len() {

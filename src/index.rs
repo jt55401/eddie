@@ -20,7 +20,7 @@
 //! |---|---|
 //! | `meta` | JSON `Vec<ChunkMeta>` |
 //! | `texts` | `u32 n`, then `n × (u32 len, UTF-8, u16 overlap_words)`; texts are stored **without** their overlap prefix |
-//! | `bm25` | see [`crate::bm25`] |
+//! | `bm25` | `u32 num_docs, f32 avg_len, u32 doc_lengths[n], u32 terms`, per term `u16 len, bytes, u32 postings, (varint doc_delta, varint tf)*` (see [`crate::bm25`]) |
 //! | `sparse` | `u32 terms`, per term `u32 token_id, f32 idf, u32 postings, (varint doc_delta, u16 weight×1000)*` |
 //! | `dense/<scope>/<lane_id>` | `u8 quant (0=f32, 1=int8), u32 dim, u32 rows`, rows×dim values, then for int8 `rows × f32 scale`; scope ∈ `chunks`, `qa`, `claims` |
 //! | `qa` | JSON `Vec<QaEntry>` |
