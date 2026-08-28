@@ -3,15 +3,99 @@
 //! Build-time factual claim extraction and human-friendly claim edits.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 #[cfg(not(target_arch = "wasm32"))]
-use anyhow::Context;
+use anyhow::{Context, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::chunk::ChunkMeta;
 
 const DEFAULT_SUBJECT: &str = "Subject";
+
+/// Confidence assigned to every heuristic (regex-extracted) claim. Heuristic
+/// extraction has no calibrated notion of confidence, so all entries it
+/// produces get the same advisory value rather than hand-picked numbers
+/// that looked precise but were not measured.
+const HEURISTIC_CONFIDENCE: f32 = 0.5;
+
+const ACTIVITY_WHITELIST: &str = "programming|coding|consulting|engineering|building software";
+
+static YEARS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)\b(?:i|he|she|they|the subject|(?-i:[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?))\s+has\s+been\s+(?P<activity>{})\s+for\s+(?P<duration>\d{{1,2}}\+?\s*years?)",
+        ACTIVITY_WHITELIST
+    ))
+    .unwrap()
+});
+static SINCE_AGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(
+        r"(?i)\b(?P<activity>{})\b[^.\n]{{0,80}}?\bsince age\s+(?P<age>\d{{1,2}})",
+        ACTIVITY_WHITELIST
+    ))
+    .unwrap()
+});
+
+/// An employment cue that, together with a generic capitalised-word subject
+/// (as opposed to a pronoun or "the subject"), is required before "worked
+/// for"/"worked at" is accepted as an employment claim. Without this, any
+/// sentence-initial capitalised common word ("This trick worked for
+/// Chrome...") reads as a subject and produces a false employment claim.
+static EMPLOYMENT_CUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(employ(?:ed|ee|er)?|joined|hired|role|contract(?:or)?|position|title|years?)\b",
+    )
+    .unwrap()
+});
+
+// High-precision patterns only. Avoid broad "worked with ..." captures that
+// often represent tooling/platform usage rather than employment history.
+static WORKED_FOR_OR_AT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?P<subject>i|we|he|she|they|the subject|(?-i:[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?))\b[^.\n]{0,80}\bworked\s+(?:for|at)\s+(?P<orgs>[^.\n]{3,260})",
+    )
+    .unwrap()
+});
+static WORKED_FOR_OR_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:i|we|he|she|they|the subject|(?-i:[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?))\b[^.\n]{0,80}\bworked\s+for\s+or\s+with[:\s]+(?P<orgs>[^.\n]{3,260})",
+    )
+    .unwrap()
+});
+
+// Resume heading style: "Sr. Engineer at Common Crawl Foundation (1 year contract)"
+static ROLE_AT_ORG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\d+\.\s*)?(?:#+\s*)?(?:[A-Za-z][A-Za-z0-9,&/.+:' -]{1,90})\s+at\s+(?P<org>[A-Z][A-Za-z0-9&/.+,' -]{1,100})\s*(?:\(|$)",
+    )
+    .unwrap()
+});
+// Resume heading style: "Kagi.com (consulting)"
+static ORG_WITH_CONTEXT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^\s*(?:[-*]\s*)?(?:\d+\.\s*)?(?:#+\s*)?(?P<org>[A-Z][A-Za-z0-9&/.+,' -]{1,100})\s*\((?:consulting|contract|freelance|advisor|advisory|part[- ]time)[^)]*\)\s*$",
+    )
+    .unwrap()
+});
+// Numbered bullet style: "1. Kagi - semantic search ..."
+static NUMBERED_ORG_DASH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)^\s*\d+\.\s+(?P<org>[A-Z][A-Za-z0-9&/.+,' ]{1,100}?)\s+-\s+").unwrap()
+});
+
+static BULLET_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*[-*]\s+(?P<item>[^\n]{1,100})\s*$").unwrap());
+static LABELED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)\b(?:skills?|technologies|tools|frameworks?|languages?)\s*[:\-]\s*(?P<items>[^\n]{3,260})")
+        .unwrap()
+});
+static EXPERIENCE_PHRASE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?im)\b(?:experience with|familiar with|proficient in|knowledge of)\s+(?P<items>[^\n\.;]{3,220})")
+        .unwrap()
+});
+
+static SENTENCE_SPLITTER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\n.!?]+\s*").unwrap());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimEntry {
@@ -52,6 +136,7 @@ impl ClaimCorpus {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimsEdits {
     #[serde(default)]
     pub add: Vec<ClaimAdd>,
@@ -61,6 +146,7 @@ pub struct ClaimsEdits {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimAdd {
     pub subject: String,
     pub predicate: String,
@@ -81,6 +167,7 @@ pub struct ClaimAdd {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimRedact {
     #[serde(default)]
     pub subject: Option<String>,
@@ -92,6 +179,17 @@ pub struct ClaimRedact {
     pub source_url: Option<String>,
     #[serde(default)]
     pub contains: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ClaimRedact {
+    fn has_criteria(&self) -> bool {
+        self.subject.is_some()
+            || self.predicate.is_some()
+            || self.object.is_some()
+            || self.source_url.is_some()
+            || self.contains.is_some()
+    }
 }
 
 pub fn build_claim_corpus_from_chunks(texts: &[String], metadata: &[ChunkMeta]) -> ClaimCorpus {
@@ -118,7 +216,16 @@ pub fn extract_claims_from_chunk(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn parse_claim_edits_toml(raw: &str) -> anyhow::Result<ClaimsEdits> {
-    toml::from_str(raw).context("parsing claims edits TOML")
+    let edits: ClaimsEdits = toml::from_str(raw).context("parsing claims edits TOML")?;
+    for (i, redact) in edits.redact.iter().enumerate() {
+        if !redact.has_criteria() {
+            bail!(
+                "claims edits: [[redact]] entry #{} has no matching criteria (subject/predicate/object/source_url/contains set); refusing to apply an unconditional redact",
+                i + 1
+            );
+        }
+    }
+    Ok(edits)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -150,6 +257,8 @@ pub fn apply_claim_edits(claims: &mut Vec<ClaimEntry>, edits: &ClaimsEdits) {
             } else {
                 add.tags.clone()
             },
+            // Manual adds keep whatever confidence the user set; default to
+            // 1.0 (fully trusted) only when they did not specify one.
             confidence: add.confidence.unwrap_or(1.0),
         });
     }
@@ -209,17 +318,8 @@ fn redact_matches(redact: &ClaimRedact, claim: &ClaimEntry) -> bool {
 fn extract_experience_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
     let mut out = Vec::new();
 
-    let years_re = Regex::new(
-        r"(?i)\b(?:i|he|she|they|[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s+has\s+been\s+(?P<activity>programming|coding|consulting|engineering|building software)\s+for\s+(?P<duration>\d{1,2}\+?\s*years?)",
-    )
-    .unwrap();
-    let since_age_re = Regex::new(
-        r"(?i)\b(?P<activity>programming|coding|consulting|engineering|building software)\b[^.\n]{0,80}?\bsince age\s+(?P<age>\d{1,2})",
-    )
-    .unwrap();
-
     for sentence in split_sentences(text) {
-        for cap in years_re.captures_iter(sentence) {
+        for cap in YEARS_RE.captures_iter(sentence) {
             let activity =
                 normalize_activity(cap.name("activity").map(|m| m.as_str()).unwrap_or(""));
             let duration = cap
@@ -237,11 +337,11 @@ fn extract_experience_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
                 sentence,
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
-                0.85,
+                HEURISTIC_CONFIDENCE,
             ));
         }
 
-        for cap in since_age_re.captures_iter(sentence) {
+        for cap in SINCE_AGE_RE.captures_iter(sentence) {
             let activity =
                 normalize_activity(cap.name("activity").map(|m| m.as_str()).unwrap_or(""));
             let age = cap
@@ -259,68 +359,79 @@ fn extract_experience_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
                 sentence,
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
-                0.8,
+                HEURISTIC_CONFIDENCE,
             ));
         }
     }
 
     out
+}
+
+/// Whether the matched subject text is a strong, low-false-positive-rate
+/// employment subject (a pronoun or the fixed "the subject" placeholder).
+/// Anything else fell through to the generic capitalised-word alternative,
+/// which also matches ordinary sentence-initial capitalisation ("This
+/// trick worked for..."), so those matches additionally require an
+/// employment cue elsewhere in the sentence.
+fn is_employment_subject(subject: &str) -> bool {
+    matches!(
+        subject.to_lowercase().as_str(),
+        "i" | "we" | "he" | "she" | "they" | "the subject"
+    )
 }
 
 fn extract_work_history_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
     let mut out = Vec::new();
 
-    // High-precision patterns only. Avoid broad "worked with ..." captures that
-    // often represent tooling/platform usage rather than employment history.
-    let worked_for_or_at_re = Regex::new(
-        r"(?i)\b(?:i|we|he|she|they|[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\b[^.\n]{0,80}\bworked\s+(?:for|at)\s+(?P<orgs>[^.\n]{3,260})",
-    )
-    .unwrap();
-    let worked_for_or_with_re = Regex::new(
-        r"(?i)\b(?:i|we|he|she|they|[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\b[^.\n]{0,80}\bworked\s+for\s+or\s+with[:\s]+(?P<orgs>[^.\n]{3,260})",
-    )
-    .unwrap();
-
     for sentence in split_sentences(text) {
-        for re in [&worked_for_or_at_re, &worked_for_or_with_re] {
-            for cap in re.captures_iter(sentence) {
-                let orgs = cap.name("orgs").map(|m| m.as_str()).unwrap_or("");
-                for org in split_orgs(orgs) {
-                    out.push(make_claim(
-                        DEFAULT_SUBJECT.to_string(),
-                        "worked_for".to_string(),
-                        org,
-                        sentence,
-                        meta,
-                        vec!["work-history".to_string()],
-                        0.86,
-                    ));
-                }
+        for cap in WORKED_FOR_OR_AT_RE.captures_iter(sentence) {
+            let subject = cap.name("subject").map(|m| m.as_str()).unwrap_or("");
+            if !is_employment_subject(subject) && !EMPLOYMENT_CUE_RE.is_match(sentence) {
+                continue;
             }
+            push_worked_for_orgs(
+                &mut out,
+                cap.name("orgs").map(|m| m.as_str()).unwrap_or(""),
+                sentence,
+                meta,
+            );
+        }
+        for cap in WORKED_FOR_OR_WITH_RE.captures_iter(sentence) {
+            push_worked_for_orgs(
+                &mut out,
+                cap.name("orgs").map(|m| m.as_str()).unwrap_or(""),
+                sentence,
+                meta,
+            );
         }
     }
 
     out
 }
 
+fn push_worked_for_orgs(
+    out: &mut Vec<ClaimEntry>,
+    orgs_raw: &str,
+    sentence: &str,
+    meta: &ChunkMeta,
+) {
+    for org in split_orgs(orgs_raw) {
+        out.push(make_claim(
+            DEFAULT_SUBJECT.to_string(),
+            "worked_for".to_string(),
+            org,
+            sentence,
+            meta,
+            vec!["work-history".to_string()],
+            HEURISTIC_CONFIDENCE,
+        ));
+    }
+}
+
 fn extract_role_company_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
     let mut out = Vec::new();
 
-    // Resume heading style: "Sr. Engineer at Common Crawl Foundation (1 year contract)"
-    let role_at_org_re = Regex::new(
-        r"(?im)^\s*(?:[-*]\s*)?(?:\d+\.\s*)?(?:#+\s*)?(?:[A-Za-z][A-Za-z0-9,&/.+:' -]{1,90})\s+at\s+(?P<org>[A-Z][A-Za-z0-9&/.+,' -]{1,100})\s*(?:\(|$)",
-    )
-    .unwrap();
-    // Resume heading style: "Kagi.com (consulting)"
-    let org_with_context_re = Regex::new(
-        r"(?im)^\s*(?:[-*]\s*)?(?:\d+\.\s*)?(?:#+\s*)?(?P<org>[A-Z][A-Za-z0-9&/.+,' -]{1,100})\s*\((?:consulting|contract|freelance|advisor|advisory|part[- ]time)[^)]*\)\s*$",
-    )
-    .unwrap();
-    // Numbered bullet style: "1. Kagi - semantic search ..."
-    let numbered_org_dash_re =
-        Regex::new(r"(?im)^\s*\d+\.\s+(?P<org>[A-Z][A-Za-z0-9&/.+,' ]{1,100}?)\s+-\s+").unwrap();
-
-    for cap in role_at_org_re.captures_iter(text) {
+    for cap in ROLE_AT_ORG_RE.captures_iter(text) {
         let evidence = cap.get(0).map(|m| m.as_str()).unwrap_or("");
         if let Some(org) = cap
             .name("org")
@@ -333,12 +444,12 @@ fn extract_role_company_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> 
                 evidence,
                 meta,
                 vec!["work-history".to_string(), "role-line".to_string()],
-                0.88,
+                HEURISTIC_CONFIDENCE,
             ));
         }
     }
 
-    for cap in org_with_context_re.captures_iter(text) {
+    for cap in ORG_WITH_CONTEXT_RE.captures_iter(text) {
         let evidence = cap.get(0).map(|m| m.as_str()).unwrap_or("");
         if let Some(org) = cap
             .name("org")
@@ -351,12 +462,12 @@ fn extract_role_company_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> 
                 evidence,
                 meta,
                 vec!["work-history".to_string(), "role-line".to_string()],
-                0.85,
+                HEURISTIC_CONFIDENCE,
             ));
         }
     }
 
-    for cap in numbered_org_dash_re.captures_iter(text) {
+    for cap in NUMBERED_ORG_DASH_RE.captures_iter(text) {
         let evidence = cap.get(0).map(|m| m.as_str()).unwrap_or("");
         if let Some(org) = cap
             .name("org")
@@ -369,7 +480,7 @@ fn extract_role_company_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> 
                 evidence,
                 meta,
                 vec!["work-history".to_string(), "numbered-list".to_string()],
-                0.83,
+                HEURISTIC_CONFIDENCE,
             ));
         }
     }
@@ -409,8 +520,7 @@ fn extract_skill_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
         return out;
     }
 
-    let bullet_re = Regex::new(r"(?m)^\s*[-*]\s+(?P<item>[^\n]{1,100})\s*$").unwrap();
-    for cap in bullet_re.captures_iter(text) {
+    for cap in BULLET_RE.captures_iter(text) {
         let raw = cap.name("item").map(|m| m.as_str()).unwrap_or("");
         if let Some(skill) = clean_skill_candidate(raw) {
             push_skill_claim(
@@ -420,15 +530,12 @@ fn extract_skill_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
                 raw,
                 meta,
                 vec!["skills".to_string(), "bullet-list".to_string()],
-                0.8,
+                HEURISTIC_CONFIDENCE,
             );
         }
     }
 
-    let labeled_re =
-        Regex::new(r"(?im)\b(?:skills?|technologies|tools|frameworks?|languages?)\s*[:\-]\s*(?P<items>[^\n]{3,260})")
-            .unwrap();
-    for cap in labeled_re.captures_iter(text) {
+    for cap in LABELED_RE.captures_iter(text) {
         let raw = cap.name("items").map(|m| m.as_str()).unwrap_or("");
         for skill in split_skill_items(raw) {
             push_skill_claim(
@@ -438,15 +545,12 @@ fn extract_skill_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
                 raw,
                 meta,
                 vec!["skills".to_string(), "labeled-list".to_string()],
-                0.78,
+                HEURISTIC_CONFIDENCE,
             );
         }
     }
 
-    let experience_re =
-        Regex::new(r"(?im)\b(?:experience with|familiar with|proficient in|knowledge of)\s+(?P<items>[^\n\.;]{3,220})")
-            .unwrap();
-    for cap in experience_re.captures_iter(text) {
+    for cap in EXPERIENCE_PHRASE_RE.captures_iter(text) {
         let raw = cap.name("items").map(|m| m.as_str()).unwrap_or("");
         for skill in split_skill_items(raw) {
             push_skill_claim(
@@ -456,7 +560,7 @@ fn extract_skill_claims(text: &str, meta: &ChunkMeta) -> Vec<ClaimEntry> {
                 raw,
                 meta,
                 vec!["skills".to_string(), "experience-phrase".to_string()],
-                0.74,
+                HEURISTIC_CONFIDENCE,
             );
         }
     }
@@ -506,10 +610,10 @@ fn clean_org_candidate(input: &str) -> Option<String> {
         }
     }
 
-    if let Some(pos) = s.find(':') {
-        if pos < 24 {
-            s = s[pos + 1..].trim().to_string();
-        }
+    if let Some(pos) = s.find(':')
+        && pos < 24
+    {
+        s = s[pos + 1..].trim().to_string();
     }
 
     if let Some(pos) = s.find(" (") {
@@ -540,10 +644,11 @@ fn clean_org_candidate(input: &str) -> Option<String> {
         return None;
     }
 
-    if let Some(first) = s.chars().next() {
-        if !first.is_ascii_uppercase() && !first.is_ascii_digit() {
-            return None;
-        }
+    if let Some(first) = s.chars().next()
+        && !first.is_ascii_uppercase()
+        && !first.is_ascii_digit()
+    {
+        return None;
     }
 
     let lowercase_leads = s
@@ -552,6 +657,27 @@ fn clean_org_candidate(input: &str) -> Option<String> {
         .count();
     if lowercase_leads > 1 {
         return None;
+    }
+
+    // Reject candidates that end in a lowercase common-noun plural
+    // ("Windows 10 users", "Acme Corp employees"): a real organization name
+    // does not end with an ordinary plural noun describing a group of
+    // people or things, so this is a strong signal that "worked for" was
+    // used in its everyday sense ("the fix worked for these users") rather
+    // than an employment sense.
+    if let Some(last_word) = s.split_whitespace().last() {
+        let stripped = last_word.trim_end_matches(|c: char| !c.is_alphanumeric());
+        let starts_lowercase = stripped
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase());
+        if starts_lowercase
+            && stripped.len() > 2
+            && stripped.ends_with('s')
+            && !stripped.ends_with("ss")
+        {
+            return None;
+        }
     }
 
     let lower = s.to_lowercase();
@@ -694,8 +820,7 @@ fn normalize_sentence(input: &str) -> String {
 }
 
 fn split_sentences(text: &str) -> Vec<&str> {
-    let splitter = Regex::new(r"[\n\.!?]+\s*").unwrap();
-    splitter
+    SENTENCE_SPLITTER_RE
         .split(text)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -798,6 +923,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_worked_for_in_non_employment_sense() {
+        let text = "This trick worked for Chrome, Firefox, and Safari.";
+        let claims = extract_claims_from_chunk(text, &meta());
+        assert!(claims.iter().all(|c| c.predicate != "worked_for"));
+    }
+
+    #[test]
+    fn rejects_worked_for_object_ending_in_plural_common_noun() {
+        let text = "The fix worked for Windows 10 users.";
+        let claims = extract_claims_from_chunk(text, &meta());
+        assert!(claims.iter().all(|c| c.predicate != "worked_for"));
+    }
+
+    #[test]
+    fn rejects_worked_for_object_with_trailing_plural_common_noun_even_with_strong_subject() {
+        let text = "I worked for Acme Corp employees.";
+        let claims = extract_claims_from_chunk(text, &meta());
+        assert!(claims.iter().all(|c| c.predicate != "worked_for"));
+    }
+
+    #[test]
     fn extract_programming_year_claim() {
         let text = "The subject has been programming for 42 years.";
         let claims = extract_claims_from_chunk(text, &meta());
@@ -844,6 +990,24 @@ confidence = 1.0
                 .iter()
                 .any(|c| c.predicate == "worked_for" && c.object == "Nike")
         );
+    }
+
+    #[test]
+    fn rejects_empty_redact_block() {
+        let toml = "[[redact]]\n";
+        assert!(parse_claim_edits_toml(toml).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_fields_in_edits() {
+        let toml = r#"
+[[add]]
+subject = "Subject"
+predicate = "worked_for"
+object = "Nike"
+typo_field = "oops"
+"#;
+        assert!(parse_claim_edits_toml(toml).is_err());
     }
 
     #[test]
