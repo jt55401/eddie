@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -15,11 +16,16 @@ use eddie::chunk::{Chunk, ChunkMeta, ChunkStrategy, Document, chunk_document_wit
 use eddie::claims::{
     ClaimEntry, apply_claim_edits, build_claim_corpus_from_chunks, parse_claim_edits_toml,
 };
-use eddie::embed::Embedder;
+use eddie::embed::{
+    DEFAULT_BATCH_SIZE, DenseEncoder, DenseOverrides, DevicePref, Embedder, TextKind, device_name,
+    load_dense, select_device,
+};
 use eddie::eval::{
     AcceptanceCase, AcceptanceSuite, evaluate_case, load_suite, summarize, write_suite,
 };
 use eddie::index::SearchIndex;
+use eddie::manifest::RuntimeSpec;
+use eddie::models;
 use eddie::parse::{
     AstroParser, ContentParser, DocusaurusParser, EleventyParser, HugoParser, JekyllParser,
     MkDocsParser, parse_content_dir,
@@ -30,6 +36,7 @@ use eddie::qa::{
     synthesize_with_openrouter_from_chunks,
 };
 use eddie::search::search;
+use eddie::sparse::{SparseDocEncoder, SparseOptions};
 
 const DEFAULT_MODEL: &str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
 
@@ -56,9 +63,42 @@ enum Command {
         #[arg(long, default_value = "index.ed")]
         output: PathBuf,
 
-        /// HuggingFace model ID for embeddings.
-        #[arg(long, default_value = DEFAULT_MODEL)]
-        model: String,
+        /// Dense embedding model: a HuggingFace id or a registry lane id
+        /// (`minilm`, `bge-small`, `qwen3e`, `harrier`, `bge-m3`). Repeat for
+        /// several lanes. Default: sentence-transformers/multi-qa-MiniLM-L6-cos-v1.
+        #[arg(long = "dense-model", value_name = "MODEL")]
+        dense_model: Vec<String>,
+
+        /// Deprecated alias for --dense-model.
+        #[arg(long, hide = true)]
+        model: Option<String>,
+
+        /// Browser runtime for the lane at the same position as --dense-model:
+        /// `wasm-candle` or `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>]`.
+        #[arg(long = "dense-runtime", value_name = "SPEC")]
+        dense_runtime: Vec<String>,
+
+        /// Add the learned-sparse arm (OpenSearch neural sparse doc-v3-distill).
+        #[arg(long, default_value_t = false)]
+        sparse: bool,
+
+        /// Sparse document encoder model id (implies --sparse).
+        #[arg(long, value_name = "MODEL")]
+        sparse_model: Option<String>,
+
+        /// Inference device: auto, cpu, cuda or cuda:N (cuda needs `--features cuda`).
+        #[arg(long, default_value = "auto")]
+        device: String,
+
+        /// Texts per forward pass for dense lanes.
+        #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+        batch_size: usize,
+
+        /// Model preset: fast (MiniLM), balanced (bge-small + sparse),
+        /// quality (bge-small + sparse + Qwen3-Embedding-0.6B), gpu (quality on CUDA).
+        /// Explicit --dense-model/--sparse/--device flags win over the preset.
+        #[arg(long)]
+        preset: Option<Preset>,
 
         /// Maximum tokens per chunk.
         #[arg(long, default_value = "256")]
@@ -250,6 +290,25 @@ enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Preset {
+    Fast,
+    Balanced,
+    Quality,
+    Gpu,
+}
+
+/// Dense lanes, sparse arm and device for `eddie index`, after presets and
+/// flags are reconciled.
+#[derive(Debug, Clone, PartialEq)]
+struct IndexModelOptions {
+    dense_models: Vec<String>,
+    dense_runtimes: Vec<Option<RuntimeSpec>>,
+    sparse_model: Option<String>,
+    device: DevicePref,
+    batch_size: usize,
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum SearchMode {
     Semantic,
@@ -313,7 +372,14 @@ fn main() -> Result<()> {
             content_dir,
             cms,
             output,
+            dense_model,
             model,
+            dense_runtime,
+            sparse,
+            sparse_model,
+            device,
+            batch_size,
+            preset,
             chunk_size,
             overlap,
             chunk_strategy,
@@ -335,7 +401,16 @@ fn main() -> Result<()> {
             content_dir,
             cms,
             output,
-            &model,
+            &resolve_index_models(
+                preset,
+                dense_model,
+                model,
+                &dense_runtime,
+                sparse,
+                sparse_model,
+                &device,
+                batch_size,
+            )?,
             chunk_size,
             overlap,
             chunk_strategy,
@@ -412,11 +487,12 @@ fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_index(
     content_dir: PathBuf,
     cms: Cms,
     output: PathBuf,
-    model_id: &str,
+    model_opts: &IndexModelOptions,
     chunk_size: usize,
     overlap: usize,
     chunk_strategy: ChunkingStrategy,
@@ -445,7 +521,58 @@ fn cmd_index(
     let docs = parse_content_dir(&content_dir, parser.as_ref())?;
     eprintln!("  Found {} documents", docs.len());
 
+    // Load models first: the first dense lane's tokenizer is the token
+    // counter for chunk sizing once the chunker takes one.
+    let device = select_device(model_opts.device)?;
+    eprintln!("Inference device: {}", device_name(&device));
+    let mut lanes: Vec<Box<dyn DenseEncoder>> = Vec::with_capacity(model_opts.dense_models.len());
+    for (i, model_id) in model_opts.dense_models.iter().enumerate() {
+        eprintln!("Loading dense model: {}...", model_id);
+        let started = Instant::now();
+        let overrides = DenseOverrides {
+            runtime: model_opts.dense_runtimes.get(i).cloned().flatten(),
+            batch_size: Some(model_opts.batch_size),
+            ..DenseOverrides::default()
+        };
+        let lane = load_dense(model_id, &device, &overrides)?;
+        let spec = lane.spec();
+        if lanes.iter().any(|l| l.spec().id == spec.id) {
+            bail!("dense lane id '{}' is used twice", spec.id);
+        }
+        eprintln!(
+            "  lane '{}': family {:?}, dim {}, pooling {:?}, max_seq_len {}, revision {} ({:.1}s)",
+            spec.id,
+            spec.family,
+            spec.dim,
+            spec.pooling,
+            spec.max_seq_len,
+            spec.revision.as_deref().unwrap_or("main"),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let sparse_encoder = match &model_opts.sparse_model {
+        Some(model_id) => {
+            eprintln!("Loading sparse encoder: {}...", model_id);
+            let started = Instant::now();
+            let enc = SparseDocEncoder::load_with(model_id, &device, &SparseOptions::default())?;
+            eprintln!(
+                "  {} idf terms, activation {:?}, prune ratio {}, revision {} ({:.1}s)",
+                enc.idf().len(),
+                enc.activation(),
+                enc.prune_ratio(),
+                enc.revision().unwrap_or("main"),
+                started.elapsed().as_secs_f64()
+            );
+            Some(enc)
+        }
+        None => None,
+    };
+
     // Chunk documents
+    // TODO(integrator): once `chunk_document_with_budget(doc, budget, overlap,
+    // strategy, &count)` lands, size chunks in the first lane's wordpieces:
+    //   let count = |text: &str| lanes[0].count_tokens(text);
+    // Until then chunk sizes are word counts.
     eprintln!("Chunking documents (strategy: {:?})...", chunk_strategy);
     let mut all_chunks = Vec::new();
     let strategy = match chunk_strategy {
@@ -491,15 +618,64 @@ fn cmd_index(
     let fact_metadata: Vec<_> = fact_chunks.iter().map(|c| c.meta.clone()).collect();
     let fact_texts: Vec<String> = fact_chunks.iter().map(|c| c.text.clone()).collect();
 
-    // Load embedding model
-    eprintln!("Loading embedding model: {}...", model_id);
-    let embedder = Embedder::new(model_id)?;
-    eprintln!("  Embedding dimension: {}", embedder.dim());
-
-    // Embed all chunks
-    eprintln!("Embedding {} chunks...", all_chunks.len());
+    // Embed all chunks, one pass per dense lane
     let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
-    let all_embeddings = embed_texts(&embedder, &texts)?;
+    let mut lane_vectors: Vec<Vec<f32>> = Vec::with_capacity(lanes.len());
+    for lane in &lanes {
+        eprintln!(
+            "Embedding {} chunks with lane '{}'...",
+            all_chunks.len(),
+            lane.spec().id
+        );
+        lane.reset_truncated_count();
+        let started = Instant::now();
+        let vectors = embed_texts_with(
+            lane.as_ref(),
+            &texts,
+            TextKind::Document,
+            model_opts.batch_size,
+        )?;
+        report_lane_timing(
+            lane.as_ref(),
+            all_chunks.len(),
+            started.elapsed().as_secs_f64(),
+        );
+        lane_vectors.push(vectors);
+    }
+
+    // Learned-sparse document expansion
+    // TODO(integrator): hand `sparse_docs`, `enc.idf()` and `enc.spec(terms)`
+    // to the IndexBuilder (`add_sparse(docs, idf, spec)`).
+    if let Some(enc) = &sparse_encoder {
+        eprintln!(
+            "Expanding {} chunks with the sparse encoder...",
+            texts.len()
+        );
+        let started = Instant::now();
+        let sparse_docs = enc.encode_docs(&texts)?;
+        let total_terms: usize = sparse_docs.iter().map(Vec::len).sum();
+        let distinct: BTreeSet<u32> = sparse_docs
+            .iter()
+            .flat_map(|d| d.iter().map(|t| t.token_id))
+            .collect();
+        let secs = started.elapsed().as_secs_f64();
+        eprintln!(
+            "  {} chunks in {:.1}s ({:.1} chunks/s): {} distinct terms, {:.1} terms/chunk, {} truncated at 512 tokens",
+            texts.len(),
+            secs,
+            texts.len() as f64 / secs.max(1e-9),
+            distinct.len(),
+            total_terms as f64 / texts.len().max(1) as f64,
+            enc.truncated_count()
+        );
+        let _sparse_spec = enc.spec(distinct.len());
+    }
+
+    // TODO(integrator): the v5 IndexBuilder takes every lane; the current
+    // SearchIndex stores only the first one.
+    let embedder = Embedder::from_encoder(lanes.remove(0));
+    let all_embeddings = lane_vectors.remove(0);
+    let model_id = embedder.encoder().spec().model.as_str();
 
     // Build BM25 index
     eprintln!("Building BM25 keyword index...");
@@ -1188,24 +1364,164 @@ fn build_eval_context(index: &SearchIndex, ids: &[usize]) -> String {
 }
 
 fn embed_texts(embedder: &Embedder, texts: &[&str]) -> Result<Vec<f32>> {
-    let mut out = Vec::new();
-    let batch_size = 32;
+    embed_texts_with(
+        embedder.encoder(),
+        texts,
+        TextKind::Document,
+        DEFAULT_BATCH_SIZE,
+    )
+}
 
-    for (i, batch) in texts.chunks(batch_size).enumerate() {
-        let vecs = embedder.embed_batch(batch)?;
+/// Embed `texts` as one flat `len × dim` vector, printing progress. Each call
+/// into the encoder covers several batches so it can sort by length and pad
+/// less.
+fn embed_texts_with(
+    encoder: &dyn DenseEncoder,
+    texts: &[&str],
+    kind: TextKind,
+    batch_size: usize,
+) -> Result<Vec<f32>> {
+    let dim = encoder.dim();
+    let mut out = Vec::with_capacity(texts.len() * dim);
+    let group = batch_size.max(1) * 8;
+    let mut done = 0usize;
+    for chunk in texts.chunks(group) {
+        let vecs = encoder.embed(chunk, kind)?;
         for vec in vecs {
+            debug_assert_eq!(vec.len(), dim);
             out.extend(vec);
         }
-        if (i + 1) % 10 == 0 || (i + 1) * batch_size >= texts.len() {
-            eprintln!(
-                "  Embedded {}/{} chunks",
-                ((i + 1) * batch_size).min(texts.len()),
-                texts.len()
-            );
+        done += chunk.len();
+        if done % (group * 4) == 0 || done == texts.len() {
+            eprintln!("  Embedded {}/{} texts", done, texts.len());
         }
     }
-
     Ok(out)
+}
+
+fn report_lane_timing(lane: &dyn DenseEncoder, count: usize, secs: f64) {
+    let spec = lane.spec();
+    eprintln!(
+        "  lane '{}': {} texts in {:.1}s ({:.1} texts/s), {} truncated at {} tokens",
+        spec.id,
+        count,
+        secs,
+        count as f64 / secs.max(1e-9),
+        lane.truncated_count(),
+        spec.max_seq_len
+    );
+}
+
+/// Reconcile `--preset` with explicit flags. Explicit `--dense-model`,
+/// `--sparse`/`--sparse-model` and a non-`auto` `--device` win over the preset.
+#[allow(clippy::too_many_arguments)]
+fn resolve_index_models(
+    preset: Option<Preset>,
+    dense_model: Vec<String>,
+    model_alias: Option<String>,
+    dense_runtime: &[String],
+    sparse: bool,
+    sparse_model: Option<String>,
+    device: &str,
+    batch_size: usize,
+) -> Result<IndexModelOptions> {
+    let mut dense: Vec<String> = dense_model;
+    if let Some(m) = model_alias {
+        eprintln!("warning: --model is deprecated; use --dense-model");
+        dense.push(m);
+    }
+    let mut sparse_model =
+        sparse_model.or_else(|| sparse.then(|| models::DEFAULT_SPARSE_MODEL.to_string()));
+    let mut device_pref: DevicePref = device.parse()?;
+
+    let (preset_dense, preset_sparse, preset_cuda): (&[&str], bool, bool) = match preset {
+        None | Some(Preset::Fast) => (&[models::DEFAULT_DENSE_MODEL], false, false),
+        Some(Preset::Balanced) => (&["BAAI/bge-small-en-v1.5"], true, false),
+        Some(Preset::Quality) => (
+            &["BAAI/bge-small-en-v1.5", "Qwen/Qwen3-Embedding-0.6B"],
+            true,
+            false,
+        ),
+        Some(Preset::Gpu) => (
+            &["BAAI/bge-small-en-v1.5", "Qwen/Qwen3-Embedding-0.6B"],
+            true,
+            true,
+        ),
+    };
+    if dense.is_empty() {
+        dense = preset_dense.iter().map(|s| s.to_string()).collect();
+    }
+    if sparse_model.is_none() && preset_sparse {
+        sparse_model = Some(models::DEFAULT_SPARSE_MODEL.to_string());
+    }
+    if preset_cuda && device_pref == DevicePref::Auto {
+        device_pref = DevicePref::Cuda(0);
+    }
+
+    let dense_models: Vec<String> = dense
+        .into_iter()
+        .map(|name| {
+            models::lookup_lane_or_model(&name)
+                .map(|m| m.model.to_string())
+                .unwrap_or(name)
+        })
+        .collect();
+    if dense_runtime.len() > dense_models.len() {
+        bail!(
+            "{} --dense-runtime values for {} dense lanes",
+            dense_runtime.len(),
+            dense_models.len()
+        );
+    }
+    let mut dense_runtimes = Vec::with_capacity(dense_models.len());
+    for i in 0..dense_models.len() {
+        dense_runtimes.push(match dense_runtime.get(i) {
+            Some(spec) => parse_runtime_spec(spec)?,
+            None => None,
+        });
+    }
+    if batch_size == 0 {
+        bail!("--batch-size must be at least 1");
+    }
+    Ok(IndexModelOptions {
+        dense_models,
+        dense_runtimes,
+        sparse_model,
+        device: device_pref,
+        batch_size,
+    })
+}
+
+/// `wasm-candle`, `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>]`, or `auto`/`` for
+/// the registry default.
+fn parse_runtime_spec(spec: &str) -> Result<Option<RuntimeSpec>> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if spec.eq_ignore_ascii_case("wasm-candle") {
+        return Ok(Some(models::runtime_spec(models::RuntimeKind::WasmCandle)));
+    }
+    let Some(rest) = spec.strip_prefix("webgpu-onnx:") else {
+        bail!(
+            "unknown --dense-runtime '{spec}' (expected wasm-candle or webgpu-onnx:<repo>:<dtype>[:<dtype_f16>])"
+        );
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        bail!("--dense-runtime webgpu-onnx needs <repo>:<dtype>[:<dtype_f16>], got '{spec}'");
+    }
+    Ok(Some(RuntimeSpec::WebgpuOnnx {
+        repo: parts[0].to_string(),
+        dtype: parts[1].to_string(),
+        dtype_f16: parts
+            .get(2)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        // The runtime pools with the lane's own pooling; last_token for
+        // decoder embedders is the common case for ONNX ports.
+        pooling: "last_token".to_string(),
+    }))
 }
 
 fn parse_usize_csv(csv: &str) -> Result<Vec<usize>> {
@@ -1340,6 +1656,73 @@ mod tests {
     #[test]
     fn parse_usize_csv_rejects_empty() {
         assert!(parse_usize_csv(" , ").is_err());
+    }
+
+    #[test]
+    fn presets_and_flags_reconcile() {
+        let opts = resolve_index_models(None, vec![], None, &[], false, None, "auto", 32).unwrap();
+        assert_eq!(
+            opts.dense_models,
+            vec![models::DEFAULT_DENSE_MODEL.to_string()]
+        );
+        assert_eq!(opts.sparse_model, None);
+        assert_eq!(opts.device, DevicePref::Auto);
+
+        let opts = resolve_index_models(
+            Some(Preset::Gpu),
+            vec![],
+            None,
+            &[],
+            false,
+            None,
+            "auto",
+            16,
+        )
+        .unwrap();
+        assert_eq!(opts.dense_models.len(), 2);
+        assert_eq!(
+            opts.sparse_model.as_deref(),
+            Some(models::DEFAULT_SPARSE_MODEL)
+        );
+        assert_eq!(opts.device, DevicePref::Cuda(0));
+
+        // Explicit flags win; lane ids resolve to model ids.
+        let opts = resolve_index_models(
+            Some(Preset::Quality),
+            vec!["qwen3e".into()],
+            None,
+            &["webgpu-onnx:org/repo:q4:q4f16".into()],
+            false,
+            None,
+            "cpu",
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            opts.dense_models,
+            vec!["Qwen/Qwen3-Embedding-0.6B".to_string()]
+        );
+        assert_eq!(opts.device, DevicePref::Cpu);
+        assert!(matches!(
+            &opts.dense_runtimes[0],
+            Some(RuntimeSpec::WebgpuOnnx { repo, dtype_f16: Some(f16), .. })
+                if repo == "org/repo" && f16 == "q4f16"
+        ));
+        assert!(
+            resolve_index_models(
+                None,
+                vec![],
+                None,
+                &["x".into(), "y".into()],
+                false,
+                None,
+                "cpu",
+                8
+            )
+            .is_err()
+        );
+        assert!(parse_runtime_spec("tpu").is_err());
+        assert!(parse_runtime_spec("auto").unwrap().is_none());
     }
 
     #[test]
