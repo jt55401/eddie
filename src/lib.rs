@@ -18,5 +18,6 @@ pub mod models;
 pub mod parse;
 pub mod qa;
 pub mod search;
+pub mod sparse;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
