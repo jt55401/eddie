@@ -529,6 +529,7 @@ fn cmd_index(
                 max_chunks: qa_ollama_max_chunks,
                 max_pairs_per_chunk: qa_ollama_max_pairs_per_chunk,
                 temperature: qa_ollama_temperature,
+                ..Default::default()
             };
             eprintln!("  Running OpenRouter QA synthesis...");
             let llm_entries =
@@ -548,6 +549,7 @@ fn cmd_index(
                 max_chunks: qa_ollama_max_chunks,
                 max_pairs_per_chunk: qa_ollama_max_pairs_per_chunk,
                 temperature: qa_ollama_temperature,
+                ..Default::default()
             };
             eprintln!("  Running Ollama QA synthesis...");
             let llm_entries =
@@ -924,6 +926,7 @@ fn cmd_qa_corpus(
             max_chunks: ollama_max_chunks,
             max_pairs_per_chunk: ollama_max_pairs_per_chunk,
             temperature: ollama_temperature,
+            ..Default::default()
         };
         let llm_entries = synthesize_with_ollama_from_chunks(&index.texts, &index.metadata, &cfg)?;
         eprintln!("Ollama QA entries: {}", llm_entries.len());
