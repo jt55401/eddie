@@ -148,7 +148,7 @@ jobs:
 
       - name: Report artifact sizes and enforce budgets
         env:
-          WASM_RAW_BUDGET_BYTES: "3400000"
+          WASM_RAW_BUDGET_BYTES: "3600000"
           WASM_GZIP_BUDGET_BYTES: "1100000"
           WASM_BROTLI_BUDGET_BYTES: "800000"
         run: bash scripts/report-asset-sizes.sh

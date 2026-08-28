@@ -116,8 +116,18 @@ impl DenseLane {
         if rows > 0 && dim == 0 {
             bail!("dense lane {:?}: dim must be > 0", spec.id);
         }
-        if values.iter().any(|v| !v.is_finite()) {
-            bail!("dense lane {:?}: non-finite value", spec.id);
+        if let Some(pos) = values.iter().position(|v| !v.is_finite()) {
+            let bad_rows = values
+                .chunks(dim.max(1))
+                .filter(|row| row.iter().any(|v| !v.is_finite()))
+                .count();
+            bail!(
+                "dense lane {:?}: non-finite value in row {} (of {} rows; {} rows affected)",
+                spec.id,
+                pos / dim.max(1),
+                rows,
+                bad_rows
+            );
         }
         let data = match quant {
             Quant::F32 => LaneData::F32(values.to_vec()),
