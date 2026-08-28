@@ -1,31 +1,56 @@
 # Hugo Integration Guide
 
-This guide covers installing `eddie`, indexing your Hugo site content, and searching from the command line.
-
-> The browser widget (WASM + search UI) is not yet implemented. This guide covers the CLI indexer only.
+This guide covers installing `eddie`, indexing your Hugo site content, and
+embedding the in-browser search widget. See [README.md](../../README.md) for
+the full retrieval architecture, the model table, and the in-browser agent.
 
 ## Prerequisites
 
-- Rust toolchain (1.70+): https://rustup.rs
-- A Hugo site with markdown content using TOML (`+++`) or YAML (`---`) frontmatter
+- A Hugo site with markdown content using TOML (`+++`) or YAML (`---`) frontmatter, Hugo 0.110.0+
+- Either: Node.js 18+, Ruby 3+, or Python 3.9+ (to run the CLI via a launcher package), or a Rust toolchain (1.93.1, see `rust-toolchain.toml`) to build from source
 
-## Installation
+## Installing the widget
 
-### From source
+The [`eddie-hugo` Hugo Module](https://github.com/jt55401/eddie-hugo) is the
+turnkey path: it ships the widget bundle, a partial that renders the
+`<script>` tag with every `data-*` attribute wired to `[params.eddie]` in
+your `hugo.toml`, and a CLI wrapper script.
 
-```bash
-git clone https://github.com/jt55401/eddie.git
-cd eddie
-cargo build --release
+```toml
+# go.mod
+require github.com/jt55401/eddie-hugo v0.4.0
 ```
 
-The binary is at `target/release/eddie`.
-
-Optionally copy it somewhere on your `$PATH`:
-
-```bash
-cp target/release/eddie ~/.local/bin/
+```toml
+# hugo.toml
+[module]
+  [[module.imports]]
+    path = "github.com/jt55401/eddie-hugo"
 ```
+
+Call the partial once, near `</head>`, in your theme's base template:
+
+```go-html-template
+{{ partial "eddie/inject.html" . }}
+```
+
+Configure it under `[params.eddie]` (all keys optional; see
+`hugo-module/hugo.toml` for the full list and defaults, including
+`agentMode`, `agentModel`, `denseRuntime`, and `consentText`):
+
+```toml
+[params.eddie]
+  indexUrl = "/eddie/index.ed"
+  position = "bottom-right"
+  theme = "auto"
+  qaMode = "auto"
+```
+
+If you'd rather not add a Go module dependency, install the npm package
+instead. `npx @jt55401/eddie-hugo-install <site-dir>` copies the widget
+runtime into `static/eddie/` and wires the `<script>` tag into
+`layouts/_default/baseof.html` for you (see
+`integrations/hugo/README.md`).
 
 ## Indexing your site
 
@@ -34,123 +59,93 @@ Run the indexer against your Hugo `content/` directory:
 ```bash
 eddie index \
   --content-dir /path/to/your-hugo-site/content/ \
-  --output eddie/index.ed
+  --cms hugo \
+  --output static/eddie/index.ed \
+  --preset balanced
 ```
 
 This will:
 
-1. Walk the content directory and parse all `.md` files
-2. Skip drafts (`draft = true`) and unpublished files (`published = false`)
-3. Parse TOML and YAML frontmatter for metadata (title, date, tags, description)
-4. Strip Hugo shortcodes (`rawhtml`, `ref`, `certimage`, `mermaid`, `closing`, and any others)
-5. Strip markdown formatting to produce clean text
-6. Split content into chunks by section headings, with paragraph/sentence splitting for long sections
-7. Generate 384-dimensional embeddings using the `multi-qa-MiniLM-L6-cos-v1` model (downloaded automatically from HuggingFace Hub on first run, ~87MB cached model footprint)
-8. Build a BM25 keyword index alongside the semantic embeddings
-9. Write a single Brotli-compressed Eddie index file (`.ed`)
+1. Walk the content directory and parse all `.md` files, skipping drafts (`draft = true`) and unpublished files (`published = false`)
+2. Parse TOML and YAML frontmatter for metadata (title, date, tags, description)
+3. Chunk content by heading (`--chunk-strategy heading`, the default) or by embedding-driven semantic boundaries (`--chunk-strategy semantic`)
+4. Build three retrieval arms: BM25 keyword, a learned sparse arm (`--sparse` or `--sparse-model`), and one or more dense embedding lanes (`--dense-model`, repeatable; the default is the bundled `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` bert-family model)
+5. Write a single Brotli-compressed index (`.ed`, format v5)
+
+### Presets
+
+`--preset` bundles a dense model set (and device) in one flag:
+
+| Preset | Dense lane(s) | Sparse | Device |
+|---|---|---|---|
+| `fast` | MiniLM-L6 | no | CPU |
+| `balanced` | bge-small-en-v1.5 | yes | CPU |
+| `quality` | bge-small-en-v1.5 + Qwen3-Embedding-0.6B | yes | CPU |
+| `gpu` | same as `quality` | yes | CUDA |
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--content-dir` | (required) | Path to your Hugo `content/` directory |
-| `--output` | `index.ed` | Output path for the index file (`.ed` for Brotli-compressed format) |
-| `--model` | `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | HuggingFace model ID |
-| `--chunk-size` | `256` | Maximum tokens per chunk |
+| `--cms` | (required) | Content format; use `hugo` |
+| `--output` | `index.ed` | Output path for the index file |
+| `--preset` | (none) | `fast`, `balanced`, `quality`, or `gpu`; see above; overrides `--dense-model`/`--sparse`/`--device` |
+| `--dense-model` | `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | Repeatable; one dense retrieval lane per flag |
+| `--sparse` | off | Enable the learned sparse arm with its default model |
+| `--sparse-model` | (none) | Enable the sparse arm with an explicit HuggingFace model id |
+| `--device` | `auto` | `auto`, `cpu`, or `cuda` (CUDA requires a build with `--features cuda`) |
+| `--batch-size` | `32` | Embedding batch size |
+| `--chunk-size` | `256` | Target chunk size, in the dense lane's tokenizer wordpieces |
 | `--overlap` | `32` | Overlap tokens between consecutive chunks |
+| `--chunk-strategy` | `heading` | `heading` or `semantic` |
+| `--qa`, `--claims` | off | Optional build-time QA/claims synthesis lanes (see README) |
+
+`eddie index` reports the per-lane truncation count (chunks that hit
+`--chunk-size` at that lane's tokenizer) so you can tell whether a smaller
+chunk size or a different lane is warranted.
 
 ### Hugo build integration
 
-To index as part of your Hugo build:
+Place the index in Hugo's `static/` directory so it's included automatically:
 
 ```bash
-hugo && eddie index \
-  --content-dir content/ \
-  --output public/eddie/index.ed
-```
-
-Or place the index in Hugo's `static/` directory so it's included automatically:
-
-```bash
-eddie index \
-  --content-dir content/ \
-  --output static/eddie/index.ed
+eddie index --content-dir content/ --cms hugo --output static/eddie/index.ed --preset balanced
 
 hugo  # copies static/ contents to public/
 ```
 
 ### GitHub Actions
 
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-action/setup@v1
-
-      - name: Build eddie
-        run: |
-          git clone https://github.com/jt55401/eddie.git /tmp/eddie
-          cd /tmp/eddie && cargo build --release
-          cp target/release/eddie /usr/local/bin/
-
-      - name: Index content
-        run: eddie index --content-dir content/ --output static/eddie/index.ed
-
-      - name: Build Hugo site
-        run: hugo
-
-      - name: Deploy
-        # your deployment step here
-```
+Use `.github/workflows/example-hugo.yml` from this repo as a starting point.
+It pins both the Hugo version and the `@jt55401/eddie-cli` version
+explicitly (never `latest`), and the CLI launcher verifies the downloaded
+binary against `SHA256SUMS` before running it. See
+[docs/guides/github-actions.md](github-actions.md) for the full pipeline and
+why pinning matters here.
 
 ## Searching
 
-### Hybrid search (default)
-
-Combines semantic similarity with BM25 keyword matching using reciprocal rank fusion:
-
 ```bash
-eddie search \
-  --index eddie/index.ed \
-  --query "What programming languages does Jason know?" \
-  --top-k 5
+eddie search --index static/eddie/index.ed --query "What programming languages does Jason know?" --top-k 5
 ```
 
-### Semantic search only
+`eddie search` reads the dense lane(s), the sparse arm, and the tokenizer
+straight from the index; there's no `--model` flag, and no way for the
+query-time model to drift from the one used at index time.
 
-Uses embedding cosine similarity — good for meaning-based queries:
+### Search modes
 
-```bash
-eddie search \
-  --index eddie/index.ed \
-  --query "enterprise web development" \
-  --mode semantic
-```
+| `--mode` | Arms used |
+|---|---|
+| `hybrid` (default) | BM25 + sparse + dense, fused with weighted reciprocal rank fusion |
+| `dense` | The dense lane(s) only, meaning-based |
+| `sparse` | The learned sparse arm only |
+| `keyword` | BM25 only, exact term matching |
 
-### Keyword search only
-
-Uses BM25 scoring — good for exact term matching:
-
-```bash
-eddie search \
-  --index eddie/index.ed \
-  --query "Azure certifications" \
-  --mode keyword
-```
-
-### Search options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--index` | (required) | Path to the index file |
-| `--query` | (required) | Search query text |
-| `--top-k` | `5` | Number of results to return |
-| `--model` | `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | Must match the model used during indexing |
-| `--mode` | `hybrid` | Search mode: `semantic`, `keyword`, or `hybrid` |
+Pass `--lane <id>` to pick a specific dense lane when an index has more than
+one (see `eddie stats --index <path>` for the lane ids), and `--json` for
+machine-readable output.
 
 ## What gets indexed
 
@@ -170,40 +165,40 @@ URLs are derived from file paths relative to the content root:
 | `content/about/index.md` | `/about/` |
 | `content/posts/_index.md` | `/posts/` |
 
-## Alternative embedding models
+## Dense lanes and the sparse arm
 
-The default model works well for general English content. For different needs:
+The dense retrieval lane runs one of two ways at query time: `wasm-candle`
+(bert-family models, always available, runs on CPU in the WASM module) or
+`webgpu-onnx` (larger models via transformers.js, only when the visitor's
+browser gives a WebGPU adapter). See README.md's model table for which
+models fit which lane, and their license and download size.
 
-| Model | License | Dimensions | Notes |
-|-------|---------|------------|-------|
-| `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | Apache 2.0 | 384 | Default, retrieval-focused quality profile |
-| `sentence-transformers/all-MiniLM-L6-v2` | Apache 2.0 | 384 | Faster indexing/query profile |
-| `BAAI/bge-small-en-v1.5` | MIT | 384 | MIT licensed alternative |
-| `Snowflake/snowflake-arctic-embed-s` | Apache 2.0 | 384 | Clean training data provenance |
+The sparse arm needs no runtime model at query time; it tokenizes the query
+and looks up per-term IDF weights stored in the index, so it costs nothing
+extra in the browser once the index is loaded.
 
-To use a different model, pass `--model` to both `index` and `search`:
+## Index format
 
-```bash
-eddie index --content-dir content/ --output index.ed \
-  --model BAAI/bge-small-en-v1.5
-
-eddie search --index index.ed --query "test" \
-  --model BAAI/bge-small-en-v1.5
-```
+Indexes use format v5 (`SAED`/`SAGI` containers). A v0.4 CLI rejects v1-v4
+index files with a "rebuild with eddie 0.4" message. Rebuild with
+`eddie index` after upgrading; there's no in-place migration.
 
 ## Troubleshooting
 
 ### First run is slow
 
-The embedding model is downloaded from HuggingFace Hub on first run and cached in `~/.cache/huggingface/` (about ~87MB cached footprint with the default model). Subsequent runs use the cache.
+Model weights are downloaded from HuggingFace Hub/CDN on first use and
+cached (`~/.cache/huggingface/` for the CLI, IndexedDB for the browser
+runtime). Subsequent runs use the cache.
 
-### Model mismatch errors
+### "rebuild with eddie 0.4" error loading an index
 
-The `--model` flag during search must match the model used during indexing. The model ID is stored in the index file and checked at load time.
+The index was built with an older Eddie version (format v1-v4). Rebuild it:
+`eddie index --content-dir content/ --cms hugo --output static/eddie/index.ed`.
 
 ### No results for a query
 
 - Check that the content directory path is correct
 - Verify files aren't all marked as drafts
 - Try `--mode keyword` to test if the content was indexed
-- Try broader queries — semantic search works on meaning, not exact words
+- Try broader queries. The dense and sparse arms work on meaning and learned term weights, not just exact words

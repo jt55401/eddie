@@ -21,18 +21,18 @@ Edit `.github/publish-packages.json` and add package directories:
       "build": "bash widget/build.sh"
     },
     { "path": "integrations/cli/npm" },
-    { "path": "integrations/hugo/npm" },
-    { "path": "integrations/astro/npm" },
-    { "path": "integrations/docusaurus/npm" },
-    { "path": "integrations/eleventy/npm" }
+    { "path": "integrations/hugo/npm", "assets_dir": "integrations/hugo/npm/assets" },
+    { "path": "integrations/astro/npm", "assets_dir": "integrations/astro/npm/assets" },
+    { "path": "integrations/docusaurus/npm", "assets_dir": "integrations/docusaurus/npm/assets" },
+    { "path": "integrations/eleventy/npm", "assets_dir": "integrations/eleventy/npm/assets" }
   ],
   "pypi": [
     { "path": "integrations/cli/pypi" },
-    { "path": "integrations/mkdocs/pypi" }
+    { "path": "integrations/mkdocs/pypi", "assets_dir": "integrations/mkdocs/pypi/src/eddie_mkdocs/assets" }
   ],
   "rubygems": [
     { "path": "integrations/cli/gem" },
-    { "path": "integrations/jekyll/gem" }
+    { "path": "integrations/jekyll/gem", "assets_dir": "integrations/jekyll/gem/assets" }
   ]
 }
 ```
@@ -44,6 +44,32 @@ Each target path should contain exactly one package:
 - RubyGems: exactly one `*.gemspec`
 
 For npm targets, `build` is optional and runs before validation/publish. Use it for generated packages (for example `wasm-pack` output under `widget/pkg`).
+
+### Widget runtime assets (`assets_dir`)
+
+The CMS installer packages (`integrations/{hugo,astro,docusaurus,eleventy}/npm`,
+`integrations/jekyll/gem`, `integrations/mkdocs/pypi`) each ship a copy of the
+built widget runtime (`eddie.wasm`, `eddie-wasm.js`, `eddie-worker.js`,
+`eddie-widget.js`) so their install scripts can drop it straight into a site.
+These files are **generated, never committed**. `ci.yml`'s
+`packaging-check` job fails the build if one is checked in, and `.gitignore`
+excludes them. This was a real problem before: five of six npm packages plus
+the mkdocs/jekyll packages shipped pre-committed binaries with no build step
+and no drift check, so a widget fix could ship stale bits to every package
+except `widget/pkg`.
+
+Every publish workflow (`publish-npm.yml`, `publish-pypi.yml`,
+`publish-rubygems.yml`) now has a `build-widget-dist` job that runs
+`widget/build.sh` exactly once and uploads `dist/` as a workflow artifact.
+Each matrix target with an `assets_dir` entry downloads that artifact and
+copies the four files in before validating/building/publishing, so every
+package in one publish run ships identical bits.
+
+For local testing, `scripts/sync-integration-assets.sh` does the same thing
+outside CI: it builds the widget once and copies `dist/` into every
+`assets_dir` from `.github/publish-packages.json`. Run it (or
+`--no-build` if `dist/` is already current) before manually testing an
+installer script.
 
 ## 2) Create a GitHub Environment
 
@@ -105,11 +131,18 @@ At minimum this now includes:
 
 ### Tag-based publish
 
-Push a tag (example: `v0.3.0`).
+Push a tag (example: `v0.4.0`).
 
 All three publish workflows trigger on `v*` tags and publish targets from `.github/publish-packages.json`.
 
-After publish, `post-publish-registry-smoke.yml` runs CMS Docker E2E against registry packages to verify install, indexing, and CLI search all succeed.
+`post-publish-registry-smoke.yml` triggers on `workflow_run` completion of
+the three publish workflows (not on the tag push directly), so it doesn't
+race a manual-approval gate on the `release` environment. It fires once per
+publish workflow that completes and polls every registry/asset a given CMS
+needs for up to ~60 minutes per check (200-minute job timeout) before
+running CMS Docker E2E against the published packages. If your approval
+takes longer than that, re-run it manually (see below) once publishing
+actually finishes.
 
 ### Manual publish / dry-run
 
@@ -125,8 +158,9 @@ Optional input:
 
 For registry smoke tests:
 
-- run `post-publish-registry-smoke.yml` with input `version` (for example `0.2.4`)
-- or rely on automatic trigger from tag pushes (`v*`)
+- it normally runs on its own, triggered by each publish workflow finishing
+- to re-run it by hand (for example after a slow manual approval), use
+  `workflow_dispatch` with input `version` (for example `0.4.0`)
 
 ## Secrets
 
