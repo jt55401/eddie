@@ -8,16 +8,20 @@
       "path": "integrations/cli/npm"
     },
     {
-      "path": "integrations/hugo/npm"
+      "path": "integrations/hugo/npm",
+      "assets_dir": "integrations/hugo/npm/assets"
     },
     {
-      "path": "integrations/astro/npm"
+      "path": "integrations/astro/npm",
+      "assets_dir": "integrations/astro/npm/assets"
     },
     {
-      "path": "integrations/docusaurus/npm"
+      "path": "integrations/docusaurus/npm",
+      "assets_dir": "integrations/docusaurus/npm/assets"
     },
     {
-      "path": "integrations/eleventy/npm"
+      "path": "integrations/eleventy/npm",
+      "assets_dir": "integrations/eleventy/npm/assets"
     }
   ],
   "pypi": [
@@ -25,7 +29,8 @@
       "path": "integrations/cli/pypi"
     },
     {
-      "path": "integrations/mkdocs/pypi"
+      "path": "integrations/mkdocs/pypi",
+      "assets_dir": "integrations/mkdocs/pypi/src/eddie_mkdocs/assets"
     }
   ],
   "rubygems": [
@@ -33,7 +38,8 @@
       "path": "integrations/cli/gem"
     },
     {
-      "path": "integrations/jekyll/gem"
+      "path": "integrations/jekyll/gem",
+      "assets_dir": "integrations/jekyll/gem/assets"
     }
   ]
 }

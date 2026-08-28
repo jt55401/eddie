@@ -1,34 +1,50 @@
 name: Example Hugo Site Build
 
+# Template for a site repo's own CI. Pins Hugo and the Eddie CLI to explicit
+# versions so the exact same commit produces the exact same built site on
+# every run. Bump both deliberately (and re-test) rather than tracking
+# "latest" -- see docs/guides/github-actions.md.
+
 on:
   workflow_dispatch:
+
+env:
+  HUGO_VERSION: "0.161.1"
+  EDDIE_CLI_VERSION: "0.4.0"
 
 jobs:
   build-example:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout site
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Hugo
-        uses: peaceiris/actions-hugo@v3
+        uses: peaceiris/actions-hugo@2752ce1d29631191ea3f27c23495fa06139a5b78 # v3
         with:
-          hugo-version: latest
+          hugo-version: ${{ env.HUGO_VERSION }}
           extended: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
 
       - name: Generate Eddie index into Hugo static/
-        run: npx -y @jt55401/eddie-cli@latest index --cms hugo --content-dir content/ --output static/eddie/index.ed
+        env:
+          EDDIE_CLI_VERSION: ${{ env.EDDIE_CLI_VERSION }}
+        run: |
+          set -euo pipefail
+          # @jt55401/eddie-cli verifies the downloaded binary against the
+          # release's SHA256SUMS before running it (integrations/cli/npm).
+          npx -y "@jt55401/eddie-cli@${EDDIE_CLI_VERSION}" \
+            index --cms hugo --content-dir content/ --output static/eddie/index.ed
 
       - name: Build Hugo site
         run: hugo --minify
 
       - name: Upload built site artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hugo-public
           path: public/

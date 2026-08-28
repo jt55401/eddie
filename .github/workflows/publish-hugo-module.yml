@@ -9,28 +9,50 @@ on:
 permissions:
   contents: read
 
+# Third-party actions are pinned to a full commit SHA (see the trailing
+# comment on each `uses:` line for the tag/branch that SHA resolves to).
+# Re-pin deliberately; don't restore a floating tag.
+
 jobs:
+  check-secret:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check whether EDDIE_HUGO_DEPLOY_KEY is set
+        id: check
+        env:
+          DEPLOY_KEY_SET: ${{ secrets.EDDIE_HUGO_DEPLOY_KEY != '' }}
+        run: |
+          echo "configured=$DEPLOY_KEY_SET" >> "$GITHUB_OUTPUT"
+          if [[ "$DEPLOY_KEY_SET" != "true" ]]; then
+            echo "EDDIE_HUGO_DEPLOY_KEY is not set; skipping Hugo module publish." \
+              "See docs/guides/github-actions.md for setup." >&2
+          fi
+
   publish:
+    needs: check-secret
+    if: needs.check-secret.outputs.configured == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Load deploy key for eddie-hugo
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@dc588b651fe13675774614f8e6a936a468676387 # v0.9.0
         with:
           ssh-private-key: ${{ secrets.EDDIE_HUGO_DEPLOY_KEY }}
 
       - name: Install Rust + wasm target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
         with:
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
 
       - name: Assemble hugo-module/
         run: bash scripts/publish-hugo-module.sh
@@ -60,3 +82,14 @@ jobs:
             git tag -a "${TAG}" -m "Release ${TAG}" || true
             git push origin "${TAG}" || true
           fi
+
+  skipped:
+    needs: check-secret
+    if: needs.check-secret.outputs.configured != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skip
+        run: |
+          echo "EDDIE_HUGO_DEPLOY_KEY is not configured on this repository." >&2
+          echo "Hugo module publish skipped without failing the run." >&2
+          echo "See docs/guides/github-actions.md for the SSH deploy-key setup." >&2
