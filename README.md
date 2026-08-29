@@ -81,13 +81,18 @@ eddie index --content-dir <path> --cms <hugo|astro|docusaurus|eleventy|jekyll|mk
             [--dense-model <id>]...  [--sparse | --sparse-model <id>]
             [--device auto|cpu|cuda] [--batch-size 32]
             [--chunk-size 256] [--overlap 32] [--chunk-strategy heading|semantic]
-            [--qa ...] [--claims ...] [--preset fast|balanced|quality|gpu]
+            [--qa ... --qa-subject "Jason Grey"] [--claims ...]
+            [--preset fast|balanced|quality|gpu] [--no-title-context]
 
 eddie search --index <index.ed> --query <text>
              [--mode hybrid|dense|sparse|keyword] [--lane <id>] [--top-k 8] [--json]
+             [--explain] [--weights D,S,B] [--fetch-k N] [--rrf-k K]
+
+eddie qa     --index <index.ed> --query <text> [--k 5] [--lane <id>] [--json]
 
 eddie stats --index <index.ed>
-eddie eval  --index <index.ed> --labels <labels.toml>
+eddie eval  --index <index.ed> --labels <labels.toml> [--top-k 10] [--mode ...]
+            [--weights D,S,B] [--fetch-k N] [--rrf-k K] [--sweep] [--graded] [--all-modes]
 eddie tune  --content-dir <path> --eval <labels.toml> [...]
 ```
 
@@ -95,7 +100,19 @@ eddie tune  --content-dir <path> --eval <labels.toml> [...]
 from the index itself; there is no `--model` flag, so query-time and
 index-time embeddings can't drift apart. `eddie stats` prints the manifest,
 lane ids, and sparse term count; `eddie eval`/`eddie tune` compute Hit@k,
-MRR, and nDCG against a labelled query set.
+MRR, and nDCG against a labelled query set. `eddie qa` ranks the QA
+section the way the widget's FAQ card does and prints each score
+component.
+
+### Title context
+
+Every chunk is indexed under a `{title} — {section}` line (section only
+when it differs from the title) for all three arms, so a query that names
+the page finds a one-chunk page whose body never repeats its title. The
+stored text, snippets and the `page`/`chunk` views stay clean. The
+manifest records it as `title_context: true`; `--no-title-context` turns
+it off and `eddie search --explain` prints the prefix each result was
+indexed with.
 
 ### Presets
 
@@ -225,6 +242,55 @@ expect to see, and a rating, then re-tunes from what it collects:
 ```bash
 eddie tune --content-dir content/ --interactive --save-eval eddie.acceptance.json
 ```
+
+### Ranking weights and per-arm metrics
+
+`eddie eval` scores a built index against a TOML label set. A case names
+relevant page URLs; an optional `[cases.graded]` table grades them 1..3
+(its URLs count as relevant too):
+
+```toml
+[[cases]]
+id = "programming-years"
+query = "how long has jason been programming?"
+relevant = ["/skills/programming-languages/"]
+[cases.graded]
+"/skills/programming-languages/" = 3
+"/r/" = 1
+```
+
+```bash
+eddie eval --index index.ed --labels labels.toml --all-modes   # hybrid, dense, sparse, keyword side by side
+eddie eval --index index.ed --labels labels.toml --sweep       # 48 weight settings, sorted by nDCG then MRR
+eddie eval --index index.ed --labels labels.toml --graded      # nDCG with gain 2^grade - 1
+eddie eval --index index.ed --labels labels.toml --weights 1.2,1,0.6 --fetch-k 40 --rrf-k 30
+```
+
+Queries are embedded once per run, so `--sweep` and `--all-modes` only
+re-fuse cached vectors. The sweep grid is dense 0.8/1/1.2, sparse
+0.6/0.8/1/1.2, bm25 0.6/0.8/1/1.2. The same `--weights`, `--fetch-k` and
+`--rrf-k` flags work on `eddie search` to check a setting by hand; the
+widget always uses the defaults (1, 1, 0.8; `max(3·top_k, 30)`; 60).
+
+### QA lane ranking
+
+`qa_lookup` (WASM) and `eddie qa` (CLI) rank QA entries by
+
+```text
+lexical = 0.5 · overlap + 0.5 · bm25_norm
+score   = 0.6 · dense + 0.4 · lexical
+```
+
+where `dense` is the qa lane cosine, `overlap` is the share of the query's
+content terms (stop words and auxiliaries such as "has"/"been" dropped)
+found in the entry's question or answer, and `bm25_norm` is the entry's
+BM25 score over `question + answer` relative to the best entry. A hit is
+`confident` when `score >= 0.55` and (`overlap >= 0.34` or `dense >= 0.80`).
+Each hit carries `score`, `dense`, `overlap`, `bm25_rank` and `confident`.
+
+Synthesis writes "the author" unless told otherwise; pass
+`--qa-subject "Jason Grey"` (or `EDDIE_QA_SUBJECT` in `.eddie/local.env`)
+so questions and answers use the name visitors type.
 
 ## Human-friendly claim edits
 
