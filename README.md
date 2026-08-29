@@ -77,7 +77,7 @@ a recency tie-breaker for dated pages.
 ## CLI reference
 
 ```
-eddie index --content-dir <path> --cms <hugo|astro|docusaurus|eleventy|jekyll|mkdocs> --output <index.ed>
+eddie index --content-dir <path> --cms <hugo|astro|docusaurus|eleventy|jekyll|mkdocs|html> --output <index.ed>
             [--dense-model <id>]...  [--sparse | --sparse-model <id>]
             [--device auto|cpu|cuda] [--batch-size 32]
             [--chunk-size 256] [--overlap 32] [--chunk-strategy heading|semantic]
@@ -96,6 +96,20 @@ from the index itself; there is no `--model` flag, so query-time and
 index-time embeddings can't drift apart. `eddie stats` prints the manifest,
 lane ids, and sparse term count; `eddie eval`/`eddie tune` compute Hit@k,
 MRR, and nDCG against a labelled query set.
+
+`--cms html` indexes a site's built HTML instead of its markdown source, for
+sites whose copy lives in templates rather than content files: point
+`--content-dir` at the render output (a Hugo `public/` directory, or
+equivalent). It reads `<meta property="og:title">`, the first `<h1>`, or
+`<title>` for the page title; `<meta name="description">` for the
+description; `<meta property="article:published_time">` or `<time
+datetime>` for the date; and the body from `<main>` or `<article>`, falling
+back to `<body>` with `<nav>`, `<header>`, `<footer>`, `<aside>`, and the
+Eddie widget itself stripped out. It skips `404.html`, `tags/`,
+`categories/`, and `page/N/` (Hugo's taxonomy and pagination output),
+pages with `<meta name="robots" content="noindex">` (unless the page is
+opted back in at the library level via `HtmlOptions::include_noindex`, not
+yet a CLI flag), and pages whose extracted body comes out under 20 words.
 
 ### Presets
 
