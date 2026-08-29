@@ -138,3 +138,27 @@ test("model selection: the auto threshold is exactly 2 GiB", () => {
   assert.equal(A.selectAgentModel({}).id, "Qwen3.5-0.8B-q4f32_1-MLC");
   assert.equal(A.agentModelBytes("Qwen3.5-0.8B-q4f16_1-MLC"), 0.4e9);
 });
+
+test("faqPasses prefers the confident flag and falls back to the score", () => {
+  assert.equal(A.faqPasses({ score: 0.9, confident: false }, "auto"), false);
+  assert.equal(A.faqPasses({ score: 0.3, confident: true }, "auto"), true);
+  assert.equal(A.faqPasses({ score: 0.6 }, "auto"), true);
+  assert.equal(A.faqPasses({ score: 0.4 }, "auto"), false);
+  assert.equal(A.faqPasses({ score: 0.1 }, "always"), true);
+  assert.equal(A.faqPasses({ score: 0.99, confident: true }, "off"), false);
+  assert.equal(A.faqPasses(null, "auto"), false);
+});
+
+test("qaEvidence turns confident hits into Q/A evidence items", () => {
+  const hits = [
+    { question: "How long has Jason been coding?", answer: "Nearly 40 years.", source_url: "/skills/programming-languages/", confident: true },
+    { question: "Years in AI/ML?", answer: "20+", source_url: "/r/", confident: false },
+    { question: "First paid job?", answer: "Age 14.", source_url: "/skills/programming-languages/", score: 0.7 },
+  ];
+  const items = A.qaEvidence(hits, 2);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].title, "FAQ: How long has Jason been coding?");
+  assert.match(items[0].text, /^Q: .*\nA: Nearly 40 years\.$/);
+  assert.equal(items[0].url, "/skills/programming-languages/");
+  assert.equal(items[1].title, "FAQ: First paid job?");
+});
