@@ -646,7 +646,7 @@ fn build_synthesis_prompt(
 ) -> String {
     let subject_rule = match subject.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => format!(
-            "- Refer to the site's owner as {name}; do not write \"the author\" or \"the subject\".\n"
+            "- Refer to the site's owner as {name}; do not write \"the author\", \"the subject\" or \"the site owner\".\n"
         ),
         None => String::new(),
     };
@@ -688,8 +688,12 @@ Rules:
 /// ignored the prompt rule. Capitalised forms keep the name as written.
 #[cfg(not(target_arch = "wasm32"))]
 fn apply_subject(entry: &mut QaEntry, subject: &str) {
-    static GENERIC_SUBJECT_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?i)\bthe (?:author|subject)\b").unwrap());
+    static GENERIC_SUBJECT_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+                r"(?i)\bthe (?:author|subject|site(?:'s)? owner|site(?:'s)? author|owner|blog(?:'s)? owner|blog(?:'s)? author)\b",
+            )
+            .unwrap()
+    });
     let subject = subject.trim();
     if subject.is_empty() {
         return;
@@ -1272,7 +1276,7 @@ mod tests {
     #[test]
     fn synthesis_prompt_states_the_subject_rule_only_when_given() {
         let with = build_synthesis_prompt(&meta(), "body", 3, Some("Jason Grey"));
-        assert!(with.contains("Refer to the site's owner as Jason Grey; do not write \"the author\" or \"the subject\"."));
+        assert!(with.contains("Refer to the site's owner as Jason Grey; do not write \"the author\", \"the subject\" or \"the site owner\"."));
         let without = build_synthesis_prompt(&meta(), "body", 3, None);
         assert!(!without.contains("site's owner"));
         assert_eq!(
@@ -1305,6 +1309,18 @@ mod tests {
         assert_eq!(e2.answer, "the authors of the authoritative post");
         apply_subject(&mut e2, " ");
         assert_eq!(e2.answer, "the authors of the authoritative post");
+        let mut owner = QaEntry {
+            question: "How long has the site owner been coding?".into(),
+            answer: "The site's owner started at age 6.".into(),
+            source_title: String::new(),
+            source_url: String::new(),
+            source_section: None,
+            tags: vec![],
+            confidence: 0.8,
+        };
+        apply_subject(&mut owner, "Jason Grey");
+        assert_eq!(owner.question, "How long has Jason Grey been coding?");
+        assert_eq!(owner.answer, "Jason Grey started at age 6.");
     }
 
     #[test]
