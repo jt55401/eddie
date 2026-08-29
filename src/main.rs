@@ -84,7 +84,9 @@ enum Command {
         model: Option<String>,
 
         /// Browser runtime for the lane at the same position as --dense-model:
-        /// `wasm-candle` or `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>]`.
+        /// `wasm-candle` (BERT family only) or
+        /// `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]`; pooling
+        /// defaults to the lane's own (mean, cls or last_token).
         #[arg(long = "dense-runtime", value_name = "SPEC")]
         dense_runtime: Vec<String>,
 
@@ -685,6 +687,7 @@ fn cmd_index(
             chunk.meta.granularity = Some("fine".to_string());
         }
         all_chunks.extend(fine);
+        warn_about_lane_runtime(spec);
 
         if let Some(coarse_size) = coarse_chunk_size {
             let coarse_overlap = coarse_overlap.unwrap_or(overlap);
@@ -1964,8 +1967,10 @@ fn resolve_index_models(
     })
 }
 
-/// `wasm-candle`, `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>]`, or `auto`/`` for
-/// the registry default.
+/// `wasm-candle`, `webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]`, or
+/// `auto`/`` for the registry default. An omitted pooling is left empty here
+/// and filled in by `load_dense` from the lane's own pooling once the model
+/// config has been read; only an explicit value overrides it.
 fn parse_runtime_spec(spec: &str) -> Result<Option<RuntimeSpec>> {
     let spec = spec.trim();
     if spec.is_empty() || spec.eq_ignore_ascii_case("auto") {
@@ -1975,24 +1980,29 @@ fn parse_runtime_spec(spec: &str) -> Result<Option<RuntimeSpec>> {
         return Ok(Some(models::runtime_spec(models::RuntimeKind::WasmCandle)));
     }
     let Some(rest) = spec.strip_prefix("webgpu-onnx:") else {
-        bail!(
-            "unknown --dense-runtime '{spec}' (expected wasm-candle or webgpu-onnx:<repo>:<dtype>[:<dtype_f16>])"
-        );
+        bail!("unknown --dense-runtime '{spec}' (expected wasm-candle or {USAGE})");
     };
     let parts: Vec<&str> = rest.split(':').collect();
-    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
-        bail!("--dense-runtime webgpu-onnx needs <repo>:<dtype>[:<dtype_f16>], got '{spec}'");
+    if parts.len() < 2 || parts.len() > 4 || parts[0].is_empty() || parts[1].is_empty() {
+        bail!("--dense-runtime {USAGE}, got '{spec}'");
+    }
+    let segment = |i: usize| {
+        parts
+            .get(i)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    let pooling = segment(3).unwrap_or_default();
+    if !pooling.is_empty() && !matches!(pooling.as_str(), "mean" | "cls" | "last_token" | "none") {
+        bail!(
+            "--dense-runtime pooling must be mean, cls, last_token or none (transformers.js names), got '{pooling}'"
+        );
     }
     Ok(Some(RuntimeSpec::WebgpuOnnx {
         repo: parts[0].to_string(),
         dtype: parts[1].to_string(),
-        dtype_f16: parts
-            .get(2)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        // The runtime pools with the lane's own pooling; last_token for
-        // decoder embedders is the common case for ONNX ports.
-        pooling: "last_token".to_string(),
+        dtype_f16: segment(2),
+        pooling,
     }))
 }
 
@@ -2101,6 +2111,34 @@ fn rating_weight(rating: Option<u8>) -> f32 {
         Some(3) => 1.5,
         Some(4) => 1.25,
         Some(5) => 1.0,
+/// Warn when a lane's manifest runtime cannot be honoured by the browser.
+fn warn_about_lane_runtime(spec: &DenseSpec) {
+    match &spec.runtime {
+        RuntimeSpec::WasmCandle { files } => {
+            let weights: Vec<&str> = files
+                .iter()
+                .map(String::as_str)
+                .filter(|f| *f != "config.json" && *f != "tokenizer.json")
+                .collect();
+            if weights != ["model.safetensors"] {
+                eprintln!(
+                    "  warning: lane '{}' weights are {:?}; the browser WASM runtime loads only a single model.safetensors, so the widget will skip this lane. Pass --dense-runtime webgpu-onnx:<repo>:<dtype> or pick a repo that ships model.safetensors.",
+                    spec.id, weights
+                );
+            }
+        }
+        RuntimeSpec::WebgpuOnnx { pooling, .. } => {
+            let own = spec.pooling.transformers_name();
+            if pooling != own {
+                eprintln!(
+                    "  warning: lane '{}' runtime pooling '{}' differs from the lane's own pooling '{}'; browser query vectors will not match the stored document vectors unless the ONNX graph already applies '{}' pooling",
+                    spec.id, pooling, own, own
+                );
+            }
+        }
+    }
+}
+
         _ => 1.0,
     }
 }
@@ -2197,6 +2235,7 @@ mod tests {
         assert!(parse_runtime_spec("auto").unwrap().is_none());
     }
 
+    const USAGE: &str = "webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]";
     #[test]
     fn rating_weight_map() {
         assert_eq!(rating_weight(Some(1)), 2.0);
@@ -2204,3 +2243,24 @@ mod tests {
         assert_eq!(rating_weight(None), 1.0);
     }
 }
+    #[test]
+    fn runtime_spec_pooling_is_explicit_or_deferred() {
+        // No pooling segment: left empty for load_dense to derive from the lane.
+        assert!(matches!(
+            parse_runtime_spec("webgpu-onnx:org/repo:q8").unwrap(),
+            Some(RuntimeSpec::WebgpuOnnx { pooling, dtype_f16: None, .. }) if pooling.is_empty()
+        ));
+        assert!(matches!(
+            parse_runtime_spec("webgpu-onnx:org/repo:q4::cls").unwrap(),
+            Some(RuntimeSpec::WebgpuOnnx { pooling, dtype_f16: None, .. }) if pooling == "cls"
+        ));
+        assert!(matches!(
+            parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:mean").unwrap(),
+            Some(RuntimeSpec::WebgpuOnnx { pooling, dtype_f16: Some(f16), .. })
+                if pooling == "mean" && f16 == "q4f16"
+        ));
+        assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:average").is_err());
+        assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:mean:extra").is_err());
+        assert!(parse_runtime_spec("webgpu-onnx:org/repo").is_err());
+    }
+
