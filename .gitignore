@@ -24,3 +24,4 @@ integrations/*/gem/assets/eddie-worker.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js
+.playwright-mcp/

@@ -809,7 +809,12 @@ mod native {
             let inputs = prefixed_all(&self.spec, texts, kind);
             let (ids, truncated) = encode_all(&self.tokenizer, &inputs)?;
             self.truncated.fetch_add(truncated, Ordering::Relaxed);
-            run_batched(&ids, self.batch_size, true, |b| self.forward_batch(b))
+            // One text per forward pass: candle's qwen3 model returns
+            // non-finite hidden states for batches larger than one (seen on
+            // CUDA in bf16, f16 and f32 with equal-length batches), and a
+            // batch of one already runs at ~140 texts/s on a GPU.
+            let _ = self.batch_size;
+            run_batched(&ids, 1, true, |b| self.forward_batch(b))
         }
 
         fn truncated_count(&self) -> usize {
@@ -1050,6 +1055,14 @@ mod native {
 
     /// f32 on CPU (candle's CPU flash attention runs in f32), bf16 on CUDA.
     pub fn qwen3_dtype(device: &Device) -> DType {
+        if let Ok(v) = std::env::var("EDDIE_QWEN3_DTYPE") {
+            match v.to_ascii_lowercase().as_str() {
+                "bf16" => return DType::BF16,
+                "f16" => return DType::F16,
+                "f32" => return DType::F32,
+                _ => {}
+            }
+        }
         if device.is_cuda() {
             DType::BF16
         } else {
