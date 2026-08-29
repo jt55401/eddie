@@ -2,7 +2,7 @@
 
 //! Eddie CLI: build-time indexer for static site content.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -612,23 +612,6 @@ fn cmd_index(
     qa_ollama_max_pairs_per_chunk: usize,
     qa_ollama_temperature: f32,
 ) -> Result<()> {
-    // Parse content
-    eprintln!(
-        "Parsing content from {} with {} parser...",
-        content_dir.display(),
-        cms.as_str()
-    );
-    let parser = parser_for(cms);
-    let report = parse_content_dir_report(&content_dir, parser.as_ref(), false)?;
-    let docs = report.docs;
-    eprintln!(
-        "  Found {} documents ({} files skipped)",
-        docs.len(),
-        report.skipped.len()
-    );
-    if docs.is_empty() {
-        bail!("no documents found under {}", content_dir.display());
-    }
     // Sub-flags only take effect with their section flag; say so up front
     // rather than silently building an index without the section.
     if !qa_enabled {
@@ -658,6 +641,23 @@ fn cmd_index(
         }
     }
 
+    // Parse content
+    eprintln!(
+        "Parsing content from {} with {} parser...",
+        content_dir.display(),
+        cms.as_str()
+    );
+    let parser = parser_for(cms);
+    let report = parse_content_dir_report(&content_dir, parser.as_ref(), false)?;
+    let docs = report.docs;
+    eprintln!(
+        "  Found {} documents ({} files skipped)",
+        docs.len(),
+        report.skipped.len()
+    );
+    if docs.is_empty() {
+        bail!("no documents found under {}", content_dir.display());
+    }
 
     // Load models first: the first dense lane's tokenizer is the token
     // counter for chunk sizing once the chunker takes one.
@@ -687,6 +687,7 @@ fn cmd_index(
             spec.revision.as_deref().unwrap_or("main"),
             started.elapsed().as_secs_f64()
         );
+        warn_about_lane_runtime(spec);
         lanes.push(lane);
     }
     if lanes.is_empty() {
@@ -724,6 +725,15 @@ fn cmd_index(
         "Chunking documents (strategy: {:?}, budget {} tokens{}, overlap {} tokens, counted with lane '{}')...",
         chunk_strategy,
         budget,
+        if prefix_tokens > 0 {
+            format!(
+                " after {} for the doc prefix {:?}",
+                prefix_tokens,
+                primary.spec().doc_prefix
+            )
+        } else {
+            String::new()
+        },
         overlap,
         primary.spec().id
     );
@@ -734,7 +744,6 @@ fn cmd_index(
             chunk.meta.granularity = Some("fine".to_string());
         }
         all_chunks.extend(fine);
-        warn_about_lane_runtime(spec);
 
         if let Some(coarse_size) = coarse_chunk_size {
             let coarse_overlap = coarse_overlap.unwrap_or(overlap);
@@ -742,15 +751,6 @@ fn cmd_index(
             let mut coarse =
                 chunk_document_with_budget(doc, coarse_budget, coarse_overlap, strategy, &count);
             for chunk in &mut coarse {
-        if prefix_tokens > 0 {
-            format!(
-                " after {} for the doc prefix {:?}",
-                prefix_tokens,
-                primary.spec().doc_prefix
-            )
-        } else {
-            String::new()
-        },
                 chunk.meta.granularity = Some("coarse".to_string());
             }
             all_chunks.extend(coarse);
@@ -910,6 +910,11 @@ fn cmd_index(
                 claims: Vec::new(),
             }
         };
+        if !claims_heuristics && claims_edits_path.is_none() {
+            eprintln!(
+                "  warning: --claims without --claims-heuristics and without --claims-edits produces no entries"
+            );
+        }
         if let Some(path) = claims_edits_path {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("reading claims edits {}", path.display()))?;
@@ -921,17 +926,13 @@ fn cmd_index(
                 corpus.claims.len()
             );
         }
+        corpus.dedup();
         claims = corpus.claims;
         eprintln!("  Claims entries: {}", claims.len());
     }
 
     // --- Index assembly (format v5) -------------------------------------
     let n = metadata.len();
-        if !claims_heuristics && claims_edits_path.is_none() {
-            eprintln!(
-                "  warning: --claims without --claims-heuristics and without --claims-edits produces no entries"
-            );
-        }
     // Stored texts are the clean chunk text (no overlap prefix), so the
     // builder has nothing to strip.
     let overlap_words: Vec<u16> = vec![0; n];
@@ -957,12 +958,15 @@ fn cmd_index(
             .collect();
         let refs: Vec<&str> = qa_texts.iter().map(String::as_str).collect();
         for lane in &lanes {
+            lane.reset_truncated_count();
+            let started = Instant::now();
             let vectors = embed_texts_with(
                 lane.as_ref(),
                 &refs,
                 TextKind::Document,
                 model_opts.batch_size,
             )?;
+            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
             builder.add_dense_lane(
                 SCOPE_QA,
                 DenseLane::from_f32(
@@ -974,26 +978,26 @@ fn cmd_index(
                 )?,
             )?;
         }
-            lane.reset_truncated_count();
-            let started = Instant::now();
         builder.add_qa(qa_entries);
     }
 
     if !claims.is_empty() {
         eprintln!("Embedding claims section ({} claims)...", claims.len());
         let claim_texts: Vec<String> = claims
-            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
             .iter()
             .map(|c| format!("{} {} {} {}", c.subject, c.predicate, c.object, c.evidence))
             .collect();
         let refs: Vec<&str> = claim_texts.iter().map(String::as_str).collect();
         for lane in &lanes {
+            lane.reset_truncated_count();
+            let started = Instant::now();
             let vectors = embed_texts_with(
                 lane.as_ref(),
                 &refs,
                 TextKind::Document,
                 model_opts.batch_size,
             )?;
+            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
             builder.add_dense_lane(
                 SCOPE_CLAIMS,
                 DenseLane::from_f32(
@@ -1005,15 +1009,12 @@ fn cmd_index(
                 )?,
             )?;
         }
-            lane.reset_truncated_count();
-            let started = Instant::now();
         builder.add_claims(claims);
     }
 
     let index = builder.finish()?;
 
     eprintln!("Writing index to {}...", output.display());
-            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
     let file = fs::File::create(&output)
         .with_context(|| format!("creating output file {}", output.display()))?;
     let mut writer = BufWriter::new(file);
@@ -1081,6 +1082,13 @@ impl QueryEmbedder {
         let device = select_device(DevicePref::Auto)?;
         let overrides = DenseOverrides {
             lane_id: Some(spec.id.clone()),
+            family: Some(spec.family),
+            pooling: Some(spec.pooling),
+            max_seq_len: Some(spec.max_seq_len),
+            query_prefix: Some(spec.query_prefix.clone()),
+            doc_prefix: Some(spec.doc_prefix.clone()),
+            normalize: Some(spec.normalize),
+            runtime: Some(spec.runtime.clone()),
             revision: spec.revision.clone(),
             batch_size: None,
         };
@@ -1111,6 +1119,13 @@ impl QueryEmbedder {
 fn embed_query(encoder: &dyn DenseEncoder, text: &str) -> Result<Vec<f32>> {
     let mut vecs = encoder.embed(&[text], TextKind::Query)?;
     vecs.pop().context("embedder returned no vector")
+}
+
+fn runtime_kind(runtime: &RuntimeSpec) -> &'static str {
+    match runtime {
+        RuntimeSpec::WasmCandle { .. } => "wasm-candle",
+        RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
+    }
 }
 
 fn lane_list(index: &SearchIndex) -> String {
@@ -1147,13 +1162,6 @@ fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
                 actual,
                 spec.vocab_hash
             );
-            family: Some(spec.family),
-            pooling: Some(spec.pooling),
-            max_seq_len: Some(spec.max_seq_len),
-            query_prefix: Some(spec.query_prefix.clone()),
-            doc_prefix: Some(spec.doc_prefix.clone()),
-            normalize: Some(spec.normalize),
-            runtime: Some(spec.runtime.clone()),
         }
         sparse_tokenizer_from_bytes(&bytes, eddie::sparse::DEFAULT_MAX_SEQ_LEN)
     };
@@ -1188,13 +1196,6 @@ impl QueryRuntime {
             if matches!(mode, Mode::Hybrid | Mode::Sparse) && index.sparse.is_some() {
                 load_sparse_tokenizer(index)
             } else {
-fn runtime_kind(runtime: &RuntimeSpec) -> &'static str {
-    match runtime {
-        RuntimeSpec::WasmCandle { .. } => "wasm-candle",
-        RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
-    }
-}
-
                 None
             };
         Ok(Self {
@@ -1460,23 +1461,6 @@ fn cmd_eval(
     }
 
     let index = load_index(&index_path)?;
-    let runtime = QueryRuntime::new(&index, mode, lane)?;
-
-    let mut per_case = Vec::with_capacity(set.cases.len());
-    for (case, id) in set.cases.iter().zip(case_ids) {
-        let (pages, _) = runtime.run(&index, &case.query, top_k)?;
-        let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
-        per_case.push(CaseMetrics {
-            id,
-            query: case.query.clone(),
-            hit: hit_at_k(&retrieved, &relevant, top_k),
-            rr: mrr(&retrieved, &relevant),
-            ndcg: ndcg_at_k(&retrieved, &relevant, top_k),
-            first_relevant_rank: retrieved
-                .iter()
-                .position(|u| relevant.contains(u))
-                .map(|p| p + 1),
-            top: urls,
 
     // Labels and page URLs are compared in canonical form (no host, no
     // trailing slash, lowercase); a label that names no page at all is
@@ -1503,18 +1487,35 @@ fn cmd_eval(
         }
     }
 
-        });
-    }
-    let n = per_case.len() as f64;
-    let report = EvalReport {
-        k: top_k,
-        mode,
+    let runtime = QueryRuntime::new(&index, mode, lane)?;
+
+    let mut per_case = Vec::with_capacity(set.cases.len());
+    for (case, id) in set.cases.iter().zip(case_ids) {
+        let (pages, _) = runtime.run(&index, &case.query, top_k)?;
+        let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
         let retrieved: Vec<String> = urls.iter().map(|u| normalize_eval_url(u)).collect();
         let relevant: Vec<String> = case
             .relevant
             .iter()
             .map(|u| normalize_eval_url(u))
             .collect();
+        per_case.push(CaseMetrics {
+            id,
+            query: case.query.clone(),
+            hit: hit_at_k(&retrieved, &relevant, top_k),
+            rr: mrr(&retrieved, &relevant),
+            ndcg: ndcg_at_k(&retrieved, &relevant, top_k),
+            first_relevant_rank: retrieved
+                .iter()
+                .position(|u| relevant.contains(u))
+                .map(|p| p + 1),
+            top: urls,
+        });
+    }
+    let n = per_case.len() as f64;
+    let report = EvalReport {
+        k: top_k,
+        mode,
         cases: per_case.len(),
         hit_at_k: per_case.iter().map(|c| c.hit).sum::<f64>() / n,
         mrr: per_case.iter().map(|c| c.rr).sum::<f64>() / n,
@@ -1557,6 +1558,27 @@ fn cmd_eval(
     Ok(())
 }
 
+/// Canonical form of a page URL for label matching: scheme and host
+/// dropped, a leading slash ensured, the trailing slash trimmed, lowercased.
+/// `/posts/Foo/`, `posts/foo` and `https://example.com/posts/foo` all
+/// become `/posts/foo`.
+fn normalize_eval_url(url: &str) -> String {
+    let mut s = url.trim();
+    if let Some(rest) = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+    {
+        s = rest.find('/').map_or("/", |i| &rest[i..]);
+    }
+    let trimmed = s.trim_end_matches('/');
+    let mut out = String::with_capacity(trimmed.len() + 1);
+    if !trimmed.starts_with('/') {
+        out.push('/');
+    }
+    out.push_str(trimmed);
+    out.to_lowercase()
+}
+
 fn truncate_label(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -1574,34 +1596,6 @@ fn cmd_tune(
     eval: Option<PathBuf>,
     save_eval: Option<PathBuf>,
     interactive: bool,
-/// Canonical form of a page URL for label matching: scheme and host
-/// dropped, a leading slash ensured, the trailing slash trimmed, lowercased.
-/// `/posts/Foo/`, `posts/foo` and `https://example.com/posts/foo` all
-/// become `/posts/foo`.
-fn normalize_eval_url(url: &str) -> String {
-    let mut s = url.trim();
-    if let Some(rest) = s
-        .strip_prefix("https://")
-        .or_else(|| s.strip_prefix("http://"))
-    {
-        s = rest.find('/').map_or("/", |i| &rest[i..]);
-    }
-    let trimmed = s.trim_end_matches('/');
-    let mut out = String::with_capacity(trimmed.len() + 1);
-    if !trimmed.starts_with('/') {
-#[allow(clippy::too_many_arguments)]
-fn cmd_tune(
-    content_dir: PathBuf,
-    cms: Cms,
-    eval: Option<PathBuf>,
-    save_eval: Option<PathBuf>,
-    interactive: bool,
-        out.push('/');
-    }
-    out.push_str(trimmed);
-    out.to_lowercase()
-}
-
     model_id: &str,
     chunk_sizes: &str,
     overlaps: &str,
@@ -1609,6 +1603,9 @@ fn cmd_tune(
     mode: SearchMode,
     report: Option<PathBuf>,
 ) -> Result<()> {
+    if top_k == 0 {
+        bail!("--top-k must be > 0");
+    }
     let mode: Mode = mode.into();
     let parser = parser_for(cms);
     eprintln!(
@@ -1626,22 +1623,18 @@ fn cmd_tune(
         AcceptanceSuite {
             name: Some("interactive-suite".to_string()),
             cases: Vec::new(),
-    if top_k == 0 {
-        bail!("--top-k must be > 0");
-    }
         }
     };
+    if !interactive && suite.cases.is_empty() {
+        bail!("no acceptance cases available. pass --eval or use --interactive to build one");
+    }
+
+    // The grid of indexes depends only on the corpus and the parameters, so
+    // it is built once and re-scored as cases are added.
+    let mut grid = TuneGrid::build(&docs, model_id, chunk_sizes, overlaps, mode)?;
 
     if interactive {
-        interactive_collect_cases(
-            &mut suite,
-            &docs,
-            model_id,
-            chunk_sizes,
-            overlaps,
-            top_k,
-            mode,
-        )?;
+        interactive_collect_cases(&mut suite, &mut grid, top_k, mode)?;
         let persist_path = save_eval.or(eval);
         if let Some(path) = persist_path {
             write_suite(&path, &suite)?;
@@ -1653,7 +1646,7 @@ fn cmd_tune(
         bail!("no acceptance cases available. pass --eval or use --interactive to build one");
     }
 
-    let candidates = run_tuning(&docs, &suite, model_id, chunk_sizes, overlaps, top_k, mode)?;
+    let candidates = run_tuning(&mut grid, &suite, top_k, mode)?;
     if candidates.is_empty() {
         bail!("no tuning candidates were produced");
     }
@@ -1695,7 +1688,6 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
     match cms {
         Cms::Hugo => Box::new(HugoParser),
         Cms::Astro => Box::new(AstroParser),
-#[allow(clippy::too_many_arguments)]
         Cms::Docusaurus => Box::new(DocusaurusParser),
         Cms::Mkdocs => Box::new(MkDocsParser),
         Cms::Eleventy => Box::new(EleventyParser),
@@ -1703,28 +1695,36 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_qa_corpus(
-    qa_seed: Option<u64>,
-    qa_heuristics: bool,
     index_path: PathBuf,
     output: PathBuf,
     ollama_model: Option<String>,
     ollama_url: String,
     ollama_max_chunks: usize,
-    if index.texts.is_empty() {
-        bail!("index does not contain chunk texts. rebuild index with current eddie first");
-    }
     ollama_max_pairs_per_chunk: usize,
     ollama_temperature: f32,
+    qa_seed: Option<u64>,
+    qa_heuristics: bool,
 ) -> Result<()> {
     eprintln!("Loading index from {}...", index_path.display());
     let bytes = fs::read(&index_path)
         .with_context(|| format!("opening index file {}", index_path.display()))?;
     let index = SearchIndex::from_bytes(&bytes)?;
+    if index.texts.is_empty() {
+        bail!("index does not contain chunk texts. rebuild index with current eddie first");
+    }
 
     let mut corpus = if !index.qa.is_empty() {
         eprintln!("Using embedded QA section from index...");
         QaCorpus {
+            version: 1,
+            entries: index.qa.clone(),
+        }
+    } else if qa_heuristics {
+        let built = build_qa_corpus_from_chunks(&index.texts, &index.metadata);
+        eprintln!("Heuristic QA entries: {}", built.entries.len());
+        built
     } else {
         if ollama_model.is_none() {
             eprintln!(
@@ -1735,31 +1735,24 @@ fn cmd_qa_corpus(
             version: 1,
             entries: Vec::new(),
         }
-            version: 1,
-            entries: index.qa.clone(),
-        }
-    } else if qa_heuristics {
-        let built = build_qa_corpus_from_chunks(&index.texts, &index.metadata);
-        eprintln!("Heuristic QA entries: {}", built.entries.len());
-        built
     };
 
     if let Some(model) = ollama_model {
-            seed: qa_seed,
         eprintln!("Running Ollama synthesis with model {}...", model);
         let cfg = OllamaConfig {
             model,
             endpoint: ollama_url,
             max_chunks: ollama_max_chunks,
             max_pairs_per_chunk: ollama_max_pairs_per_chunk,
-    corpus.dedup();
             temperature: ollama_temperature,
+            seed: qa_seed,
             ..Default::default()
         };
         let llm_entries = synthesize_with_ollama_from_chunks(&index.texts, &index.metadata, &cfg)?;
         eprintln!("Ollama QA entries: {}", llm_entries.len());
         corpus.entries.extend(llm_entries);
     }
+    corpus.dedup();
 
     let json = serde_json::to_string_pretty(&corpus)?;
     fs::write(&output, json).with_context(|| format!("writing {}", output.display()))?;
@@ -1770,26 +1763,22 @@ fn cmd_qa_corpus(
         output.display()
     );
 
-    claims_heuristics: bool,
     Ok(())
 }
 
 fn cmd_claims_corpus(
     index_path: PathBuf,
-    if index.texts.is_empty() {
-        bail!("index does not contain chunk texts. rebuild index with current eddie first");
-    }
     output: PathBuf,
     claims_edits: Option<PathBuf>,
+    claims_heuristics: bool,
 ) -> Result<()> {
     eprintln!("Loading index from {}...", index_path.display());
     let bytes = fs::read(&index_path)
         .with_context(|| format!("opening index file {}", index_path.display()))?;
     let index = SearchIndex::from_bytes(&bytes)?;
-    } else if claims_heuristics {
-        let built = build_claim_corpus_from_chunks(&index.texts, &index.metadata);
-        eprintln!("Heuristic claims: {}", built.claims.len());
-        built
+    if index.texts.is_empty() {
+        bail!("index does not contain chunk texts. rebuild index with current eddie first");
+    }
 
     let mut corpus = if !index.claims.is_empty() {
         eprintln!("Using embedded claims section from index...");
@@ -1797,6 +1786,10 @@ fn cmd_claims_corpus(
             version: 1,
             claims: index.claims.clone(),
         }
+    } else if claims_heuristics {
+        let built = build_claim_corpus_from_chunks(&index.texts, &index.metadata);
+        eprintln!("Heuristic claims: {}", built.claims.len());
+        built
     } else {
         if claims_edits.is_none() {
             eprintln!(
@@ -1826,72 +1819,117 @@ fn cmd_claims_corpus(
     Ok(())
 }
 
+/// One `chunk_size × overlap` cell of the tuning grid: the index `eddie
+/// index` would ship for those parameters.
+struct TuneCell {
+    chunk_size: usize,
+    overlap: usize,
+    index: SearchIndex,
+}
+
+/// Everything `eddie tune` needs to score a suite: the encoder, one index
+/// per grid cell (chunked and embedded exactly once), and the query vectors
+/// embedded so far. The interactive loop re-scores against this instead of
+/// re-embedding the corpus after every case.
+struct TuneGrid {
+    embedder: Option<Box<dyn DenseEncoder>>,
+    cells: Vec<TuneCell>,
+    query_vectors: HashMap<String, Vec<f32>>,
+}
+
+impl TuneGrid {
+    fn build(
+        docs: &[Document],
+        model_id: &str,
+        chunk_sizes: &str,
+        overlaps: &str,
+        mode: Mode,
+    ) -> Result<Self> {
+        let chunk_values = parse_usize_csv(chunk_sizes)?;
+        let overlap_values = parse_usize_csv(overlaps)?;
+        if mode == Mode::Sparse {
+            bail!("tune cannot build the sparse arm yet; use --mode hybrid, dense, or keyword");
+        }
+        let embedder = if matches!(mode, Mode::Dense | Mode::Hybrid) {
+            eprintln!("Loading embedding model {} for tuning...", model_id);
+            let device = select_device(DevicePref::Auto)?;
+            Some(load_dense(model_id, &device, &DenseOverrides::default())?)
+        } else {
+            None
+        };
+        let mut cells = Vec::with_capacity(chunk_values.len() * overlap_values.len());
+        for &chunk_size in &chunk_values {
+            for &overlap in &overlap_values {
+                eprintln!(
+                    "Building index for chunk_size={}, overlap={}...",
+                    chunk_size, overlap
+                );
+                let index = build_index_in_memory(docs, chunk_size, overlap, embedder.as_deref())?;
+                cells.push(TuneCell {
+                    chunk_size,
+                    overlap,
+                    index,
+                });
+            }
+        }
+        Ok(Self {
+            embedder,
+            cells,
+            query_vectors: HashMap::new(),
+        })
+    }
+
+    /// Query vector for `query`, embedded on first use and cached; `None`
+    /// when the mode runs without a dense arm.
+    fn query_vector(&mut self, query: &str) -> Result<Option<Vec<f32>>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+        if let Some(v) = self.query_vectors.get(query) {
+            return Ok(Some(v.clone()));
+        }
+        let v = embed_query(embedder.as_ref(), query)?;
+        self.query_vectors.insert(query.to_string(), v.clone());
+        Ok(Some(v))
+    }
+}
+
 fn run_tuning(
-    docs: &[Document],
+    grid: &mut TuneGrid,
     suite: &AcceptanceSuite,
-    model_id: &str,
-    chunk_sizes: &str,
-    overlaps: &str,
     default_top_k: usize,
     mode: Mode,
 ) -> Result<Vec<TuneCandidate>> {
-    let chunk_values = parse_usize_csv(chunk_sizes)?;
-    let overlap_values = parse_usize_csv(overlaps)?;
-
-    let embedder = if matches!(mode, Mode::Dense | Mode::Hybrid) {
-        eprintln!("Loading embedding model {} for tuning...", model_id);
-        let device = select_device(DevicePref::Auto)?;
-        Some(load_dense(model_id, &device, &DenseOverrides::default())?)
-    } else {
-        None
-    };
-    if mode == Mode::Sparse {
-        bail!("tune cannot build the sparse arm yet; use --mode hybrid, dense, or keyword");
+    let mut query_vectors = Vec::with_capacity(suite.cases.len());
+    for case in &suite.cases {
+        query_vectors.push(grid.query_vector(&case.query)?);
     }
 
-    let query_embeddings: Option<Vec<Vec<f32>>> = match &embedder {
-        Some(embedder) => {
-            let mut rows = Vec::with_capacity(suite.cases.len());
-            for case in &suite.cases {
-                rows.push(embed_query(embedder.as_ref(), &case.query)?);
-            }
-            Some(rows)
+    let mut candidates = Vec::with_capacity(grid.cells.len());
+    for cell in &grid.cells {
+        eprintln!(
+            "Evaluating chunk_size={}, overlap={}...",
+            cell.chunk_size, cell.overlap
+        );
+        let mut case_reports = Vec::new();
+        for (case, query_vec) in suite.cases.iter().zip(&query_vectors) {
+            let top_k = case.top_k.unwrap_or(default_top_k);
+            let ids =
+                retrieve_chunk_ids(&cell.index, &case.query, query_vec.as_deref(), top_k, mode)?;
+            let context = build_eval_context(&cell.index, &ids);
+            case_reports.push(evaluate_case(case, &context));
         }
-        None => None,
-    };
 
-    let mut candidates = Vec::new();
-
-    for &chunk_size in &chunk_values {
-        for &overlap in &overlap_values {
-            eprintln!(
-                "Evaluating chunk_size={}, overlap={}...",
-                chunk_size, overlap
-            );
-            let index = build_index_in_memory(docs, chunk_size, overlap, embedder.as_deref())?;
-
-            let mut case_reports = Vec::new();
-            for (case_idx, case) in suite.cases.iter().enumerate() {
-                let top_k = case.top_k.unwrap_or(default_top_k);
-                let query_vec = query_embeddings
-                    .as_ref()
-                    .map(|rows| rows[case_idx].as_slice());
-                let ids = retrieve_chunk_ids(&index, &case.query, query_vec, top_k, mode)?;
-                let context = build_eval_context(&index, &ids);
-                case_reports.push(evaluate_case(case, &context));
-            }
-
-            let summary = summarize(case_reports, suite);
-            candidates.push(TuneCandidate {
-                chunk_size,
-                overlap,
-                passed_cases: summary.passed_cases,
-                total_cases: summary.total_cases,
-                pass_rate: summary.pass_rate,
-                weighted_score: summary.weighted_score,
-                weighted_total: summary.weighted_total,
-            });
-        }
+        let summary = summarize(case_reports, suite);
+        candidates.push(TuneCandidate {
+            chunk_size: cell.chunk_size,
+            overlap: cell.overlap,
+            passed_cases: summary.passed_cases,
+            total_cases: summary.total_cases,
+            pass_rate: summary.pass_rate,
+            weighted_score: summary.weighted_score,
+            weighted_total: summary.weighted_total,
+        });
     }
 
     candidates.sort_by(|a, b| {
@@ -2026,6 +2064,74 @@ fn embed_texts_with(
     Ok(out)
 }
 
+/// Wordpieces the lane's document prefix adds in front of every chunk
+/// (special tokens excluded; the chunker counts those with the text).
+fn doc_prefix_tokens(lane: &dyn DenseEncoder) -> usize {
+    let prefix = &lane.spec().doc_prefix;
+    if prefix.is_empty() {
+        return 0;
+    }
+    lane.count_tokens(prefix)
+        .saturating_sub(lane.count_tokens(""))
+}
+
+/// Token budget for one chunk: `chunk_size` capped at the lane's sequence
+/// limit, minus the document prefix the encoder prepends, so a full chunk
+/// still fits once prefixed and nothing is truncated at embedding time.
+fn chunk_budget(lane: &dyn DenseEncoder, chunk_size: usize) -> Result<usize> {
+    let spec = lane.spec();
+    let prefix = doc_prefix_tokens(lane);
+    let budget = chunk_size.min(spec.max_seq_len).saturating_sub(prefix);
+    if budget == 0 {
+        bail!(
+            "chunk budget is 0: chunk size {} (capped at lane {:?} max_seq_len {}) leaves no room after the {}-token doc prefix {:?}",
+            chunk_size,
+            spec.id,
+            spec.max_seq_len,
+            prefix,
+            spec.doc_prefix
+        );
+    }
+    Ok(budget)
+}
+
+/// Names of the flags whose condition is set, for "ignored" warnings.
+fn flags_given(flags: &[(bool, &'static str)]) -> Vec<&'static str> {
+    flags
+        .iter()
+        .filter(|(given, _)| *given)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// Warn when a lane's manifest runtime cannot be honoured by the browser.
+fn warn_about_lane_runtime(spec: &DenseSpec) {
+    match &spec.runtime {
+        RuntimeSpec::WasmCandle { files } => {
+            let weights: Vec<&str> = files
+                .iter()
+                .map(String::as_str)
+                .filter(|f| *f != "config.json" && *f != "tokenizer.json")
+                .collect();
+            if weights != ["model.safetensors"] {
+                eprintln!(
+                    "  warning: lane '{}' weights are {:?}; the browser WASM runtime loads only a single model.safetensors, so the widget will skip this lane. Pass --dense-runtime webgpu-onnx:<repo>:<dtype> or pick a repo that ships model.safetensors.",
+                    spec.id, weights
+                );
+            }
+        }
+        RuntimeSpec::WebgpuOnnx { pooling, .. } => {
+            let own = spec.pooling.transformers_name();
+            if pooling != own {
+                eprintln!(
+                    "  warning: lane '{}' runtime pooling '{}' differs from the lane's own pooling '{}'; browser query vectors will not match the stored document vectors unless the ONNX graph already applies '{}' pooling",
+                    spec.id, pooling, own, own
+                );
+            }
+        }
+    }
+}
+
 fn report_lane_timing(lane: &dyn DenseEncoder, count: usize, secs: f64) {
     let spec = lane.spec();
     eprintln!(
@@ -2124,6 +2230,7 @@ fn resolve_index_models(
 /// and filled in by `load_dense` from the lane's own pooling once the model
 /// config has been read; only an explicit value overrides it.
 fn parse_runtime_spec(spec: &str) -> Result<Option<RuntimeSpec>> {
+    const USAGE: &str = "webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]";
     let spec = spec.trim();
     if spec.is_empty() || spec.eq_ignore_ascii_case("auto") {
         return Ok(None);
@@ -2165,46 +2272,6 @@ fn parse_usize_csv(csv: &str) -> Result<Vec<usize>> {
         if trimmed.is_empty() {
             continue;
         }
-/// Wordpieces the lane's document prefix adds in front of every chunk
-/// (special tokens excluded; the chunker counts those with the text).
-fn doc_prefix_tokens(lane: &dyn DenseEncoder) -> usize {
-    let prefix = &lane.spec().doc_prefix;
-    if prefix.is_empty() {
-        return 0;
-    }
-    lane.count_tokens(prefix)
-        .saturating_sub(lane.count_tokens(""))
-}
-
-/// Token budget for one chunk: `chunk_size` capped at the lane's sequence
-/// limit, minus the document prefix the encoder prepends, so a full chunk
-/// still fits once prefixed and nothing is truncated at embedding time.
-fn chunk_budget(lane: &dyn DenseEncoder, chunk_size: usize) -> Result<usize> {
-    let spec = lane.spec();
-    let prefix = doc_prefix_tokens(lane);
-    let budget = chunk_size.min(spec.max_seq_len).saturating_sub(prefix);
-    if budget == 0 {
-        bail!(
-            "chunk budget is 0: chunk size {} (capped at lane {:?} max_seq_len {}) leaves no room after the {}-token doc prefix {:?}",
-            chunk_size,
-            spec.id,
-            spec.max_seq_len,
-            prefix,
-            spec.doc_prefix
-        );
-    }
-    Ok(budget)
-}
-
-/// Names of the flags whose condition is set, for "ignored" warnings.
-fn flags_given(flags: &[(bool, &'static str)]) -> Vec<&'static str> {
-    flags
-        .iter()
-        .filter(|(given, _)| *given)
-        .map(|(_, name)| *name)
-        .collect()
-}
-
         let value = trimmed
             .parse::<usize>()
             .with_context(|| format!("parsing '{}' as usize", trimmed))?;
@@ -2225,10 +2292,7 @@ fn flags_given(flags: &[(bool, &'static str)]) -> Vec<&'static str> {
 
 fn interactive_collect_cases(
     suite: &mut AcceptanceSuite,
-    docs: &[Document],
-    model_id: &str,
-    chunk_sizes: &str,
-    overlaps: &str,
+    grid: &mut TuneGrid,
     top_k: usize,
     mode: Mode,
 ) -> Result<()> {
@@ -2278,7 +2342,7 @@ fn interactive_collect_cases(
             user_rating,
         });
 
-        let candidates = run_tuning(docs, suite, model_id, chunk_sizes, overlaps, top_k, mode)?;
+        let candidates = run_tuning(grid, suite, top_k, mode)?;
         if let Some(best) = candidates.first() {
             eprintln!(
                 "Best so far: chunk_size={}, overlap={} | pass={}/{} | weighted={:.2}/{:.2}",
@@ -2303,34 +2367,6 @@ fn rating_weight(rating: Option<u8>) -> f32 {
         Some(3) => 1.5,
         Some(4) => 1.25,
         Some(5) => 1.0,
-/// Warn when a lane's manifest runtime cannot be honoured by the browser.
-fn warn_about_lane_runtime(spec: &DenseSpec) {
-    match &spec.runtime {
-        RuntimeSpec::WasmCandle { files } => {
-            let weights: Vec<&str> = files
-                .iter()
-                .map(String::as_str)
-                .filter(|f| *f != "config.json" && *f != "tokenizer.json")
-                .collect();
-            if weights != ["model.safetensors"] {
-                eprintln!(
-                    "  warning: lane '{}' weights are {:?}; the browser WASM runtime loads only a single model.safetensors, so the widget will skip this lane. Pass --dense-runtime webgpu-onnx:<repo>:<dtype> or pick a repo that ships model.safetensors.",
-                    spec.id, weights
-                );
-            }
-        }
-        RuntimeSpec::WebgpuOnnx { pooling, .. } => {
-            let own = spec.pooling.transformers_name();
-            if pooling != own {
-                eprintln!(
-                    "  warning: lane '{}' runtime pooling '{}' differs from the lane's own pooling '{}'; browser query vectors will not match the stored document vectors unless the ONNX graph already applies '{}' pooling",
-                    spec.id, pooling, own, own
-                );
-            }
-        }
-    }
-}
-
         _ => 1.0,
     }
 }
@@ -2427,14 +2463,6 @@ mod tests {
         assert!(parse_runtime_spec("auto").unwrap().is_none());
     }
 
-    const USAGE: &str = "webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]";
-    #[test]
-    fn rating_weight_map() {
-        assert_eq!(rating_weight(Some(1)), 2.0);
-        assert_eq!(rating_weight(Some(5)), 1.0);
-        assert_eq!(rating_weight(None), 1.0);
-    }
-}
     #[test]
     fn runtime_spec_pooling_is_explicit_or_deferred() {
         // No pooling segment: left empty for load_dense to derive from the lane.
@@ -2454,6 +2482,20 @@ mod tests {
         assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:average").is_err());
         assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:mean:extra").is_err());
         assert!(parse_runtime_spec("webgpu-onnx:org/repo").is_err());
+    }
+
+    #[test]
+    fn eval_urls_normalize_to_host_less_lowercase_paths() {
+        assert_eq!(normalize_eval_url("/posts/Foo/"), "/posts/foo");
+        assert_eq!(normalize_eval_url("posts/foo"), "/posts/foo");
+        assert_eq!(
+            normalize_eval_url("https://Example.com/posts/foo"),
+            "/posts/foo"
+        );
+        assert_eq!(normalize_eval_url("http://example.com"), "/");
+        assert_eq!(normalize_eval_url(" /about "), "/about");
+        assert_eq!(normalize_eval_url("/"), "/");
+        assert_eq!(normalize_eval_url(""), "/");
     }
 
     /// Minimal encoder whose tokenizer counts whitespace words plus two
@@ -2495,16 +2537,9 @@ mod tests {
     }
 
     #[test]
-    fn eval_urls_normalize_to_host_less_lowercase_paths() {
-        assert_eq!(normalize_eval_url("/posts/Foo/"), "/posts/foo");
-        assert_eq!(normalize_eval_url("posts/foo"), "/posts/foo");
-        assert_eq!(
-            normalize_eval_url("https://Example.com/posts/foo"),
-            "/posts/foo"
-        );
-        assert_eq!(normalize_eval_url("http://example.com"), "/");
-        assert_eq!(normalize_eval_url(" /about "), "/about");
-        assert_eq!(normalize_eval_url("/"), "/");
-        assert_eq!(normalize_eval_url(""), "/");
+    fn rating_weight_map() {
+        assert_eq!(rating_weight(Some(1)), 2.0);
+        assert_eq!(rating_weight(Some(5)), 1.0);
+        assert_eq!(rating_weight(None), 1.0);
     }
-
+}
