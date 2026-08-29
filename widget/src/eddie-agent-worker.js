@@ -181,6 +181,7 @@ async function ask(msg) {
       stream_options: { include_usage: true },
       temperature: 0,
       frequency_penalty: 0.5,
+      presence_penalty: 0,
       max_tokens: 220,
       extra_body: { enable_thinking: false },
     });
