@@ -12,7 +12,9 @@
 
 The three JS entry points are built by concatenating `widget/src/lib/*.js`
 (pure helpers, exposed as `EddieLib`) with their main file. There is no
-bundler; edit `widget/src/**` and rerun `bash widget/build.sh`.
+bundler; edit `widget/src/**` and rerun `bash widget/build.sh` (or
+`bash widget/build.sh --js-only` to skip the WASM build and only
+reassemble the bundles from an earlier `widget/pkg/`).
 
 ## Tests
 
@@ -49,6 +51,18 @@ appended to `eddie-worker.js`, `eddie-wasm.js`, `eddie.wasm` and
 `eddie-agent-worker.js` so a redeploy never pairs cached glue with a new
 binary. When `data-index-url` is absent the index is `index.ed` next to the
 widget script.
+
+## Host element
+
+The widget mounts as `<div id="eddie-host">` (closed Shadow DOM) and mirrors
+its state on that element for page CSS and tests:
+
+| Attribute | Values |
+|---|---|
+| `data-theme` | `auto`, `light`, `dark` (from `data-theme` on the script tag) |
+| `data-state` | `idle`, `loading`, `index_ready`, `awaiting_consent`, `ready`, `error`, `dead` |
+| `data-lane` / `data-runtime` | dense lane id and `wasm` or `webgpu` once ready (empty when no lane loaded) |
+| `data-arms` | comma-separated arms in use once ready, e.g. `dense,sparse,bm25` |
 
 ## What happens at runtime
 

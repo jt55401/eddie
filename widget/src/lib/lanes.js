@@ -48,7 +48,13 @@
     return lane.model;
   }
 
+  /**
+   * HuggingFace revision for the runtime's downloads. `lane.revision` pins
+   * `lane.model` (the repo the indexer used); a webgpu-onnx lane downloads
+   * from a different repo (`runtime.repo`) that the manifest does not pin.
+   */
   function laneRevision(lane) {
+    if (isWebGpuLane(lane)) return "main";
     return lane.revision || "main";
   }
 

@@ -44,6 +44,8 @@ test("lane files, repo, revision", () => {
   assert.equal(L.laneRepo(qwen), "onnx-community/Qwen3-Embedding-0.6B-ONNX");
   assert.equal(L.laneRevision(minilm), "abc");
   assert.equal(L.laneRevision(qwen), "main");
+  // The manifest pins lane.model, not the ONNX repo a webgpu lane downloads from.
+  assert.equal(L.laneRevision(Object.assign({}, qwen, { revision: "97b0c614" })), "main");
 });
 
 test("dtype picks f16 only with shader-f16", () => {

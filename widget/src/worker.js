@@ -298,7 +298,7 @@ async function loadWebGpuLane(lane) {
   const extractor = await tf.pipeline("feature-extraction", runtime.repo, {
     device: "webgpu",
     dtype,
-    revision: lane.revision || "main",
+    revision: lib.laneRevision(lane),
     progress_callback: (p) => {
       if (!p || p.status !== "progress") return;
       const now = Date.now();
@@ -379,7 +379,7 @@ async function laneCached(lane) {
 }
 
 function webGpuMarker(lane, dtype) {
-  return `webgpu:${lane.runtime.repo}@${lane.revision || "main"}#${dtype}`;
+  return `webgpu:${lane.runtime.repo}@${lib.laneRevision(lane)}#${dtype}`;
 }
 
 // -- queries ------------------------------------------------------------
