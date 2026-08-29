@@ -68,8 +68,9 @@ query ─┬─ BM25: in-index tokenizer, no model ─────────�
   adapter). If neither is runnable, dense is skipped and BM25 + sparse still
   run.
 
-Fusion is reciprocal rank fusion (`k=60`) with per-arm weights (dense 1.0,
-sparse 1.0, BM25 0.8; BM25 goes to 1.0 when an index has no sparse arm),
+Fusion is reciprocal rank fusion (`k=60`) with per-arm weights (dense 1.2,
+sparse 0.8, BM25 0.6, picked by graded sweeps on two labelled sites; BM25
+takes the sparse weight when an index has no sparse arm),
 followed by page-level grouping (best chunk per URL, with a bounded
 agreement bonus when a second chunk on the same page also scored well) and
 a recency tie-breaker for dated pages.
@@ -83,6 +84,7 @@ eddie index --content-dir <path> --cms <hugo|astro|docusaurus|eleventy|jekyll|mk
             [--chunk-size 256] [--overlap 32] [--chunk-strategy heading|semantic]
             [--qa ... --qa-subject "Jason Grey"] [--claims ...]
             [--preset fast|balanced|quality|gpu] [--no-title-context]
+            [--no-summary-lane] [--include-noindex]
 
 eddie search --index <index.ed> --query <text>
              [--mode hybrid|dense|sparse|keyword] [--lane <id>] [--top-k 8] [--json]
