@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::bm25::tokenize;
-use crate::index::{SearchIndex, strip_leading_words};
+use crate::index::{SearchIndex, query_vector_problem, strip_leading_words};
 use crate::manifest::SparseTerm;
 
 /// RRF constant: `score += weight / (RRF_K + rank)` with 1-based ranks.
@@ -146,7 +146,9 @@ pub fn fetch_k(top_k: usize) -> usize {
 ///
 /// Errors only on misuse (unknown lane index, query vector of the wrong
 /// dimension). A missing input for an arm skips that arm and adds a note to
-/// `degraded`.
+/// `degraded`; so does a query vector that cannot rank anything (NaN or all
+/// zeros) or a sparse query with no terms, since running those arms would
+/// hand RRF credit to arbitrary chunks.
 pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
     let fetch = fetch_k(q.top_k);
     let mut arms = Arms::default();
@@ -159,9 +161,28 @@ pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
                     .dense
                     .get(*lane_idx)
                     .with_context(|| format!("dense lane {} is out of range", lane_idx))?;
-                let hits = lane.top_k(vec, fetch)?;
-                arms.dense = true;
-                hits.into_iter().map(|h| h.0).collect()
+                if vec.len() != lane.dim {
+                    anyhow::bail!(
+                        "query vector has {} dims but lane {:?} has {}",
+                        vec.len(),
+                        lane.spec.id,
+                        lane.dim
+                    );
+                }
+                match query_vector_problem(vec) {
+                    Some(problem) => {
+                        degraded.push(format!(
+                            "dense: query vector for lane {:?} {}",
+                            lane.spec.id, problem
+                        ));
+                        Vec::new()
+                    }
+                    None => {
+                        let hits = lane.top_k(vec, fetch)?;
+                        arms.dense = true;
+                        hits.into_iter().map(|h| h.0).collect()
+                    }
+                }
             }
             None => {
                 degraded.push(if index.dense.is_empty() {
@@ -178,6 +199,12 @@ pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
 
     let sparse_hits: Vec<usize> = if q.mode.wants_sparse() {
         match (&index.sparse, &q.sparse) {
+            (Some(_), Some(terms)) if terms.is_empty() => {
+                // Nothing in the query survived IDF lookup: the arm did not
+                // run, so BM25 keeps the full lexical weight below.
+                degraded.push("sparse: query has no terms in the index vocabulary".to_string());
+                Vec::new()
+            }
             (Some(sparse), Some(terms)) => {
                 arms.sparse = true;
                 sparse
@@ -787,6 +814,55 @@ mod tests {
         let r = retrieve(&no_sparse, &q).unwrap();
         assert!(r.degraded.is_empty());
         assert!(r.arms.dense && r.arms.bm25 && !r.arms.sparse);
+    }
+
+    #[test]
+    fn unusable_dense_query_degrades_instead_of_ranking_index_order() {
+        let (index, corpus) = index_2k();
+        for bad in [vec![f32::NAN; 384], vec![0.0; 384]] {
+            let mut q = query_for(&corpus, "topic3 facts", 3, Mode::Hybrid, 5);
+            q.dense = Some((0, bad));
+            let r = retrieve(&index, &q).unwrap();
+            assert!(!r.arms.dense && r.arms.sparse && r.arms.bm25);
+            assert_eq!(r.degraded.len(), 1);
+            assert!(
+                r.degraded[0].starts_with("dense: query vector"),
+                "{:?}",
+                r.degraded
+            );
+            assert!(r.ranked.iter().all(|c| c.dense_rank.is_none()));
+            assert!(!r.ranked.is_empty());
+        }
+        // Dense-only mode with such a vector: no results, one note, no error.
+        let mut q = query_for(&corpus, "x", 3, Mode::Dense, 5);
+        q.dense = Some((0, vec![0.0; 384]));
+        let r = retrieve(&index, &q).unwrap();
+        assert!(r.ranked.is_empty());
+        assert_eq!(r.degraded.len(), 1);
+    }
+
+    #[test]
+    fn empty_sparse_terms_count_as_not_run() {
+        let (index, corpus) = index_2k();
+        let mut q = query_for(&corpus, "topic3 facts", 3, Mode::Hybrid, 5);
+        q.sparse = Some(Vec::new());
+        let r = retrieve(&index, &q).unwrap();
+        assert!(r.arms.dense && !r.arms.sparse && r.arms.bm25);
+        assert_eq!(
+            r.degraded,
+            vec!["sparse: query has no terms in the index vocabulary".to_string()]
+        );
+        // BM25 stands in at weight 1.0, exactly as when the tokenizer is missing.
+        let bm25_only = r
+            .ranked
+            .iter()
+            .find(|c| c.bm25_rank.is_some() && c.dense_rank.is_none())
+            .expect("a bm25-only chunk");
+        let expected = 1.0 / (RRF_K + bm25_only.bm25_rank.unwrap() as f64);
+        assert!((bm25_only.score - expected).abs() < 1e-12);
+        q.sparse = None;
+        let r2 = retrieve(&index, &q).unwrap();
+        assert_eq!(r.ranked, r2.ranked);
     }
 
     #[test]

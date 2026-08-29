@@ -20,6 +20,18 @@ pub enum Pooling {
     Last,
 }
 
+impl Pooling {
+    /// The transformers.js pooling name a `webgpu-onnx` runtime must use to
+    /// reproduce this pooling on query vectors.
+    pub fn transformers_name(self) -> &'static str {
+        match self {
+            Pooling::Mean => "mean",
+            Pooling::Cls => "cls",
+            Pooling::Last => "last_token",
+        }
+    }
+}
+
 /// Model architecture family the native loader must use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -272,5 +284,12 @@ mod tests {
         assert_eq!(spec.prefixed(TextKind::Query, "hi"), "Q: hi");
         assert_eq!(spec.prefixed(TextKind::Document, "hi"), "hi");
         assert_eq!(spec.revision_or_main(), "main");
+    }
+
+    #[test]
+    fn pooling_maps_to_transformers_names() {
+        assert_eq!(Pooling::Mean.transformers_name(), "mean");
+        assert_eq!(Pooling::Cls.transformers_name(), "cls");
+        assert_eq!(Pooling::Last.transformers_name(), "last_token");
     }
 }

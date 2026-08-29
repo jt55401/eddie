@@ -666,10 +666,27 @@ mod native {
             let cap = config.max_position_embeddings.saturating_sub(2).max(1);
             finalize_spec(&mut spec, config.hidden_size, cap);
             prepare_tokenizer(&mut tokenizer, spec.max_seq_len)?;
-            let model = match XLMRobertaModel::new(config, vb.clone()) {
-                Ok(m) => m,
-                Err(_) => XLMRobertaModel::new(config, vb.pp("roberta"))
-                    .context("building XLMRobertaModel")?,
+            // Checkpoints ship either `embeddings.*` or `roberta.embeddings.*`.
+            // Pick the prefix from the tensor names so a genuine failure
+            // (truncated download, dtype problem) is reported as such rather
+            // than as a missing `roberta.` tensor from a blind retry.
+            const PROBE: &str = "embeddings.word_embeddings.weight";
+            let model = if vb.contains_tensor(PROBE) {
+                XLMRobertaModel::new(config, vb).context("building XLMRobertaModel")?
+            } else if vb.contains_tensor(&format!("roberta.{PROBE}")) {
+                XLMRobertaModel::new(config, vb.pp("roberta"))
+                    .context("building XLMRobertaModel (roberta. prefix)")?
+            } else {
+                match XLMRobertaModel::new(config, vb.clone()) {
+                    Ok(m) => m,
+                    Err(plain) => match XLMRobertaModel::new(config, vb.pp("roberta")) {
+                        Ok(m) => m,
+                        Err(prefixed) => bail!(
+                            "{}: building XLMRobertaModel failed without a prefix ({plain:#}) and with the roberta. prefix ({prefixed:#})",
+                            spec.model
+                        ),
+                    },
+                }
             };
             Ok(Self {
                 model,
@@ -733,9 +750,16 @@ mod native {
 
     /// Qwen3 decoder used as an embedder (last-token pooling).
     ///
-    /// candle's Qwen3 has no padding mask, so a batch only ever contains
-    /// texts of identical token length; the KV cache is discarded per batch
-    /// by cloning the (Arc-backed, cheap) pristine model.
+    /// candle's Qwen3 forward takes no padding mask, so batches are cut
+    /// wherever the token length changes (`run_batched` with
+    /// `same_length_only`): a forward pass only ever sees rows of one
+    /// length. On a real corpus that leaves most batches at one to three
+    /// rows, whatever `batch_size` says. candle's attention is causal on
+    /// every path, so right-padding plus a last-token gather would also be
+    /// exact; the equal-length rule is kept deliberately because it needs
+    /// no assumption about the attention implementation. The KV cache is
+    /// discarded per batch by cloning the (Arc-backed, cheap) pristine
+    /// model.
     pub struct Qwen3Encoder {
         model: Qwen3Model,
         tokenizer: Tokenizer,
@@ -866,6 +890,28 @@ mod native {
         )
     }
 
+    /// Files a `wasm-candle` runtime entry lists for these weights:
+    /// `config.json`, `tokenizer.json`, then the weight file names as
+    /// downloaded (`model.safetensors`, sharded `model-0000N-of-0000M.safetensors`,
+    /// or `pytorch_model.bin`).
+    fn wasm_candle_files(weights: &Weights) -> Vec<String> {
+        let mut files: Vec<String> = models::WASM_CANDLE_FILES
+            .iter()
+            .filter(|f| !f.ends_with(".safetensors"))
+            .map(|f| f.to_string())
+            .collect();
+        let paths: Vec<&PathBuf> = match weights {
+            Weights::Safetensors(paths) => paths.iter().collect(),
+            Weights::Pth(path) => vec![path],
+        };
+        files.extend(
+            paths
+                .iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())),
+        );
+        files
+    }
+
     fn var_builder<'a>(weights: &Weights, dtype: DType, device: &Device) -> Result<VarBuilder<'a>> {
         match weights {
             Weights::Safetensors(paths) => {
@@ -956,19 +1002,43 @@ mod native {
             .or(defaults.map(|d| d.pooling))
             .unwrap_or_else(|| models::family_default_pooling(family));
 
-        let runtime = match (&overrides.runtime, defaults, family) {
+        let mut runtime = match (&overrides.runtime, defaults, family) {
             (Some(r), _, _) => r.clone(),
             (None, Some(d), _) => d.runtime_spec(),
             (None, None, Family::Bert) => models::runtime_spec(models::RuntimeKind::WasmCandle),
             (None, None, other) => bail!(
-                "{model}: {other:?} models need a browser runtime; pass --dense-runtime webgpu-onnx:<repo>:<dtype>[:<dtype_f16>] (or use a registry model)"
+                "{model}: {other:?} models need a browser runtime; pass --dense-runtime webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]] (or use a registry model)"
             ),
         };
+        match &mut runtime {
+            RuntimeSpec::WasmCandle { .. } if family != Family::Bert => bail!(
+                "{model}: the wasm-candle runtime only runs BERT-family models, not {family:?}; pass --dense-runtime webgpu-onnx:<repo>:<dtype>[:<dtype_f16>[:<pooling>]]"
+            ),
+            RuntimeSpec::WasmCandle { .. } => {}
+            RuntimeSpec::WebgpuOnnx {
+                pooling: runtime_pooling,
+                ..
+            } => {
+                // An empty pooling means "the lane's own": the query side
+                // must pool the way the stored document vectors were pooled.
+                if runtime_pooling.is_empty() {
+                    *runtime_pooling = pooling.transformers_name().to_string();
+                }
+            }
+        }
 
         let revision = overrides
             .revision
             .clone()
             .or_else(|| revision_from_path(&config_path));
+
+        let batch_size = overrides.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+        let weights = fetch_weights(&repo)?;
+        if let RuntimeSpec::WasmCandle { files } = &mut runtime {
+            // Record what the repo actually provides so the manifest never
+            // promises a model.safetensors that is not there.
+            *files = wasm_candle_files(&weights);
+        }
 
         let spec = DenseSpec {
             id: overrides
@@ -993,8 +1063,6 @@ mod native {
             quant: Quant::Int8,
             runtime,
         };
-        let batch_size = overrides.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
-        let weights = fetch_weights(&repo)?;
 
         match family {
             Family::Bert => {
@@ -1067,6 +1135,30 @@ mod native {
             DType::BF16
         } else {
             DType::F32
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn wasm_candle_files_reflect_the_weights_loaded() {
+            let single = Weights::Safetensors(vec![PathBuf::from("/c/snap/abc/model.safetensors")]);
+            assert_eq!(
+                wasm_candle_files(&single),
+                vec!["config.json", "tokenizer.json", "model.safetensors"]
+            );
+            let pth = Weights::Pth(PathBuf::from("/c/snap/abc/pytorch_model.bin"));
+            assert_eq!(
+                wasm_candle_files(&pth),
+                vec!["config.json", "tokenizer.json", "pytorch_model.bin"]
+            );
+            let sharded = Weights::Safetensors(vec![
+                PathBuf::from("/c/model-00001-of-00002.safetensors"),
+                PathBuf::from("/c/model-00002-of-00002.safetensors"),
+            ]);
+            assert_eq!(wasm_candle_files(&sharded).len(), 4);
         }
     }
 }

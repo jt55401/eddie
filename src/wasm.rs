@@ -3,17 +3,17 @@
 //! WASM bindings: the JS surface of the retriever.
 //!
 //! Every entry point returns `Result<_, JsValue>`; a panic hook forwards any
-//! panic message to `console.error`. Results are JSON strings so the surface
-//! stays independent of serde-wasm-bindgen object mapping.
+//! panic message to `console.error`. Results are JSON strings, so the surface
+//! needs no object-mapping layer.
 //!
 //! ```text
 //! manifest(index_bytes) -> JSON Manifest                       // header only
 //! init_index(index_bytes)                                      // parse + validate
 //! init_dense_wasm(lane_id, config, tokenizer, weights)         // bert lanes only
-//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm
+//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm; sha256 must match manifest.sparse.vocab_hash
 //! search(query, top_k, mode, dense_lane_id|null, dense_query_vec|null)
 //!     -> JSON {results:[PageResult], arms:{dense,sparse,bm25}, degraded:[string], mode, dense_lane}
-//! page(url)   -> JSON {title, url, date, chunks:[{id, section, text}]}
+//! page(url)   -> JSON {title, url, date, chunks:[{id, section, granularity, text}]}   // finest granularity only, document order
 //! chunk(id)   -> JSON {id, title, url, section, date, text}
 //! qa_lookup(query, dense_lane_id|null, dense_query_vec|null, k)
 //!     -> JSON [{id, question, answer, source_title, source_url, source_section, score}]
@@ -31,10 +31,11 @@ use tokenizers::Tokenizer;
 use wasm_bindgen::prelude::*;
 
 use crate::embed::{DenseEncoder, bert_from_bytes};
-use crate::index::SearchIndex;
+use crate::index::{SearchIndex, query_vector_problem};
 use crate::manifest::{DenseSpec, Family, RuntimeSpec, TextKind};
 use crate::search as rank;
 use crate::search::{Mode, PageResult, Query, Weights};
+use crate::sparse::{DEFAULT_MAX_SEQ_LEN, sparse_tokenizer_from_bytes, tokenizer_json_sha256};
 
 struct DenseRuntime {
     lane: usize,
@@ -189,17 +190,37 @@ pub fn init_dense_wasm(
     })
 }
 
-/// Load the WordPiece tokenizer that enables the learned-sparse arm.
+/// Load the WordPiece tokenizer that enables the learned-sparse arm. The
+/// bytes must be the `tokenizer.json` the index was built with: their
+/// SHA-256 is checked against `manifest.sparse.vocab_hash`, because a
+/// different vocabulary yields different token ids and a sparse arm that
+/// scores noise while still looking healthy.
 #[wasm_bindgen]
 pub fn init_sparse_tokenizer(tokenizer_bytes: &[u8]) -> Result<(), JsValue> {
     install_panic_hook();
     with_engine_mut(|engine| {
-        if engine.index.sparse.is_none() {
-            return Err(JsValue::from_str(
-                "init_sparse_tokenizer: index has no sparse arm",
+        let spec = match (&engine.index.sparse, &engine.index.manifest.sparse) {
+            (Some(_), Some(spec)) => spec,
+            _ => {
+                return Err(JsValue::from_str(
+                    "init_sparse_tokenizer: index has no sparse arm",
+                ));
+            }
+        };
+        let actual = tokenizer_json_sha256(tokenizer_bytes);
+        if !actual.eq_ignore_ascii_case(&spec.vocab_hash) {
+            return Err(js_err(
+                "init_sparse_tokenizer",
+                format!(
+                    "tokenizer.json sha256 {} does not match the manifest vocab_hash {} (expected {} at revision {})",
+                    actual,
+                    spec.vocab_hash,
+                    spec.tokenizer,
+                    spec.revision.as_deref().unwrap_or("main")
+                ),
             ));
         }
-        let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
+        let tokenizer = sparse_tokenizer_from_bytes(tokenizer_bytes, DEFAULT_MAX_SEQ_LEN)
             .map_err(|e| js_err("sparse tokenizer load failed", e))?;
         engine.sparse_tokenizer = Some(tokenizer);
         Ok(())
@@ -218,6 +239,11 @@ struct SearchResponse {
 /// Resolve the dense query vector: a caller-supplied vector (WebGPU lane) or
 /// one embedding with the WASM lane. Returns the lane index, the lane id, the
 /// vector, or a reason the dense arm is skipped.
+///
+/// Only caller misuse is an error: a vector without a lane id, an unknown
+/// lane, or a vector of the wrong dimension. A vector that cannot rank
+/// anything (NaN, all zeros) or an embedder failure degrades the dense arm
+/// so BM25 and sparse still answer.
 fn resolve_dense(
     engine: &Engine,
     lane_id: Option<&str>,
@@ -236,12 +262,38 @@ fn resolve_dense(
             .index
             .dense_lane(id)
             .ok_or_else(|| js_err("search", format!("unknown dense lane {:?}", id)))?;
+        let dim = engine.index.dense[lane].dim;
+        if v.len() != dim {
+            return Err(js_err(
+                "search",
+                format!(
+                    "dense_query_vec has {} values but lane {:?} stores {}-d vectors",
+                    v.len(),
+                    id,
+                    dim
+                ),
+            ));
+        }
+        if let Some(problem) = query_vector_problem(&v) {
+            return Ok((
+                None,
+                Some(format!("dense: query vector for lane {:?} {}", id, problem)),
+            ));
+        }
         return Ok((Some((lane, id.to_string(), v)), None));
     }
     match &engine.dense {
         Some(rt) if lane_id.is_none() || lane_id == Some(rt.spec.id.as_str()) => {
-            let v = embed_query(rt, query).map_err(|e| js_err("query embedding failed", e))?;
-            Ok((Some((rt.lane, rt.spec.id.clone(), v)), None))
+            match embed_query(rt, query) {
+                Ok(v) => Ok((Some((rt.lane, rt.spec.id.clone(), v)), None)),
+                Err(e) => Ok((
+                    None,
+                    Some(format!(
+                        "dense: embedding failed for lane {:?}: {:#}",
+                        rt.spec.id, e
+                    )),
+                )),
+            }
         }
         Some(rt) => Ok((
             None,
@@ -318,7 +370,16 @@ pub fn search(
             rank::retrieve(&engine.index, &q).map_err(|e| js_err("search failed", e))?;
         let terms = rank::query_terms(query);
         let results = rank::group_pages(&engine.index, &retrieval.ranked, &terms, top_k);
-        degraded.extend(retrieval.degraded);
+        // When this module already explained why the dense arm is missing,
+        // retrieve()'s generic "no query vector" note describes the same
+        // cause; keep one entry per cause.
+        let dense_explained = !degraded.is_empty();
+        degraded.extend(
+            retrieval
+                .degraded
+                .into_iter()
+                .filter(|note| !(dense_explained && note.starts_with("dense:"))),
+        );
         to_json(&SearchResponse {
             results,
             arms: retrieval.arms,
@@ -333,6 +394,7 @@ pub fn search(
 struct PageChunk<'a> {
     id: usize,
     section: Option<&'a str>,
+    granularity: Option<&'a str>,
     text: &'a str,
 }
 
@@ -344,22 +406,28 @@ struct PageView<'a> {
     chunks: Vec<PageChunk<'a>>,
 }
 
-/// All chunks of a page (by URL) in document order.
+/// The text of a page (by URL) in document order: its chunks at the finest
+/// granularity present (`fine` when the index has it), so coarse and summary
+/// chunks never duplicate the same paragraphs.
 #[wasm_bindgen]
 pub fn page(url: &str) -> Result<String, JsValue> {
     install_panic_hook();
     with_engine(|engine| {
-        let ids = engine.index.page_chunks(url);
+        let ids = engine.index.page_chunks_finest(url);
         let first = ids
             .first()
             .map(|&i| &engine.index.metadata[i])
             .ok_or_else(|| js_err("page", format!("no page with url {:?}", url)))?;
         let chunks = ids
             .iter()
-            .map(|&i| PageChunk {
-                id: i,
-                section: engine.index.metadata[i].section.as_deref(),
-                text: engine.index.texts.get(i).map(String::as_str).unwrap_or(""),
+            .map(|&i| {
+                let meta = &engine.index.metadata[i];
+                PageChunk {
+                    id: i,
+                    section: meta.section.as_deref(),
+                    granularity: meta.granularity.as_deref(),
+                    text: engine.index.texts.get(i).map(String::as_str).unwrap_or(""),
+                }
             })
             .collect();
         to_json(&PageView {
