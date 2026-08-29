@@ -32,7 +32,7 @@
 //! deterministic: sections are written in a fixed order and every dictionary
 //! is sorted.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Read, Write};
 
 use anyhow::{Context, Result, bail};
@@ -160,7 +160,10 @@ impl DenseLane {
     }
 
     /// Dot product of `query` with every row (cosine when both sides are
-    /// L2-normalised). Errors when the query dimension does not match.
+    /// L2-normalised). Errors when the query dimension does not match or
+    /// the query is unusable (non-finite or all zeros, see
+    /// [`query_vector_problem`]): such a vector would rank every row equal
+    /// and turn the dense arm into index order.
     pub fn scores(&self, query: &[f32]) -> Result<Vec<f32>> {
         if query.len() != self.dim {
             bail!(
@@ -169,6 +172,9 @@ impl DenseLane {
                 self.spec.id,
                 self.dim
             );
+        }
+        if let Some(problem) = query_vector_problem(query) {
+            bail!("query vector for lane {:?} {}", self.spec.id, problem);
         }
         let mut out = Vec::with_capacity(self.rows);
         match &self.data {
@@ -307,6 +313,19 @@ fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// Why a query vector cannot score a lane, if it cannot: it contains a NaN
+/// or infinity, or every component is zero (nothing to rank by). `None`
+/// means the vector is usable. Length is checked separately by the lane.
+pub fn query_vector_problem(query: &[f32]) -> Option<&'static str> {
+    if query.iter().any(|v| !v.is_finite()) {
+        Some("contains non-finite values")
+    } else if query.iter().all(|v| *v == 0.0) {
+        Some("is all zeros")
+    } else {
+        None
+    }
+}
+
 /// Select the `k` highest scores; order is score descending, then index
 /// ascending. Uses a partial selection so only the winners are sorted.
 pub fn select_top_k(scores: Vec<f32>, k: usize) -> Vec<(usize, f32)> {
@@ -407,12 +426,14 @@ impl SparseIndex {
 
     /// Score = Σ query_weight × doc_weight over shared terms; the `k` best
     /// documents, ties by ascending doc id. Duplicate query terms are collapsed
-    /// to their maximum weight.
+    /// to their maximum weight. Terms are visited in token-id order (postings
+    /// are sorted by doc id), so every document's score is summed in the same
+    /// order on every run and near-tie ranks are reproducible.
     pub fn top_k(&self, query: &[SparseTerm], k: usize) -> Vec<(usize, f32)> {
         if k == 0 || self.num_docs == 0 || query.is_empty() {
             return Vec::new();
         }
-        let mut qmax: HashMap<u32, f32> = HashMap::new();
+        let mut qmax: BTreeMap<u32, f32> = BTreeMap::new();
         for t in query {
             if t.weight > 0.0 && t.weight.is_finite() {
                 let e = qmax.entry(t.token_id).or_insert(0.0);
@@ -895,7 +916,10 @@ impl SearchIndex {
         })
     }
 
-    /// Chunk ids for a page URL, ordered by `chunk_index` (then id).
+    /// Chunk ids for a page URL in document order: finest granularity first
+    /// (see [`granularity_rank`]), then `chunk_index`, then id. Each
+    /// granularity pass restarts `chunk_index` at 0, so sorting by
+    /// `chunk_index` alone would interleave fine, coarse and summary text.
     pub fn page_chunks(&self, url: &str) -> Vec<usize> {
         let mut ids: Vec<usize> = self
             .metadata
@@ -904,8 +928,25 @@ impl SearchIndex {
             .filter(|(_, m)| m.url == url)
             .map(|(i, _)| i)
             .collect();
-        ids.sort_by_key(|&i| (self.metadata[i].chunk_index, i));
+        ids.sort_by_key(|&i| {
+            let m = &self.metadata[i];
+            (granularity_rank(m.granularity.as_deref()), m.chunk_index, i)
+        });
         ids
+    }
+
+    /// The page's chunks at its finest granularity only (`fine` when
+    /// present, else whatever the page has), in `chunk_index` order: the
+    /// page text exactly once, without coarse or summary duplicates.
+    pub fn page_chunks_finest(&self, url: &str) -> Vec<usize> {
+        let ids = self.page_chunks(url);
+        let Some(&first) = ids.first() else {
+            return ids;
+        };
+        let finest = granularity_rank(self.metadata[first].granularity.as_deref());
+        ids.into_iter()
+            .take_while(|&i| granularity_rank(self.metadata[i].granularity.as_deref()) == finest)
+            .collect()
     }
 
     /// Position of a chunk-scope lane by id.
@@ -1056,15 +1097,11 @@ impl IndexBuilder {
         }
         for lane in &self.qa_dense {
             check_rows(SCOPE_QA, lane, self.qa.len())?;
-            if !self.dense.iter().any(|l| l.spec.id == lane.spec.id) {
-                bail!("qa lane {:?} has no matching chunks lane", lane.spec.id);
-            }
+            check_matches_chunk_lane(SCOPE_QA, lane, &self.dense)?;
         }
         for lane in &self.claims_dense {
             check_rows(SCOPE_CLAIMS, lane, self.claims.len())?;
-            if !self.dense.iter().any(|l| l.spec.id == lane.spec.id) {
-                bail!("claims lane {:?} has no matching chunks lane", lane.spec.id);
-            }
+            check_matches_chunk_lane(SCOPE_CLAIMS, lane, &self.dense)?;
         }
 
         let pages = self
@@ -1122,6 +1159,18 @@ impl IndexBuilder {
     }
 }
 
+/// Sort key for chunk granularities, finest first: `fine`, then unlabelled,
+/// then `coarse`, then `summary`, then anything else.
+pub fn granularity_rank(granularity: Option<&str>) -> u8 {
+    match granularity {
+        Some("fine") => 0,
+        None => 1,
+        Some("coarse") => 2,
+        Some("summary") => 3,
+        Some(_) => 4,
+    }
+}
+
 fn check_rows(scope: &str, lane: &DenseLane, expected: usize) -> Result<()> {
     if lane.rows != expected {
         bail!(
@@ -1130,6 +1179,38 @@ fn check_rows(scope: &str, lane: &DenseLane, expected: usize) -> Result<()> {
             lane.spec.id,
             lane.rows,
             expected
+        );
+    }
+    Ok(())
+}
+
+/// A qa/claims lane is described by the manifest entry of the chunks lane
+/// with the same id, so its dim and quant must match or the reader would
+/// reject the file the builder just wrote.
+fn check_matches_chunk_lane(scope: &str, lane: &DenseLane, chunks: &[DenseLane]) -> Result<()> {
+    let Some(chunk_lane) = chunks.iter().find(|l| l.spec.id == lane.spec.id) else {
+        bail!(
+            "{} lane {:?} has no matching chunks lane",
+            scope,
+            lane.spec.id
+        );
+    };
+    if lane.dim != chunk_lane.dim {
+        bail!(
+            "dense/{}/{} has dim {} but the chunks lane has dim {}",
+            scope,
+            lane.spec.id,
+            lane.dim,
+            chunk_lane.dim
+        );
+    }
+    if lane.quant != chunk_lane.quant {
+        bail!(
+            "dense/{}/{} is {:?} but the chunks lane is {:?}",
+            scope,
+            lane.spec.id,
+            lane.quant,
+            chunk_lane.quant
         );
     }
     Ok(())
@@ -2102,6 +2183,139 @@ mod tests {
         assert_eq!(strip_leading_words("a b", 2), "");
         assert_eq!(strip_leading_words("a b", 5), "");
         assert_eq!(strip_leading_words("héllo wörld", 1), "wörld");
+    }
+
+    #[test]
+    fn unusable_query_vectors_are_rejected() {
+        let lane = DenseLane::from_f32(
+            wasm_spec("m", 3, Quant::F32),
+            3,
+            2,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Quant::F32,
+        )
+        .unwrap();
+        assert_eq!(
+            query_vector_problem(&[f32::NAN, 0.0, 0.0]),
+            Some("contains non-finite values")
+        );
+        assert_eq!(
+            query_vector_problem(&[f32::INFINITY, 1.0]),
+            Some("contains non-finite values")
+        );
+        assert_eq!(
+            query_vector_problem(&[0.0, 0.0, -0.0]),
+            Some("is all zeros")
+        );
+        assert_eq!(query_vector_problem(&[0.0, 0.5, 0.0]), None);
+        let err = lane
+            .top_k(&[f32::NAN, 0.0, 0.0], 2)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("non-finite"), "{}", err);
+        let err = lane.top_k(&[0.0; 3], 2).unwrap_err().to_string();
+        assert!(err.contains("all zeros"), "{}", err);
+        assert_eq!(lane.top_k(&[1.0, 0.0, 0.0], 1).unwrap(), vec![(0, 1.0)]);
+    }
+
+    #[test]
+    fn builder_rejects_qa_and_claims_lanes_that_differ_from_the_chunks_lane() {
+        let entry = QaEntry {
+            question: "Who?".into(),
+            answer: "Them.".into(),
+            source_title: "A".into(),
+            source_url: "/a/".into(),
+            source_section: None,
+            tags: vec![],
+            confidence: 0.9,
+        };
+        let build = |qa_dim: usize, qa_quant: Quant| -> Result<SearchIndex> {
+            let mut b = IndexBuilder::new();
+            b.add_chunks(vec![meta("/a/", 0, "fine")], vec!["x".into()], vec![0])?;
+            b.add_dense_lane(
+                SCOPE_CHUNKS,
+                DenseLane::from_f32(
+                    wasm_spec("m", 3, Quant::Int8),
+                    3,
+                    1,
+                    &[1.0, 0.0, 0.0],
+                    Quant::Int8,
+                )?,
+            )?;
+            b.add_qa(vec![entry.clone()]);
+            let values = vec![1.0; qa_dim];
+            b.add_dense_lane(
+                SCOPE_QA,
+                DenseLane::from_f32(
+                    wasm_spec("m", qa_dim, qa_quant),
+                    qa_dim,
+                    1,
+                    &values,
+                    qa_quant,
+                )?,
+            )?;
+            b.finish()
+        };
+        let err = build(2, Quant::Int8).unwrap_err().to_string();
+        assert!(err.contains("dim 2") && err.contains("dim 3"), "{}", err);
+        let err = build(3, Quant::F32).unwrap_err().to_string();
+        assert!(err.contains("F32") && err.contains("Int8"), "{}", err);
+        // A matching lane still round-trips through the reader.
+        let index = build(3, Quant::Int8).unwrap();
+        let restored = SearchIndex::from_bytes(&ed_bytes(&index)).unwrap();
+        assert_eq!(restored.qa_dense, index.qa_dense);
+    }
+
+    #[test]
+    fn page_chunks_orders_by_granularity_then_chunk_index() {
+        // Fine 0..3, coarse 0..1 and a summary, all on one page, stored
+        // interleaved so id order proves nothing.
+        let metadata = vec![
+            meta("/p/", 0, "coarse"),
+            meta("/p/", 0, "fine"),
+            meta("/p/", 0, "summary"),
+            meta("/p/", 1, "fine"),
+            meta("/p/", 1, "coarse"),
+            meta("/p/", 2, "fine"),
+            meta("/q/", 0, "coarse"),
+        ];
+        let n = metadata.len();
+        let texts: Vec<String> = (0..n).map(|i| format!("text {}", i)).collect();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(metadata, texts, vec![0; n]).unwrap();
+        let index = b.finish().unwrap();
+        assert_eq!(index.page_chunks("/p/"), vec![1, 3, 5, 0, 4, 2]);
+        assert_eq!(index.page_chunks_finest("/p/"), vec![1, 3, 5]);
+        // A page with only coarse chunks falls back to them.
+        assert_eq!(index.page_chunks_finest("/q/"), vec![6]);
+        assert!(index.page_chunks_finest("/nope/").is_empty());
+        assert!(granularity_rank(Some("fine")) < granularity_rank(None));
+        assert!(granularity_rank(None) < granularity_rank(Some("coarse")));
+        assert!(granularity_rank(Some("coarse")) < granularity_rank(Some("summary")));
+        assert!(granularity_rank(Some("summary")) < granularity_rank(Some("other")));
+    }
+
+    #[test]
+    fn sparse_top_k_is_independent_of_query_term_order() {
+        let corpus = synthetic_corpus(256, 4, 9);
+        let sparse = SparseIndex::build(&corpus.sparse_docs, &corpus.idf);
+        let mut rng = Rng(3);
+        for _ in 0..20 {
+            let mut query: Vec<SparseTerm> = (0..30)
+                .map(|_| SparseTerm {
+                    token_id: 30_000 + rng.below(800) as u32,
+                    weight: 0.5 + rng.unit(),
+                })
+                .collect();
+            let forward = sparse.top_k(&query, 20);
+            query.reverse();
+            let backward = sparse.top_k(&query, 20);
+            assert_eq!(forward, backward);
+            // Scores are bit-identical, not merely close.
+            for (a, b) in forward.iter().zip(&backward) {
+                assert_eq!(a.1.to_bits(), b.1.to_bits());
+            }
+        }
     }
 
     #[test]
