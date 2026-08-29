@@ -336,7 +336,9 @@ fn urlize(segment: &str, lowercase: bool) -> String {
     let mut out = String::new();
     let mut last_was_dash = false;
     for c in s.chars() {
-        if c.is_alphanumeric() {
+        // Hugo's URLize keeps letters, digits and `_ . ~ + @`; everything
+        // else (spaces, punctuation) collapses to a single `-`.
+        if c.is_alphanumeric() || matches!(c, '_' | '.' | '~' | '+' | '@') {
             out.push(c);
             last_was_dash = false;
         } else if !last_was_dash && !out.is_empty() {
@@ -650,4 +652,12 @@ Hello world."#;
             .unwrap();
         assert_eq!(meta.url, "/2026/launch-day/");
     }
+
+    #[test]
+    fn urlize_keeps_underscores_like_hugo() {
+        assert_eq!(urlize("dsid_46a4cb87", true), "dsid_46a4cb87");
+        assert_eq!(urlize("My Post Title!", true), "my-post-title");
+        assert_eq!(urlize("v1.2+beta", true), "v1.2+beta");
+    }
+
 }
