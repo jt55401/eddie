@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::chunk::ChunkMeta;
 use crate::claims::{ClaimEntry, extract_claims_from_chunk};
 
-const SUBJECT_LABEL: &str = "the subject";
+/// How heuristic questions and answers name the site's owner when no
+/// `--qa-subject` is given.
+pub const DEFAULT_SUBJECT: &str = "the subject";
 
 /// Confidence assigned to every heuristic (non-LLM) QA entry. Heuristic
 /// extraction has no calibrated notion of confidence, so all entries it
@@ -92,11 +94,23 @@ impl QaCorpus {
 }
 
 pub fn build_qa_corpus_from_chunks(texts: &[String], metadata: &[ChunkMeta]) -> QaCorpus {
+    build_qa_corpus_from_chunks_with_subject(texts, metadata, DEFAULT_SUBJECT)
+}
+
+/// Like [`build_qa_corpus_from_chunks`], naming the site's owner `subject`
+/// ("Jason Grey") in every generated question and answer instead of
+/// [`DEFAULT_SUBJECT`], so the QA lane's wording matches how visitors ask.
+pub fn build_qa_corpus_from_chunks_with_subject(
+    texts: &[String],
+    metadata: &[ChunkMeta],
+    subject: &str,
+) -> QaCorpus {
+    let subject = subject_or_default(subject);
     let mut entries = Vec::new();
 
     for (i, text) in texts.iter().enumerate() {
         if let Some(meta) = metadata.get(i) {
-            entries.extend(extract_from_chunk(text, meta));
+            entries.extend(extract_from_chunk_with_subject(text, meta, subject));
         }
     }
 
@@ -111,6 +125,25 @@ pub fn build_qa_corpus_from_chunks(texts: &[String], metadata: &[ChunkMeta]) -> 
 pub fn build_qa_entries_from_chunks(texts: &[String], metadata: &[ChunkMeta]) -> Vec<QaEntry> {
     let corpus = build_qa_corpus_from_chunks(texts, metadata);
     corpus.entries
+}
+
+/// [`build_qa_entries_from_chunks`] with the owner named `subject`.
+pub fn build_qa_entries_from_chunks_with_subject(
+    texts: &[String],
+    metadata: &[ChunkMeta],
+    subject: &str,
+) -> Vec<QaEntry> {
+    build_qa_corpus_from_chunks_with_subject(texts, metadata, subject).entries
+}
+
+/// `subject` trimmed, or [`DEFAULT_SUBJECT`] when blank.
+fn subject_or_default(subject: &str) -> &str {
+    let trimmed = subject.trim();
+    if trimmed.is_empty() {
+        DEFAULT_SUBJECT
+    } else {
+        trimmed
+    }
 }
 
 /// Same as [`build_qa_entries_from_chunks`], but takes claims that were
@@ -135,7 +168,7 @@ pub fn build_qa_entries_from_chunks_with_claims(
     let mut entries = Vec::new();
     for (i, text) in texts.iter().enumerate() {
         if let Some(meta) = metadata.get(i) {
-            entries.extend(extract_experience_qa(text, meta));
+            entries.extend(extract_experience_qa(text, meta, DEFAULT_SUBJECT));
         }
     }
 
@@ -154,7 +187,7 @@ pub fn build_qa_entries_from_chunks_with_claims(
         }
         if let Some(claims_for_page) = by_url.get(meta.url.as_str()) {
             let owned: Vec<ClaimEntry> = claims_for_page.iter().map(|c| (*c).clone()).collect();
-            entries.extend(claim_backed_qa_from_claims(&owned, meta));
+            entries.extend(claim_backed_qa_from_claims(&owned, meta, DEFAULT_SUBJECT));
         }
     }
 
@@ -167,15 +200,25 @@ pub fn build_qa_entries_from_chunks_with_claims(
 }
 
 pub fn extract_from_chunk(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
+    extract_from_chunk_with_subject(text, meta, DEFAULT_SUBJECT)
+}
+
+/// [`extract_from_chunk`] with the owner named `subject`.
+pub fn extract_from_chunk_with_subject(
+    text: &str,
+    meta: &ChunkMeta,
+    subject: &str,
+) -> Vec<QaEntry> {
+    let subject = subject_or_default(subject);
     let mut entries = Vec::new();
 
-    entries.extend(extract_experience_qa(text, meta));
-    entries.extend(extract_claim_backed_qa(text, meta));
+    entries.extend(extract_experience_qa(text, meta, subject));
+    entries.extend(extract_claim_backed_qa(text, meta, subject));
 
     entries
 }
 
-fn extract_experience_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
+fn extract_experience_qa(text: &str, meta: &ChunkMeta, subject: &str) -> Vec<QaEntry> {
     let mut out = Vec::new();
 
     for sentence in split_sentences(text) {
@@ -204,21 +247,21 @@ fn extract_experience_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
 
             let answer = normalize_sentence(sentence_trimmed);
             out.push(make_entry(
-                format!("How many years has {} been {}?", SUBJECT_LABEL, activity),
+                format!("How many years has {} been {}?", subject, activity),
                 answer.clone(),
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
                 HEURISTIC_CONFIDENCE,
             ));
             out.push(make_entry(
-                format!("How long has {} been {}?", SUBJECT_LABEL, activity),
+                format!("How long has {} been {}?", subject, activity),
                 answer.clone(),
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
                 HEURISTIC_CONFIDENCE,
             ));
             out.push(make_entry(
-                good_at_question(activity),
+                good_at_question(activity, subject),
                 answer,
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
@@ -243,16 +286,16 @@ fn extract_experience_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
                 continue;
             }
 
-            let answer = format!("{} has been {} for {}.", SUBJECT_LABEL, activity, duration);
+            let answer = format!("{} has been {} for {}.", subject, activity, duration);
             out.push(make_entry(
-                good_at_question(activity),
+                good_at_question(activity, subject),
                 answer.clone(),
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
                 HEURISTIC_CONFIDENCE,
             ));
             out.push(make_entry(
-                format!("How long has {} been {}?", SUBJECT_LABEL, activity),
+                format!("How long has {} been {}?", subject, activity),
                 answer,
                 meta,
                 vec!["experience".to_string(), activity.to_string()],
@@ -264,16 +307,20 @@ fn extract_experience_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
     out
 }
 
-fn good_at_question(activity: &str) -> String {
-    format!("Is {} good at {}?", SUBJECT_LABEL, activity)
+fn good_at_question(activity: &str, subject: &str) -> String {
+    format!("Is {} good at {}?", subject, activity)
 }
 
-fn extract_claim_backed_qa(text: &str, meta: &ChunkMeta) -> Vec<QaEntry> {
+fn extract_claim_backed_qa(text: &str, meta: &ChunkMeta, subject: &str) -> Vec<QaEntry> {
     let claims = extract_claims_from_chunk(text, meta);
-    claim_backed_qa_from_claims(&claims, meta)
+    claim_backed_qa_from_claims(&claims, meta, subject)
 }
 
-fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<QaEntry> {
+fn claim_backed_qa_from_claims(
+    claims: &[ClaimEntry],
+    meta: &ChunkMeta,
+    subject: &str,
+) -> Vec<QaEntry> {
     let mut out = Vec::new();
     if claims.is_empty() {
         return out;
@@ -288,8 +335,8 @@ fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<Q
         }
         if claim.predicate == "has_skill" && !skills.contains(&claim.object) {
             out.push(make_entry(
-                format!("Does {} know {}?", SUBJECT_LABEL, claim.object),
-                format!("{} has skill in {}.", SUBJECT_LABEL, claim.object),
+                format!("Does {} know {}?", subject, claim.object),
+                format!("{} has skill in {}.", subject, claim.object),
                 meta,
                 vec!["claim-backed".to_string(), "skills".to_string()],
                 HEURISTIC_CONFIDENCE,
@@ -300,11 +347,8 @@ fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<Q
 
         if let Some(activity) = claim.predicate.strip_prefix("years_") {
             out.push(make_entry(
-                format!("How many years has {} been {}?", SUBJECT_LABEL, activity),
-                format!(
-                    "{} has been {} for {}.",
-                    SUBJECT_LABEL, activity, claim.object
-                ),
+                format!("How many years has {} been {}?", subject, activity),
+                format!("{} has been {} for {}.", subject, activity, claim.object),
                 meta,
                 vec!["claim-backed".to_string(), "experience".to_string()],
                 HEURISTIC_CONFIDENCE,
@@ -314,10 +358,10 @@ fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<Q
 
         if let Some(activity) = claim.predicate.strip_prefix("since_age_") {
             out.push(make_entry(
-                format!("Since what age has {} been {}?", SUBJECT_LABEL, activity),
+                format!("Since what age has {} been {}?", subject, activity),
                 format!(
                     "{} has been {} since age {}.",
-                    SUBJECT_LABEL, activity, claim.object
+                    subject, activity, claim.object
                 ),
                 meta,
                 vec!["claim-backed".to_string(), "experience".to_string()],
@@ -328,12 +372,8 @@ fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<Q
 
     if !worked_for.is_empty() {
         out.push(make_entry(
-            format!("Who has {} worked for?", SUBJECT_LABEL),
-            format!(
-                "{} has worked for {}.",
-                SUBJECT_LABEL,
-                worked_for.join(", ")
-            ),
+            format!("Who has {} worked for?", subject),
+            format!("{} has worked for {}.", subject, worked_for.join(", ")),
             meta,
             vec!["claim-backed".to_string(), "work-history".to_string()],
             HEURISTIC_CONFIDENCE,
@@ -341,8 +381,8 @@ fn claim_backed_qa_from_claims(claims: &[ClaimEntry], meta: &ChunkMeta) -> Vec<Q
     }
     if !skills.is_empty() {
         out.push(make_entry(
-            format!("What skills does {} have?", SUBJECT_LABEL),
-            format!("{} has skills in {}.", SUBJECT_LABEL, skills.join(", ")),
+            format!("What skills does {} have?", subject),
+            format!("{} has skills in {}.", subject, skills.join(", ")),
             meta,
             vec!["claim-backed".to_string(), "skills".to_string()],
             HEURISTIC_CONFIDENCE,
@@ -451,6 +491,10 @@ pub struct OllamaConfig {
     pub timeout_connect_secs: u64,
     /// Read timeout for the HTTP client. `0` falls back to the default (120s).
     pub timeout_read_secs: u64,
+    /// How the prompt tells the model to name the site's owner ("Jason
+    /// Grey"); generated text is also rewritten from "the author" / "the
+    /// subject" to this name. `None` leaves the model's wording alone.
+    pub subject: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -465,6 +509,7 @@ impl Default for OllamaConfig {
             seed: None,
             timeout_connect_secs: DEFAULT_TIMEOUT_CONNECT_SECS,
             timeout_read_secs: DEFAULT_TIMEOUT_READ_SECS,
+            subject: None,
         }
     }
 }
@@ -484,6 +529,8 @@ pub struct OpenRouterConfig {
     pub timeout_connect_secs: u64,
     /// Read timeout for the HTTP client. `0` falls back to the default (120s).
     pub timeout_read_secs: u64,
+    /// See [`OllamaConfig::subject`].
+    pub subject: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -499,6 +546,7 @@ impl Default for OpenRouterConfig {
             seed: None,
             timeout_connect_secs: DEFAULT_TIMEOUT_CONNECT_SECS,
             timeout_read_secs: DEFAULT_TIMEOUT_READ_SECS,
+            subject: None,
         }
     }
 }
@@ -590,7 +638,18 @@ fn post_json_with_retry(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn build_synthesis_prompt(meta: &ChunkMeta, text: &str, max_pairs_per_chunk: usize) -> String {
+fn build_synthesis_prompt(
+    meta: &ChunkMeta,
+    text: &str,
+    max_pairs_per_chunk: usize,
+    subject: Option<&str>,
+) -> String {
+    let subject_rule = match subject.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => format!(
+            "- Refer to the site's owner as {name}; do not write \"the author\" or \"the subject\".\n"
+        ),
+        None => String::new(),
+    };
     format!(
         r#"You generate grounded factual question-and-answer pairs from a single source document.
 
@@ -614,13 +673,32 @@ Rules:
 - Only include facts directly and explicitly supported by the text inside <source>.
 - Prefer measurable facts: years, roles, employers, dates, versions, quantities.
 - Never invent facts that are not present in the source text.
-"#,
+{subject_rule}"#,
         title = meta.title,
         url = meta.url,
         section = meta.section.as_deref().unwrap_or(""),
         text = text,
         max_pairs = max_pairs_per_chunk.max(1),
+        subject_rule = subject_rule,
     )
+}
+
+/// Rewrite "the author" / "the subject" (any case, whole words) to `subject`
+/// in a generated entry, so the QA lane names the owner even when the model
+/// ignored the prompt rule. Capitalised forms keep the name as written.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_subject(entry: &mut QaEntry, subject: &str) {
+    static GENERIC_SUBJECT_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\bthe (?:author|subject)\b").unwrap());
+    let subject = subject.trim();
+    if subject.is_empty() {
+        return;
+    }
+    for field in [&mut entry.question, &mut entry.answer] {
+        if GENERIC_SUBJECT_RE.is_match(field) {
+            *field = GENERIC_SUBJECT_RE.replace_all(field, subject).into_owned();
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -633,7 +711,8 @@ fn ollama_generate(
     use anyhow::bail;
     use serde_json::{Value, json};
 
-    let prompt = build_synthesis_prompt(meta, text, cfg.max_pairs_per_chunk);
+    let prompt =
+        build_synthesis_prompt(meta, text, cfg.max_pairs_per_chunk, cfg.subject.as_deref());
 
     let mut options = serde_json::Map::new();
     options.insert("temperature".to_string(), json!(cfg.temperature));
@@ -686,7 +765,8 @@ fn openrouter_chat(
     use anyhow::bail;
     use serde_json::{Value, json};
 
-    let user_prompt = build_synthesis_prompt(meta, text, cfg.max_pairs_per_chunk);
+    let user_prompt =
+        build_synthesis_prompt(meta, text, cfg.max_pairs_per_chunk, cfg.subject.as_deref());
 
     let mut body_map = serde_json::Map::new();
     body_map.insert("model".to_string(), json!(cfg.model));
@@ -750,6 +830,7 @@ fn run_synthesis(
     metadata: &[ChunkMeta],
     max_chunks: usize,
     max_pairs_per_chunk: usize,
+    subject: Option<&str>,
     mut call: impl FnMut(&ChunkMeta, &str) -> anyhow::Result<String>,
 ) -> anyhow::Result<Vec<QaEntry>> {
     let selected = select_chunks_for_synthesis(texts, metadata, max_chunks);
@@ -788,8 +869,13 @@ fn run_synthesis(
         };
 
         match parse_generated_qa_entries(&response_text, meta, text, max_pairs_per_chunk) {
-            Some(entries) => {
+            Some(mut entries) => {
                 parsed += 1;
+                if let Some(name) = subject {
+                    for e in &mut entries {
+                        apply_subject(e, name);
+                    }
+                }
                 out.extend(entries);
             }
             None => {
@@ -830,6 +916,7 @@ pub fn synthesize_with_ollama_from_chunks(
         metadata,
         cfg.max_chunks,
         cfg.max_pairs_per_chunk,
+        cfg.subject.as_deref(),
         |meta, text| ollama_generate(&agent, cfg, meta, text),
     )
 }
@@ -847,6 +934,7 @@ pub fn synthesize_with_openrouter_from_chunks(
         metadata,
         cfg.max_chunks,
         cfg.max_pairs_per_chunk,
+        cfg.subject.as_deref(),
         |meta, text| openrouter_chat(&agent, cfg, meta, text),
     )
 }
@@ -1155,6 +1243,68 @@ mod tests {
                 .any(|e| e.question == "How many years has the subject been programming?")
         );
         assert!(out.iter().any(|e| e.answer.contains("42 years")));
+    }
+
+    #[test]
+    fn subject_names_the_owner_in_heuristic_entries() {
+        let text = "I have been programming since age 6 across multiple domains.";
+        let out = extract_from_chunk_with_subject(text, &meta(), "Jason Grey");
+        assert!(!out.is_empty());
+        assert!(
+            out.iter()
+                .any(|e| e.question == "How long has Jason Grey been programming?"),
+            "{:?}",
+            out.iter().map(|e| &e.question).collect::<Vec<_>>()
+        );
+        assert!(out.iter().all(|e| !e.question.contains("the subject")));
+        // Blank subject falls back to the default label.
+        let out = build_qa_entries_from_chunks_with_subject(&[text.to_string()], &[meta()], "   ");
+        assert!(
+            out.iter()
+                .any(|e| e.question == "How long has the subject been programming?")
+        );
+        assert_eq!(
+            build_qa_entries_from_chunks(&[text.to_string()], &[meta()]).len(),
+            out.len()
+        );
+    }
+
+    #[test]
+    fn synthesis_prompt_states_the_subject_rule_only_when_given() {
+        let with = build_synthesis_prompt(&meta(), "body", 3, Some("Jason Grey"));
+        assert!(with.contains("Refer to the site's owner as Jason Grey; do not write \"the author\" or \"the subject\"."));
+        let without = build_synthesis_prompt(&meta(), "body", 3, None);
+        assert!(!without.contains("site's owner"));
+        assert_eq!(
+            build_synthesis_prompt(&meta(), "body", 3, Some("  ")),
+            without
+        );
+    }
+
+    #[test]
+    fn apply_subject_rewrites_generic_owner_words() {
+        let mut e = QaEntry {
+            question: "How long has the author been coding?".into(),
+            answer: "The Author has been coding for 40 years; the subject's blog says so.".into(),
+            source_title: "t".into(),
+            source_url: "/u/".into(),
+            source_section: None,
+            tags: vec![],
+            confidence: 0.5,
+        };
+        apply_subject(&mut e, "Jason Grey");
+        assert_eq!(e.question, "How long has Jason Grey been coding?");
+        assert_eq!(
+            e.answer,
+            "Jason Grey has been coding for 40 years; Jason Grey's blog says so."
+        );
+        // "authored" / "the authors" are left alone; blank subject is a no-op.
+        let mut e2 = e.clone();
+        e2.answer = "the authors of the authoritative post".into();
+        apply_subject(&mut e2, "Jason Grey");
+        assert_eq!(e2.answer, "the authors of the authoritative post");
+        apply_subject(&mut e2, " ");
+        assert_eq!(e2.answer, "the authors of the authoritative post");
     }
 
     #[test]

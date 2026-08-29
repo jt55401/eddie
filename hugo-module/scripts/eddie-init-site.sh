@@ -94,6 +94,14 @@ EDDIE_CHUNK_STRATEGY=heading
 EDDIE_QA=0
 EDDIE_CLAIMS=0
 
+# How QA entries name the site's owner (passed as --qa-subject when set).
+# Synthesis otherwise writes "the author"; visitors ask by name.
+EDDIE_QA_SUBJECT=
+
+# Set to 1 to index chunk text without the "{title} — {section}" line
+# eddie prepends for the dense, sparse and BM25 arms (--no-title-context).
+EDDIE_NO_TITLE_CONTEXT=0
+
 # Optional claims edits file (applied only when EDDIE_CLAIMS=1)
 EDDIE_CLAIMS_EDITS=.eddie/claims.edits.toml
 
@@ -186,8 +194,15 @@ else
   CMD+=(--batch-size "$BATCH_SIZE")
 fi
 
+if [[ "${EDDIE_NO_TITLE_CONTEXT:-0}" == "1" ]]; then
+  CMD+=(--no-title-context)
+fi
+
 if [[ "${EDDIE_QA:-0}" == "1" ]]; then
   CMD+=(--qa)
+  if [[ -n "${EDDIE_QA_SUBJECT:-}" ]]; then
+    CMD+=(--qa-subject "$EDDIE_QA_SUBJECT")
+  fi
   if [[ -n "${EDDIE_QA_OPENROUTER_MODEL:-}" ]]; then
     CMD+=(--qa-openrouter-model "$EDDIE_QA_OPENROUTER_MODEL")
     CMD+=(--qa-openrouter-url "${EDDIE_QA_OPENROUTER_URL:-https://openrouter.ai/api/v1/chat/completions}")

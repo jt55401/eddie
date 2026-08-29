@@ -25,9 +25,12 @@ use eddie::embed::{
 };
 use eddie::eval::{
     AcceptanceCase, AcceptanceSuite, evaluate_case, hit_at_k, load_suite, mrr, ndcg_at_k,
-    summarize, write_suite,
+    ndcg_graded_at_k, summarize, write_suite,
 };
-use eddie::index::{DenseLane, IndexBuilder, SCOPE_CHUNKS, SCOPE_CLAIMS, SCOPE_QA, SearchIndex};
+use eddie::index::{
+    DenseLane, IndexBuilder, SCOPE_CHUNKS, SCOPE_CLAIMS, SCOPE_QA, SearchIndex, context_prefix,
+    with_context,
+};
 use eddie::manifest::{DenseSpec, Quant, RuntimeSpec, SparseSpec, SparseTerm};
 use eddie::models;
 use eddie::parse::{
@@ -35,12 +38,13 @@ use eddie::parse::{
     MkDocsParser, parse_content_dir, parse_content_dir_report,
 };
 use eddie::qa::{
-    OllamaConfig, OpenRouterConfig, QaCorpus, QaEntry, build_qa_corpus_from_chunks,
-    build_qa_entries_from_chunks, synthesize_with_ollama_from_chunks,
+    OllamaConfig, OpenRouterConfig, QaCorpus, QaEntry, build_qa_corpus_from_chunks_with_subject,
+    build_qa_entries_from_chunks_with_subject, synthesize_with_ollama_from_chunks,
     synthesize_with_openrouter_from_chunks,
 };
 use eddie::search::{
-    Mode, PageResult, Query, Retrieval, Weights, group_pages, query_terms, retrieve,
+    Mode, PageResult, QaHit, Query, Retrieval, Weights, group_pages, qa_fetch_k, query_terms,
+    rank_qa, retrieve,
 };
 use eddie::sparse::{
     SparseDocEncoder, SparseOptions, sparse_query_terms, sparse_tokenizer_from_bytes,
@@ -191,6 +195,18 @@ enum Command {
         /// Sampling temperature for Ollama QA synthesis.
         #[arg(long, default_value = "0.2")]
         qa_ollama_temperature: f32,
+
+        /// Name the site's owner in QA entries (e.g. "Jason Grey"): the LLM
+        /// prompts ask for it, generated "the author"/"the subject" is
+        /// rewritten to it, and the heuristics use it.
+        #[arg(long = "qa-subject", alias = "subject", value_name = "NAME")]
+        qa_subject: Option<String>,
+
+        /// Index chunk text as stored, without the "{title} — {section}"
+        /// line that is otherwise prepended to what the dense, sparse and
+        /// BM25 arms see (stored texts stay clean either way).
+        #[arg(long, default_value_t = false)]
+        no_title_context: bool,
     },
 
     /// Search an existing index.
@@ -218,6 +234,23 @@ enum Command {
         /// Print the result set as JSON instead of a table.
         #[arg(long, default_value_t = false)]
         json: bool,
+
+        /// Also print, per result, the per-arm ranks of its best chunk and
+        /// the title/section prefix the index text carried.
+        #[arg(long, default_value_t = false)]
+        explain: bool,
+
+        /// RRF weights as dense,sparse,bm25 (default 1,1,0.8).
+        #[arg(long, value_name = "D,S,B")]
+        weights: Option<String>,
+
+        /// Candidates fetched per arm before fusion (default max(3·top_k, 30)).
+        #[arg(long)]
+        fetch_k: Option<usize>,
+
+        /// RRF constant k (default 60).
+        #[arg(long)]
+        rrf_k: Option<f64>,
     },
 
     /// Print the manifest and section sizes of an index.
@@ -254,6 +287,56 @@ enum Command {
         lane: Option<String>,
 
         /// Print the per-query report as JSON.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// RRF weights as dense,sparse,bm25 (default 1,1,0.8).
+        #[arg(long, value_name = "D,S,B")]
+        weights: Option<String>,
+
+        /// Candidates fetched per arm before fusion (default max(3·top_k, 30)).
+        #[arg(long)]
+        fetch_k: Option<usize>,
+
+        /// RRF constant k (default 60).
+        #[arg(long)]
+        rrf_k: Option<f64>,
+
+        /// Evaluate a weight grid (dense 0.8/1/1.2 × sparse 0.6..1.2 × bm25
+        /// 0.6..1.2) and print it sorted by nDCG, then MRR.
+        #[arg(long, default_value_t = false)]
+        sweep: bool,
+
+        /// Use graded nDCG from each case's `[cases.graded]` table
+        /// (url = grade 1..3); cases without one score their `relevant`
+        /// urls at grade 1.
+        #[arg(long, default_value_t = false)]
+        graded: bool,
+
+        /// Also report each arm on its own (dense, sparse, keyword) next to hybrid.
+        #[arg(long, default_value_t = false)]
+        all_modes: bool,
+    },
+
+    /// Rank the QA entries of an index for a query and show the score components.
+    Qa {
+        /// Path to the index file.
+        #[arg(long)]
+        index: PathBuf,
+
+        /// Query text.
+        #[arg(long)]
+        query: String,
+
+        /// Number of QA hits to print.
+        #[arg(long, default_value = "5")]
+        k: usize,
+
+        /// Dense lane id to embed the query with (default: the index's first lane).
+        #[arg(long)]
+        lane: Option<String>,
+
+        /// Print the hits as JSON.
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -342,6 +425,10 @@ enum Command {
         /// Also run the regex heuristics that guess QA pairs from prose (off by default; tuned for resume-style pages).
         #[arg(long, default_value_t = false)]
         qa_heuristics: bool,
+
+        /// Name the site's owner in QA entries (see `eddie index --qa-subject`).
+        #[arg(long = "qa-subject", alias = "subject", value_name = "NAME")]
+        qa_subject: Option<String>,
     },
 
     /// Build a factual claims corpus from an existing search index.
@@ -478,6 +565,8 @@ fn main() -> Result<()> {
             qa_ollama_max_chunks,
             qa_ollama_max_pairs_per_chunk,
             qa_ollama_temperature,
+            qa_subject,
+            no_title_context,
         } => cmd_index(
             content_dir,
             cms,
@@ -512,6 +601,8 @@ fn main() -> Result<()> {
             qa_ollama_max_chunks,
             qa_ollama_max_pairs_per_chunk,
             qa_ollama_temperature,
+            qa_subject,
+            !no_title_context,
         ),
         Command::Search {
             index,
@@ -520,7 +611,20 @@ fn main() -> Result<()> {
             mode,
             lane,
             json,
-        } => cmd_search(index, &query, top_k, mode.into(), lane.as_deref(), json),
+            explain,
+            weights,
+            fetch_k,
+            rrf_k,
+        } => cmd_search(
+            index,
+            &query,
+            top_k,
+            mode.into(),
+            lane.as_deref(),
+            json,
+            explain,
+            ranking_options(weights.as_deref(), fetch_k, rrf_k)?,
+        ),
         Command::Stats { index, json } => cmd_stats(index, json),
         Command::Eval {
             index,
@@ -529,7 +633,33 @@ fn main() -> Result<()> {
             mode,
             lane,
             json,
-        } => cmd_eval(index, labels, top_k, mode.into(), lane.as_deref(), json),
+            weights,
+            fetch_k,
+            rrf_k,
+            sweep,
+            graded,
+            all_modes,
+        } => cmd_eval(
+            index,
+            labels,
+            top_k,
+            mode.into(),
+            lane.as_deref(),
+            json,
+            EvalOptions {
+                ranking: ranking_options(weights.as_deref(), fetch_k, rrf_k)?,
+                sweep,
+                graded,
+                all_modes,
+            },
+        ),
+        Command::Qa {
+            index,
+            query,
+            k,
+            lane,
+            json,
+        } => cmd_qa(index, &query, k, lane.as_deref(), json),
         Command::Tune {
             content_dir,
             cms,
@@ -565,6 +695,7 @@ fn main() -> Result<()> {
             ollama_temperature,
             qa_seed,
             qa_heuristics,
+            qa_subject,
         } => cmd_qa_corpus(
             index,
             output,
@@ -575,6 +706,7 @@ fn main() -> Result<()> {
             ollama_temperature,
             qa_seed,
             qa_heuristics,
+            qa_subject,
         ),
         Command::ClaimsCorpus {
             index,
@@ -611,6 +743,8 @@ fn cmd_index(
     qa_ollama_max_chunks: usize,
     qa_ollama_max_pairs_per_chunk: usize,
     qa_ollama_temperature: f32,
+    qa_subject: Option<String>,
+    title_context: bool,
 ) -> Result<()> {
     // Sub-flags only take effect with their section flag; say so up front
     // rather than silently building an index without the section.
@@ -620,6 +754,7 @@ fn cmd_index(
             (qa_seed.is_some(), "--qa-seed"),
             (qa_ollama_model.is_some(), "--qa-ollama-model"),
             (qa_openrouter_model.is_some(), "--qa-openrouter-model"),
+            (qa_subject.is_some(), "--qa-subject"),
         ]);
         if !given.is_empty() {
             eprintln!(
@@ -782,11 +917,43 @@ fn cmd_index(
     let fact_metadata: Vec<_> = fact_chunks.iter().map(|c| c.meta.clone()).collect();
     let fact_texts: Vec<String> = fact_chunks.iter().map(|c| c.text.clone()).collect();
 
-    // Embed all chunks (overlap prefix + text), one pass per dense lane.
-    // BM25, the sparse arm and the stored texts use the clean text only.
-    let embed_inputs: Vec<String> = all_chunks.iter().map(|c| c.embed_text()).collect();
+    // What each arm sees. With title context (default) every indexed text
+    // starts with a "{title} — {section}" line, so a query that names the
+    // page matches a chunk whose body never repeats the title. Stored texts
+    // (display, snippets) stay clean.
+    //   dense:  prefix + "\n" + overlap prefix + text
+    //   sparse: prefix + "\n" + text
+    //   bm25:   prefix + "\n" + text
+    let prefixes: Vec<String> = all_chunks
+        .iter()
+        .map(|c| {
+            if title_context {
+                context_prefix(&c.meta)
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+    eprintln!(
+        "Title context: {}",
+        if title_context {
+            "on (\"{title} — {section}\" prefixed to the indexed text; --no-title-context disables)"
+        } else {
+            "off"
+        }
+    );
+    let embed_inputs: Vec<String> = all_chunks
+        .iter()
+        .zip(&prefixes)
+        .map(|(c, p)| with_context(p, &c.embed_text()))
+        .collect();
     let embed_refs: Vec<&str> = embed_inputs.iter().map(String::as_str).collect();
-    let texts: Vec<&str> = all_chunks.iter().map(|c| c.text.as_str()).collect();
+    let index_texts: Vec<String> = all_chunks
+        .iter()
+        .zip(&prefixes)
+        .map(|(c, p)| with_context(p, &c.text))
+        .collect();
+    let texts: Vec<&str> = index_texts.iter().map(String::as_str).collect();
     let mut lane_vectors: Vec<Vec<f32>> = Vec::with_capacity(lanes.len());
     for lane in &lanes {
         eprintln!(
@@ -845,8 +1012,15 @@ fn cmd_index(
 
     if qa_enabled {
         eprintln!("Building QA section...");
+        if let Some(subject) = &qa_subject {
+            eprintln!("  QA subject: {}", subject);
+        }
         if qa_heuristics {
-            qa_entries = build_qa_entries_from_chunks(&fact_texts, &fact_metadata);
+            qa_entries = build_qa_entries_from_chunks_with_subject(
+                &fact_texts,
+                &fact_metadata,
+                qa_subject.as_deref().unwrap_or(eddie::qa::DEFAULT_SUBJECT),
+            );
             eprintln!("  Heuristic QA entries: {}", qa_entries.len());
         }
         if let Some(model) = qa_openrouter_model {
@@ -864,6 +1038,7 @@ fn cmd_index(
                 max_pairs_per_chunk: qa_ollama_max_pairs_per_chunk,
                 temperature: qa_ollama_temperature,
                 seed: qa_seed,
+                subject: qa_subject.clone(),
                 ..Default::default()
             };
             eprintln!("  Running OpenRouter QA synthesis...");
@@ -879,6 +1054,7 @@ fn cmd_index(
                 max_pairs_per_chunk: qa_ollama_max_pairs_per_chunk,
                 temperature: qa_ollama_temperature,
                 seed: qa_seed,
+                subject: qa_subject.clone(),
                 ..Default::default()
             };
             eprintln!("  Running Ollama QA synthesis...");
@@ -938,7 +1114,8 @@ fn cmd_index(
     let overlap_words: Vec<u16> = vec![0; n];
 
     let mut builder = IndexBuilder::new();
-    builder.add_chunks(metadata, chunk_texts, overlap_words)?;
+    builder.add_chunks_indexed(metadata, chunk_texts, index_texts, overlap_words)?;
+    builder.title_context(title_context);
     for (lane, vectors) in lanes.iter().zip(lane_vectors) {
         let dim = lane.dim();
         builder.add_dense_lane(
@@ -1174,16 +1351,59 @@ fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
     }
 }
 
+/// Fusion knobs the CLI can override (`--weights`, `--fetch-k`, `--rrf-k`);
+/// `None` keeps the defaults the widget uses.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct RankingOptions {
+    weights: Option<Weights>,
+    fetch_k: Option<usize>,
+    rrf_k: Option<f64>,
+}
+
+fn ranking_options(
+    weights: Option<&str>,
+    fetch_k: Option<usize>,
+    rrf_k: Option<f64>,
+) -> Result<RankingOptions> {
+    let weights = weights.map(Weights::parse).transpose()?;
+    if fetch_k == Some(0) {
+        bail!("--fetch-k must be > 0");
+    }
+    if let Some(k) = rrf_k
+        && !(k.is_finite() && k >= 0.0)
+    {
+        bail!("--rrf-k must be a finite number >= 0");
+    }
+    Ok(RankingOptions {
+        weights,
+        fetch_k,
+        rrf_k,
+    })
+}
+
+/// The per-query arm inputs, embedded once so several fusion settings can
+/// be scored against the same vectors.
+struct QueryInputs {
+    dense: Option<(usize, Vec<f32>)>,
+    sparse: Option<Vec<SparseTerm>>,
+}
+
 /// Everything the CLI needs to run queries against an index the way the
 /// widget does.
 struct QueryRuntime {
     dense: Option<QueryEmbedder>,
     sparse_tokenizer: Option<tokenizers::Tokenizer>,
     mode: Mode,
+    options: RankingOptions,
 }
 
 impl QueryRuntime {
-    fn new(index: &SearchIndex, mode: Mode, lane: Option<&str>) -> Result<Self> {
+    fn with_options(
+        index: &SearchIndex,
+        mode: Mode,
+        lane: Option<&str>,
+        options: RankingOptions,
+    ) -> Result<Self> {
         let dense = match mode {
             Mode::Hybrid if index.manifest.dense.is_empty() => {
                 eprintln!("warning: index has no dense lane; hybrid runs without the dense arm");
@@ -1202,6 +1422,7 @@ impl QueryRuntime {
             dense,
             sparse_tokenizer,
             mode,
+            options,
         })
     }
 
@@ -1214,6 +1435,18 @@ impl QueryRuntime {
         }
     }
 
+    /// Embed the query for every arm this runtime loaded.
+    fn inputs(&self, index: &SearchIndex, text: &str) -> Result<QueryInputs> {
+        let dense = match &self.dense {
+            Some(e) => Some((e.lane, e.embed(text)?)),
+            None => None,
+        };
+        Ok(QueryInputs {
+            dense,
+            sparse: self.sparse_terms(index, text)?,
+        })
+    }
+
     /// Retrieve and group pages exactly like the widget.
     fn run(
         &self,
@@ -1221,22 +1454,33 @@ impl QueryRuntime {
         text: &str,
         top_k: usize,
     ) -> Result<(Vec<PageResult>, Retrieval)> {
-        let dense = match &self.dense {
-            Some(e) => Some((e.lane, e.embed(text)?)),
-            None => None,
-        };
-        let q = Query {
-            text,
-            dense,
-            sparse: self.sparse_terms(index, text)?,
-            mode: self.mode,
-            top_k,
-            weights: Weights::default(),
-        };
-        let retrieval = retrieve(index, &q)?;
-        let pages = group_pages(index, &retrieval.ranked, &query_terms(text), top_k);
-        Ok((pages, retrieval))
+        let inputs = self.inputs(index, text)?;
+        run_query(index, &inputs, text, top_k, self.mode, self.options)
     }
+}
+
+/// `retrieve` + `group_pages` for prepared inputs under one fusion setting.
+fn run_query(
+    index: &SearchIndex,
+    inputs: &QueryInputs,
+    text: &str,
+    top_k: usize,
+    mode: Mode,
+    options: RankingOptions,
+) -> Result<(Vec<PageResult>, Retrieval)> {
+    let q = Query {
+        text,
+        dense: inputs.dense.clone(),
+        sparse: inputs.sparse.clone(),
+        mode,
+        top_k,
+        weights: options.weights.unwrap_or_default(),
+        fetch_k: options.fetch_k,
+        rrf_k: options.rrf_k,
+    };
+    let retrieval = retrieve(index, &q)?;
+    let pages = group_pages(index, &retrieval.ranked, &query_terms(text), top_k);
+    Ok((pages, retrieval))
 }
 
 fn load_index(path: &PathBuf) -> Result<SearchIndex> {
@@ -1265,8 +1509,48 @@ struct SearchOutput<'a> {
     arms: eddie::search::Arms,
     degraded: &'a [String],
     results: &'a [PageResult],
+    /// Only with `--explain`: per result, the best chunk's arm ranks and
+    /// the title/section prefix its indexed text carried.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explain: Option<Vec<ExplainRow>>,
 }
 
+#[derive(serde::Serialize)]
+struct ExplainRow {
+    url: String,
+    chunk: usize,
+    dense_rank: Option<usize>,
+    sparse_rank: Option<usize>,
+    bm25_rank: Option<usize>,
+    /// `None` when the index was built with `--no-title-context`.
+    index_prefix: Option<String>,
+}
+
+fn explain_rows(
+    index: &SearchIndex,
+    pages: &[PageResult],
+    retrieval: &Retrieval,
+) -> Vec<ExplainRow> {
+    pages
+        .iter()
+        .map(|page| {
+            let ranks = retrieval.ranked.iter().find(|c| c.chunk == page.chunk);
+            ExplainRow {
+                url: page.url.clone(),
+                chunk: page.chunk,
+                dense_rank: ranks.and_then(|c| c.dense_rank),
+                sparse_rank: ranks.and_then(|c| c.sparse_rank),
+                bm25_rank: ranks.and_then(|c| c.bm25_rank),
+                index_prefix: index
+                    .manifest
+                    .title_context
+                    .then(|| context_prefix(&index.metadata[page.chunk])),
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     index_path: PathBuf,
     query: &str,
@@ -1274,12 +1558,14 @@ fn cmd_search(
     mode: Mode,
     lane: Option<&str>,
     json: bool,
+    explain: bool,
+    options: RankingOptions,
 ) -> Result<()> {
     if top_k == 0 {
         bail!("--top-k must be > 0");
     }
     let index = load_index(&index_path)?;
-    let runtime = QueryRuntime::new(&index, mode, lane)?;
+    let runtime = QueryRuntime::with_options(&index, mode, lane, options)?;
     let (pages, retrieval) = runtime.run(&index, query, top_k)?;
 
     if json {
@@ -1290,6 +1576,7 @@ fn cmd_search(
             arms: retrieval.arms,
             degraded: &retrieval.degraded,
             results: &pages,
+            explain: explain.then(|| explain_rows(&index, &pages, &retrieval)),
         };
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
@@ -1305,6 +1592,24 @@ fn cmd_search(
     );
     for note in &retrieval.degraded {
         println!("  note: {}", note);
+    }
+    if explain {
+        let w = options.weights.unwrap_or_default();
+        println!(
+            "  fusion: weights dense={} sparse={} bm25={}, fetch_k={}, rrf_k={}; title context {}",
+            w.dense,
+            w.sparse,
+            w.bm25,
+            options
+                .fetch_k
+                .unwrap_or_else(|| eddie::search::fetch_k(top_k)),
+            options.rrf_k.unwrap_or(eddie::search::RRF_K),
+            if index.manifest.title_context {
+                "on"
+            } else {
+                "off (chunks indexed as stored)"
+            }
+        );
     }
     println!("{}", "-".repeat(60));
     if pages.is_empty() {
@@ -1337,7 +1642,128 @@ fn cmd_search(
             })
             .unwrap_or_default();
         println!("   {}", ranks);
+        if explain && index.manifest.title_context {
+            println!(
+                "   index prefix: {:?}",
+                context_prefix(&index.metadata[page.chunk])
+            );
+        }
         println!("   {}", page.snippet);
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct QaOutput<'a> {
+    id: usize,
+    score: f64,
+    dense: f64,
+    overlap: f64,
+    bm25_rank: Option<usize>,
+    confident: bool,
+    question: &'a str,
+    answer: &'a str,
+    source_title: &'a str,
+    source_url: &'a str,
+    source_section: Option<&'a str>,
+}
+
+/// `eddie qa`: rank the QA section for a query with [`rank_qa`] and show
+/// every score component, the way the widget's FAQ card sees them.
+fn cmd_qa(
+    index_path: PathBuf,
+    query: &str,
+    k: usize,
+    lane: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    if k == 0 {
+        bail!("--k must be > 0");
+    }
+    let index = load_index(&index_path)?;
+    if index.qa.is_empty() {
+        bail!("index has no qa section (build it with `eddie index --qa ...`)");
+    }
+    let mut notes = Vec::new();
+    let dense_hits: Vec<(usize, f32)> = if index.manifest.dense.is_empty() {
+        notes.push("index has no dense lane; ranking is lexical only".to_string());
+        Vec::new()
+    } else {
+        let embedder = QueryEmbedder::for_index(&index, lane)?;
+        match index.qa_lane(&embedder.spec.id) {
+            Some(qa_lane) => qa_lane.top_k(&embedder.embed(query)?, qa_fetch_k(k))?,
+            None => {
+                notes.push(format!(
+                    "qa section has no dense/qa/{} lane; ranking is lexical only",
+                    embedder.spec.id
+                ));
+                Vec::new()
+            }
+        }
+    };
+    let hits: Vec<QaHit> = rank_qa(&index, query, &dense_hits, k);
+
+    if json {
+        let out: Vec<QaOutput> = hits
+            .iter()
+            .map(|h| {
+                let e = &index.qa[h.id];
+                QaOutput {
+                    id: h.id,
+                    score: h.score,
+                    dense: h.dense,
+                    overlap: h.overlap,
+                    bm25_rank: h.bm25_rank,
+                    confident: h.confident,
+                    question: &e.question,
+                    answer: &e.answer,
+                    source_title: &e.source_title,
+                    source_url: &e.source_url,
+                    source_section: e.source_section.as_deref(),
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!(
+        "\nQA hits for: \"{}\"  ({} entries; score = 0.6·dense + 0.4·(0.5·overlap + 0.5·bm25), confident = score ≥ {} and (overlap ≥ {} or dense ≥ {}))",
+        query,
+        index.qa.len(),
+        eddie::search::QA_CONFIDENT_SCORE,
+        eddie::search::QA_CONFIDENT_OVERLAP,
+        eddie::search::QA_CONFIDENT_DENSE
+    );
+    for note in &notes {
+        println!("  note: {}", note);
+    }
+    println!(
+        "  terms: {}",
+        eddie::search::qa_overlap_terms(query).join(" ")
+    );
+    println!(
+        "{:<3} {:>6} {:>6} {:>7} {:>5} {:<5} question / answer",
+        "#", "score", "dense", "overlap", "bm25", "conf"
+    );
+    println!("{}", "-".repeat(72));
+    if hits.is_empty() {
+        println!("(no hits)");
+    }
+    for (i, h) in hits.iter().enumerate() {
+        let e = &index.qa[h.id];
+        println!(
+            "{:<3} {:>6.3} {:>6.3} {:>7.2} {:>5} {:<5} {}",
+            i + 1,
+            h.score,
+            h.dense,
+            h.overlap,
+            h.bm25_rank.map_or("-".to_string(), |r| r.to_string()),
+            if h.confident { "yes" } else { "no" },
+            e.question
+        );
+        println!("{:<37} → {}", "", e.answer);
+        println!("{:<37}   [{}] {}", "", h.id, e.source_url);
     }
     Ok(())
 }
@@ -1410,11 +1836,60 @@ struct LabelCase {
     #[serde(default)]
     id: Option<String>,
     query: String,
-    /// Relevant page URLs.
+    /// Relevant page URLs (binary relevance).
+    #[serde(default)]
     relevant: Vec<String>,
+    /// Optional `[cases.graded]` table: url = grade 1..3. Its urls count as
+    /// relevant; `--graded` scores nDCG with the grades.
+    #[serde(default)]
+    graded: std::collections::BTreeMap<String, u8>,
 }
 
-#[derive(Debug, serde::Serialize)]
+impl LabelCase {
+    /// Every labelled url (canonical form) with its grade: `graded` entries
+    /// as given, plain `relevant` urls at grade 1.
+    fn grades(&self) -> Vec<(String, u8)> {
+        let mut out: Vec<(String, u8)> = self
+            .graded
+            .iter()
+            .map(|(u, g)| (normalize_eval_url(u), *g))
+            .collect();
+        for url in &self.relevant {
+            let u = normalize_eval_url(url);
+            if !out.iter().any(|(x, _)| *x == u) {
+                out.push((u, 1));
+            }
+        }
+        out
+    }
+}
+
+fn validate_label_cases(cases: &[LabelCase]) -> Result<()> {
+    if cases.is_empty() {
+        bail!("labels file has no [[cases]]");
+    }
+    for (i, c) in cases.iter().enumerate() {
+        if c.query.trim().is_empty() || (c.relevant.is_empty() && c.graded.is_empty()) {
+            bail!(
+                "case {} needs a query and at least one relevant url (relevant = [...] or [cases.graded])",
+                i + 1
+            );
+        }
+        for (url, grade) in &c.graded {
+            if !(1..=3).contains(grade) {
+                bail!(
+                    "case {}: graded url {:?} has grade {} (expected 1..3)",
+                    i + 1,
+                    url,
+                    grade
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 struct CaseMetrics {
     id: String,
     query: String,
@@ -1425,6 +1900,37 @@ struct CaseMetrics {
     top: Vec<String>,
 }
 
+/// Mean Hit@k / MRR / nDCG@k over a case list.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+struct Means {
+    hit_at_k: f64,
+    mrr: f64,
+    ndcg_at_k: f64,
+}
+
+fn means(per_case: &[CaseMetrics]) -> Means {
+    let n = per_case.len().max(1) as f64;
+    Means {
+        hit_at_k: per_case.iter().map(|c| c.hit).sum::<f64>() / n,
+        mrr: per_case.iter().map(|c| c.rr).sum::<f64>() / n,
+        ndcg_at_k: per_case.iter().map(|c| c.ndcg).sum::<f64>() / n,
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SweepRow {
+    weights: Weights,
+    #[serde(flatten)]
+    means: Means,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ModeRow {
+    mode: Mode,
+    #[serde(flatten)]
+    means: Means,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct EvalReport {
     k: usize,
@@ -1433,7 +1939,101 @@ struct EvalReport {
     hit_at_k: f64,
     mrr: f64,
     ndcg_at_k: f64,
+    /// `true` when nDCG used `[cases.graded]` grades (`--graded`).
+    graded: bool,
+    weights: Weights,
+    fetch_k: usize,
+    rrf_k: f64,
     per_case: Vec<CaseMetrics>,
+    /// Only with `--all-modes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modes: Option<Vec<ModeRow>>,
+    /// Only with `--sweep`, best first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sweep: Option<Vec<SweepRow>>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct EvalOptions {
+    ranking: RankingOptions,
+    sweep: bool,
+    graded: bool,
+    all_modes: bool,
+}
+
+/// The weight grid `--sweep` evaluates.
+const SWEEP_DENSE: [f64; 3] = [0.8, 1.0, 1.2];
+const SWEEP_SPARSE: [f64; 4] = [0.6, 0.8, 1.0, 1.2];
+const SWEEP_BM25: [f64; 4] = [0.6, 0.8, 1.0, 1.2];
+
+fn sweep_grid() -> Vec<Weights> {
+    let mut out = Vec::with_capacity(SWEEP_DENSE.len() * SWEEP_SPARSE.len() * SWEEP_BM25.len());
+    for &dense in &SWEEP_DENSE {
+        for &sparse in &SWEEP_SPARSE {
+            for &bm25 in &SWEEP_BM25 {
+                out.push(Weights {
+                    dense,
+                    sparse,
+                    bm25,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Sort sweep rows by nDCG, then MRR, then Hit@k (all descending), then by
+/// weights ascending so equal scores print in a stable order.
+fn sort_sweep(rows: &mut [SweepRow]) {
+    rows.sort_by(|a, b| {
+        b.means
+            .ndcg_at_k
+            .total_cmp(&a.means.ndcg_at_k)
+            .then_with(|| b.means.mrr.total_cmp(&a.means.mrr))
+            .then_with(|| b.means.hit_at_k.total_cmp(&a.means.hit_at_k))
+            .then_with(|| a.weights.dense.total_cmp(&b.weights.dense))
+            .then_with(|| a.weights.sparse.total_cmp(&b.weights.sparse))
+            .then_with(|| a.weights.bm25.total_cmp(&b.weights.bm25))
+    });
+}
+
+/// Score every case under one fusion setting.
+#[allow(clippy::too_many_arguments)]
+fn score_cases(
+    index: &SearchIndex,
+    cases: &[LabelCase],
+    case_ids: &[String],
+    inputs: &[QueryInputs],
+    top_k: usize,
+    mode: Mode,
+    options: RankingOptions,
+    graded: bool,
+) -> Result<Vec<CaseMetrics>> {
+    let mut per_case = Vec::with_capacity(cases.len());
+    for ((case, id), input) in cases.iter().zip(case_ids).zip(inputs) {
+        let (pages, _) = run_query(index, input, &case.query, top_k, mode, options)?;
+        let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
+        let retrieved: Vec<String> = urls.iter().map(|u| normalize_eval_url(u)).collect();
+        let grades = case.grades();
+        let relevant: Vec<String> = grades.iter().map(|(u, _)| u.clone()).collect();
+        per_case.push(CaseMetrics {
+            id: id.clone(),
+            query: case.query.clone(),
+            hit: hit_at_k(&retrieved, &relevant, top_k),
+            rr: mrr(&retrieved, &relevant),
+            ndcg: if graded {
+                ndcg_graded_at_k(&retrieved, &grades, top_k)
+            } else {
+                ndcg_at_k(&retrieved, &relevant, top_k)
+            },
+            first_relevant_rank: retrieved
+                .iter()
+                .position(|u| relevant.contains(u))
+                .map(|p| p + 1),
+            top: urls,
+        });
+    }
+    Ok(per_case)
 }
 
 fn cmd_eval(
@@ -1443,6 +2043,7 @@ fn cmd_eval(
     mode: Mode,
     lane: Option<&str>,
     json: bool,
+    opts: EvalOptions,
 ) -> Result<()> {
     if top_k == 0 {
         bail!("--top-k must be > 0");
@@ -1451,13 +2052,9 @@ fn cmd_eval(
         .with_context(|| format!("reading labels {}", labels.display()))?;
     let set: LabelSet = toml::from_str(&raw)
         .with_context(|| format!("parsing labels {} as TOML", labels.display()))?;
-    if set.cases.is_empty() {
-        bail!("labels file has no [[cases]]");
-    }
-    for (i, c) in set.cases.iter().enumerate() {
-        if c.query.trim().is_empty() || c.relevant.is_empty() {
-            bail!("case {} needs a query and at least one relevant url", i + 1);
-        }
+    validate_label_cases(&set.cases)?;
+    if opts.graded && set.cases.iter().all(|c| c.graded.is_empty()) {
+        eprintln!("warning: --graded given but no case has a [cases.graded] table; nDCG is binary");
     }
 
     let index = load_index(&index_path)?;
@@ -1477,8 +2074,8 @@ fn cmd_eval(
         .map(|(i, c)| c.id.clone().unwrap_or_else(|| format!("case-{}", i + 1)))
         .collect();
     for (case, id) in set.cases.iter().zip(&case_ids) {
-        for url in &case.relevant {
-            if !page_urls.contains(&normalize_eval_url(url)) {
+        for (url, _) in case.grades() {
+            if !page_urls.contains(&url) {
                 eprintln!(
                     "warning: {}: relevant url {:?} is not a page in the index",
                     id, url
@@ -1487,54 +2084,118 @@ fn cmd_eval(
         }
     }
 
-    let runtime = QueryRuntime::new(&index, mode, lane)?;
-
-    let mut per_case = Vec::with_capacity(set.cases.len());
-    for (case, id) in set.cases.iter().zip(case_ids) {
-        let (pages, _) = runtime.run(&index, &case.query, top_k)?;
-        let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
-        let retrieved: Vec<String> = urls.iter().map(|u| normalize_eval_url(u)).collect();
-        let relevant: Vec<String> = case
-            .relevant
-            .iter()
-            .map(|u| normalize_eval_url(u))
-            .collect();
-        per_case.push(CaseMetrics {
-            id,
-            query: case.query.clone(),
-            hit: hit_at_k(&retrieved, &relevant, top_k),
-            rr: mrr(&retrieved, &relevant),
-            ndcg: ndcg_at_k(&retrieved, &relevant, top_k),
-            first_relevant_rank: retrieved
-                .iter()
-                .position(|u| relevant.contains(u))
-                .map(|p| p + 1),
-            top: urls,
-        });
+    // --all-modes needs every arm loaded; hybrid loads them all.
+    let load_mode = if opts.all_modes { Mode::Hybrid } else { mode };
+    let runtime = QueryRuntime::with_options(&index, load_mode, lane, opts.ranking)?;
+    // Queries are embedded once; every setting below re-fuses the same inputs.
+    let mut inputs = Vec::with_capacity(set.cases.len());
+    for case in &set.cases {
+        inputs.push(runtime.inputs(&index, &case.query)?);
     }
-    let n = per_case.len() as f64;
+
+    let per_case = score_cases(
+        &index,
+        &set.cases,
+        &case_ids,
+        &inputs,
+        top_k,
+        mode,
+        opts.ranking,
+        opts.graded,
+    )?;
+    let main = means(&per_case);
+
+    let modes = if opts.all_modes {
+        let mut rows = Vec::new();
+        let mut list = vec![Mode::Hybrid];
+        if !index.manifest.dense.is_empty() {
+            list.push(Mode::Dense);
+        }
+        if index.sparse.is_some() {
+            list.push(Mode::Sparse);
+        }
+        list.push(Mode::Keyword);
+        for m in list {
+            let cases = score_cases(
+                &index,
+                &set.cases,
+                &case_ids,
+                &inputs,
+                top_k,
+                m,
+                opts.ranking,
+                opts.graded,
+            )?;
+            rows.push(ModeRow {
+                mode: m,
+                means: means(&cases),
+            });
+        }
+        Some(rows)
+    } else {
+        None
+    };
+
+    let sweep = if opts.sweep {
+        let mut rows = Vec::new();
+        for w in sweep_grid() {
+            let options = RankingOptions {
+                weights: Some(w),
+                ..opts.ranking
+            };
+            let cases = score_cases(
+                &index,
+                &set.cases,
+                &case_ids,
+                &inputs,
+                top_k,
+                mode,
+                options,
+                opts.graded,
+            )?;
+            rows.push(SweepRow {
+                weights: w,
+                means: means(&cases),
+            });
+        }
+        sort_sweep(&mut rows);
+        Some(rows)
+    } else {
+        None
+    };
+
     let report = EvalReport {
         k: top_k,
         mode,
         cases: per_case.len(),
-        hit_at_k: per_case.iter().map(|c| c.hit).sum::<f64>() / n,
-        mrr: per_case.iter().map(|c| c.rr).sum::<f64>() / n,
-        ndcg_at_k: per_case.iter().map(|c| c.ndcg).sum::<f64>() / n,
+        hit_at_k: main.hit_at_k,
+        mrr: main.mrr,
+        ndcg_at_k: main.ndcg_at_k,
+        graded: opts.graded,
+        weights: opts.ranking.weights.unwrap_or_default(),
+        fetch_k: opts
+            .ranking
+            .fetch_k
+            .unwrap_or_else(|| eddie::search::fetch_k(top_k)),
+        rrf_k: opts.ranking.rrf_k.unwrap_or(eddie::search::RRF_K),
         per_case,
+        modes,
+        sweep,
     };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
+    let ndcg_label = if opts.graded { "ndcg(g)" } else { "ndcg" };
     println!(
-        "\n{:<24} {:>6} {:>6} {:>6}  first relevant",
-        "case", "hit", "rr", "ndcg"
+        "\n{:<24} {:>6} {:>6} {:>7}  first relevant",
+        "case", "hit", "rr", ndcg_label
     );
     println!("{}", "-".repeat(60));
     for c in &report.per_case {
         println!(
-            "{:<24} {:>6.2} {:>6.2} {:>6.2}  {}",
+            "{:<24} {:>6.2} {:>6.2} {:>7.2}  {}",
             truncate_label(&c.id, 24),
             c.hit,
             c.rr,
@@ -1546,15 +2207,68 @@ fn cmd_eval(
     }
     println!("{}", "-".repeat(60));
     println!(
-        "{} cases, mode {}: Hit@{} {:.3}  MRR {:.3}  nDCG@{} {:.3}",
+        "{} cases, mode {}: Hit@{} {:.3}  MRR {:.3}  nDCG@{} {:.3}  (weights {}/{}/{}, fetch_k {}, rrf_k {}{})",
         report.cases,
         report.mode.as_str(),
         report.k,
         report.hit_at_k,
         report.mrr,
         report.k,
-        report.ndcg_at_k
+        report.ndcg_at_k,
+        report.weights.dense,
+        report.weights.sparse,
+        report.weights.bm25,
+        report.fetch_k,
+        report.rrf_k,
+        if opts.graded { ", graded" } else { "" }
     );
+
+    if let Some(rows) = &report.modes {
+        println!(
+            "\n{:<8} {:>7} {:>7} {:>8}",
+            "mode", "hit", "mrr", ndcg_label
+        );
+        println!("{}", "-".repeat(34));
+        for r in rows {
+            println!(
+                "{:<8} {:>7.3} {:>7.3} {:>8.3}",
+                r.mode.as_str(),
+                r.means.hit_at_k,
+                r.means.mrr,
+                r.means.ndcg_at_k
+            );
+        }
+    }
+
+    if let Some(rows) = &report.sweep {
+        println!(
+            "\nweight sweep ({} settings, mode {}, best first)",
+            rows.len(),
+            report.mode.as_str()
+        );
+        println!(
+            "{:>5} {:>6} {:>5} {:>7} {:>7} {:>8}",
+            "dense", "sparse", "bm25", "hit", "mrr", ndcg_label
+        );
+        println!("{}", "-".repeat(44));
+        for r in rows {
+            println!(
+                "{:>5} {:>6} {:>5} {:>7.3} {:>7.3} {:>8.3}",
+                r.weights.dense,
+                r.weights.sparse,
+                r.weights.bm25,
+                r.means.hit_at_k,
+                r.means.mrr,
+                r.means.ndcg_at_k
+            );
+        }
+        if let Some(best) = rows.first() {
+            println!(
+                "\nBest: --weights {},{},{}",
+                best.weights.dense, best.weights.sparse, best.weights.bm25
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1706,6 +2420,7 @@ fn cmd_qa_corpus(
     ollama_temperature: f32,
     qa_seed: Option<u64>,
     qa_heuristics: bool,
+    qa_subject: Option<String>,
 ) -> Result<()> {
     eprintln!("Loading index from {}...", index_path.display());
     let bytes = fs::read(&index_path)
@@ -1722,7 +2437,11 @@ fn cmd_qa_corpus(
             entries: index.qa.clone(),
         }
     } else if qa_heuristics {
-        let built = build_qa_corpus_from_chunks(&index.texts, &index.metadata);
+        let built = build_qa_corpus_from_chunks_with_subject(
+            &index.texts,
+            &index.metadata,
+            qa_subject.as_deref().unwrap_or(eddie::qa::DEFAULT_SUBJECT),
+        );
         eprintln!("Heuristic QA entries: {}", built.entries.len());
         built
     } else {
@@ -1746,6 +2465,7 @@ fn cmd_qa_corpus(
             max_pairs_per_chunk: ollama_max_pairs_per_chunk,
             temperature: ollama_temperature,
             seed: qa_seed,
+            subject: qa_subject.clone(),
             ..Default::default()
         };
         let llm_entries = synthesize_with_ollama_from_chunks(&index.texts, &index.metadata, &cfg)?;
@@ -1944,7 +2664,7 @@ fn run_tuning(
 }
 
 /// Build the index `eddie index` would ship for these parameters (int8
-/// dense lane, BM25), without writing it.
+/// dense lane, BM25, title context on), without writing it.
 fn build_index_in_memory(
     docs: &[Document],
     chunk_size: usize,
@@ -1974,10 +2694,22 @@ fn build_index_in_memory(
     let texts: Vec<String> = all_chunks.iter().map(|c| c.text.clone()).collect();
     let n = texts.len();
     let overlap_words = vec![0u16; n];
+    // Same title/section prefix `eddie index` applies by default, so tune
+    // measures what ships.
+    let prefixes: Vec<String> = all_chunks.iter().map(|c| context_prefix(&c.meta)).collect();
+    let index_texts: Vec<String> = all_chunks
+        .iter()
+        .zip(&prefixes)
+        .map(|(c, p)| with_context(p, &c.text))
+        .collect();
 
     let mut builder = IndexBuilder::new();
     if let Some(enc) = encoder {
-        let inputs: Vec<String> = all_chunks.iter().map(|c| c.embed_text()).collect();
+        let inputs: Vec<String> = all_chunks
+            .iter()
+            .zip(&prefixes)
+            .map(|(c, p)| with_context(p, &c.embed_text()))
+            .collect();
         let refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
         let vectors = embed_texts_with(enc, &refs, TextKind::Document, DEFAULT_BATCH_SIZE)?;
         let dim = enc.dim();
@@ -1986,7 +2718,8 @@ fn build_index_in_memory(
             DenseLane::from_f32(enc.spec().clone(), dim, n, &vectors, Quant::Int8)?,
         )?;
     }
-    builder.add_chunks(metadata, texts, overlap_words)?;
+    builder.add_chunks_indexed(metadata, texts, index_texts, overlap_words)?;
+    builder.title_context(true);
     builder.finish()
 }
 
@@ -2011,7 +2744,7 @@ fn retrieve_chunk_ids(
         sparse: None,
         mode,
         top_k,
-        weights: Weights::default(),
+        ..Query::default()
     };
     let retrieval = retrieve(index, &q)?;
     let pages = group_pages(index, &retrieval.ranked, &query_terms(query), top_k);
@@ -2534,6 +3267,104 @@ mod tests {
         assert_eq!(doc_prefix_tokens(&lane), 0);
         assert_eq!(chunk_budget(&lane, 256).unwrap(), 256);
         assert_eq!(chunk_budget(&lane, 1024).unwrap(), 512);
+    }
+
+    #[test]
+    fn ranking_options_parse_and_validate() {
+        let o = ranking_options(Some("1.2,0.8,0.6"), Some(40), Some(30.0)).unwrap();
+        assert_eq!(
+            o.weights,
+            Some(Weights {
+                dense: 1.2,
+                sparse: 0.8,
+                bm25: 0.6
+            })
+        );
+        assert_eq!(o.fetch_k, Some(40));
+        assert_eq!(o.rrf_k, Some(30.0));
+        assert_eq!(
+            ranking_options(None, None, None).unwrap(),
+            RankingOptions::default()
+        );
+        assert!(ranking_options(Some("1,2"), None, None).is_err());
+        assert!(ranking_options(None, Some(0), None).is_err());
+        assert!(ranking_options(None, None, Some(-1.0)).is_err());
+        assert!(ranking_options(None, None, Some(f64::INFINITY)).is_err());
+    }
+
+    #[test]
+    fn sweep_grid_is_the_documented_48_settings_sorted_by_ndcg_then_mrr() {
+        let grid = sweep_grid();
+        assert_eq!(grid.len(), 48);
+        assert_eq!(
+            grid[0],
+            Weights {
+                dense: 0.8,
+                sparse: 0.6,
+                bm25: 0.6
+            }
+        );
+        let row = |d: f64, ndcg: f64, mrr: f64| SweepRow {
+            weights: Weights {
+                dense: d,
+                sparse: 1.0,
+                bm25: 1.0,
+            },
+            means: Means {
+                hit_at_k: 1.0,
+                mrr,
+                ndcg_at_k: ndcg,
+            },
+        };
+        let mut rows = vec![row(1.2, 0.5, 0.9), row(0.8, 0.7, 0.4), row(1.0, 0.7, 0.6)];
+        sort_sweep(&mut rows);
+        let order: Vec<f64> = rows.iter().map(|r| r.weights.dense).collect();
+        assert_eq!(order, vec![1.0, 0.8, 1.2]);
+    }
+
+    #[test]
+    fn label_cases_accept_graded_tables_and_reject_bad_grades() {
+        let set: LabelSet = toml::from_str(
+            r#"
+[[cases]]
+query = "how long has jason been programming"
+relevant = ["/skills/programming-languages/"]
+[cases.graded]
+"/skills/programming-languages/" = 3
+"/r/" = 1
+
+[[cases]]
+id = "graded-only"
+query = "rust"
+[cases.graded]
+"/Posts/Rust/" = 2
+"#,
+        )
+        .unwrap();
+        validate_label_cases(&set.cases).unwrap();
+        let g = set.cases[0].grades();
+        assert_eq!(
+            g,
+            vec![
+                ("/r".to_string(), 1),
+                ("/skills/programming-languages".to_string(), 3)
+            ]
+        );
+        assert_eq!(set.cases[1].grades(), vec![("/posts/rust".to_string(), 2)]);
+
+        let bad: LabelSet = toml::from_str(
+            r#"
+[[cases]]
+query = "x"
+[cases.graded]
+"/a/" = 4
+"#,
+        )
+        .unwrap();
+        assert!(validate_label_cases(&bad.cases).is_err());
+        let none: LabelSet = toml::from_str("[[cases]]\nquery = \"x\"\n").unwrap();
+        assert!(validate_label_cases(&none.cases).is_err());
+        assert!(validate_label_cases(&[]).is_err());
     }
 
     #[test]

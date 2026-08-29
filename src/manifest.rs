@@ -173,6 +173,11 @@ pub struct Manifest {
     pub sections: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_at: Option<String>,
+    /// Whether the indexed text of every chunk (dense, sparse and BM25
+    /// inputs) was prefixed with the page title and section
+    /// (`crate::index::context_prefix`). Stored texts stay clean either way.
+    #[serde(default)]
+    pub title_context: bool,
 }
 
 impl Manifest {
@@ -187,6 +192,7 @@ impl Manifest {
             bm25: Bm25Params::default(),
             sections: Vec::new(),
             built_at: None,
+            title_context: false,
         }
     }
 
@@ -255,7 +261,9 @@ mod tests {
             vocab_hash: "00".into(),
             terms: 5,
         });
+        m.title_context = true;
         let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"title_context\":true"));
         assert!(json.contains("\"kind\":\"wasm-candle\""));
         assert!(json.contains("\"kind\":\"webgpu-onnx\""));
         assert!(json.contains("\"pooling\":\"last\""));
@@ -263,6 +271,10 @@ mod tests {
         assert_eq!(back, m);
         assert_eq!(back.first_wasm_lane().unwrap().id, "minilm");
         assert_eq!(back.dense_lane("qwen3e").unwrap().dim, 1024);
+        // Older manifests without the field read as "no title context".
+        let legacy: Manifest =
+            serde_json::from_str(r#"{"format":5,"eddie":"0.4.0","chunks":1,"pages":1}"#).unwrap();
+        assert!(!legacy.title_context);
     }
 
     #[test]
