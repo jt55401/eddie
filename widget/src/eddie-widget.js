@@ -844,6 +844,10 @@
     setWorkerState("ready");
     searchable = true;
     manifestInfo = msg.manifest || manifestInfo;
+    const arms = msg.arms || {};
+    host.dataset.arms = Object.keys(arms).filter((k) => arms[k]).join(",");
+    host.dataset.lane = msg.lane || "";
+    host.dataset.runtime = msg.runtime || "";
     showStatus(false);
     hide(consentCard);
     lastDegradedNotice = lib.degradedNotice(msg.arms, msg.degraded);
@@ -1392,7 +1396,17 @@
     run.usage = usage;
     announce(msg.nohit ? "No answer: the site doesn't cover that." : "Answer ready. " + msg.answer);
     if (run.resolveStream) run.resolveStream();
-    console.info("eddie agent", { question: run.question, ttftMs: usage.ttftMs, totalMs: usage.totalMs, tps: usage.tps, sinceAskMs: Math.round(performance.now() - run.started) });
+    console.info("eddie agent " + JSON.stringify({
+      question: run.question,
+      model: agentModel ? agentModel.id : null,
+      evidence: run.evidence.length,
+      citations: (msg.citations || []).length,
+      nohit: !!msg.nohit,
+      ttftMs: usage.ttftMs,
+      totalMs: usage.totalMs,
+      tps: usage.tps,
+      sinceAskMs: Math.round(performance.now() - run.started),
+    }));
   }
 
   function renderAnswerText(text, citations) {
