@@ -54,6 +54,7 @@
   let lastAnnouncedQuarter = -1;
   let manifestInfo = null;
   let searchTimer = null;
+  let lastSearchedQuery = "";
 
   let agentInfo = null; // null (unknown) | false | { maxBufferSize, hasF16 }
   let agentWorker = null;
@@ -621,7 +622,13 @@
       e.preventDefault();
       const q = input.value.trim();
       if (e.shiftKey) {
-        if (q && !askBtn.hidden) askQuestion(q);
+        if (q && !askBtn.hidden) {
+          // Flush the pending search-as-you-type run so it neither races the
+          // answer nor fires 200 ms later and cancels it.
+          clearTimeout(searchTimer);
+          if (lastSearchedQuery !== q) doSearch(q, true);
+          askQuestion(q);
+        }
         return;
       }
       if (selectedIndex >= 0 && selectedIndex < currentResults.length) {
@@ -910,7 +917,10 @@
 
   async function doSearch(query, explicit) {
     if (!searchable || !worker) return;
-    if (agentRun && !agentRun.done) abortAgent("new search");
+    // A different query cancels a running answer; re-searching the question
+    // being answered (a late debounce, a re-run after init) does not.
+    if (agentRun && !agentRun.done && query !== agentRun.question) abortAgent("new search");
+    lastSearchedQuery = query;
     const requestId = ++requestSeq;
     activeSearchId = requestId;
     pending.set(requestId, {
@@ -1076,6 +1086,7 @@
   }
 
   function clearResults() {
+    lastSearchedQuery = "";
     currentResults = [];
     activeSearchId = 0;
     setSelected(-1);
@@ -1443,6 +1454,7 @@
   function abortAgent(reason) {
     const run = agentRun;
     if (!run || run.done) return;
+    console.debug("eddie agent abort " + reason + " " + run.requestId);
     run.aborted = true;
     run.done = true;
     if (agentWorker) agentWorker.postMessage({ type: "abort", requestId: run.requestId });
@@ -1485,6 +1497,7 @@
     backdrop.classList.add("sa-open");
     trigger.style.display = "none";
     input.value = "";
+    liveRegion.textContent = "";
     clearResults();
     hide(answerCard);
     ensureWorker();
