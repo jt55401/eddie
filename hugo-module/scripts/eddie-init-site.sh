@@ -89,6 +89,8 @@ EDDIE_BATCH_SIZE=32
 EDDIE_CHUNK_SIZE=256
 EDDIE_OVERLAP=32
 EDDIE_CHUNK_STRATEGY=heading
+# Per-page summary chunk (title + description + headings); 0 disables it.
+EDDIE_SUMMARY_LANE=1
 
 # Optional embedded sections (1 = enabled, 0 = disabled)
 EDDIE_QA=0
@@ -166,6 +168,7 @@ BATCH_SIZE="${EDDIE_BATCH_SIZE:-32}"
 CHUNK_SIZE="${EDDIE_CHUNK_SIZE:-256}"
 OVERLAP="${EDDIE_OVERLAP:-32}"
 CHUNK_STRATEGY="${EDDIE_CHUNK_STRATEGY:-heading}"
+SUMMARY_LANE="${EDDIE_SUMMARY_LANE:-1}"
 
 mkdir -p "$(dirname "$ROOT_DIR/$OUTPUT_PATH")"
 
@@ -178,6 +181,10 @@ CMD=(
   --overlap "$OVERLAP"
   --chunk-strategy "$CHUNK_STRATEGY"
 )
+
+if [[ "$SUMMARY_LANE" != "1" ]]; then
+  CMD+=(--no-summary-lane)
+fi
 
 if [[ -n "$PRESET" ]]; then
   CMD+=(--preset "$PRESET")

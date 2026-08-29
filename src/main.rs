@@ -140,9 +140,14 @@ enum Command {
         #[arg(long)]
         coarse_overlap: Option<usize>,
 
-        /// Add a lightweight summary lane (RAPTOR-style coarse summaries).
-        #[arg(long, default_value_t = false)]
+        /// Kept for compatibility: the summary chunk (title, description,
+        /// headings) is on by default since 0.4.1; see --no-summary-lane.
+        #[arg(long, default_value_t = false, hide = true)]
         summary_lane: bool,
+
+        /// Skip the per-page summary chunk (title + description + headings).
+        #[arg(long, default_value_t = false)]
+        no_summary_lane: bool,
 
         /// Include QA entries in the index as an embedded section.
         #[arg(long, default_value_t = false)]
@@ -561,6 +566,7 @@ fn main() -> Result<()> {
             coarse_chunk_size,
             coarse_overlap,
             summary_lane,
+            no_summary_lane,
             qa,
             claims,
             qa_heuristics,
@@ -597,7 +603,7 @@ fn main() -> Result<()> {
             chunk_strategy,
             coarse_chunk_size,
             coarse_overlap,
-            summary_lane,
+            summary_lane || !no_summary_lane,
             qa,
             claims,
             qa_heuristics,
