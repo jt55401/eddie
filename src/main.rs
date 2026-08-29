@@ -334,6 +334,14 @@ enum Command {
         /// Sampling temperature for Ollama synthesis.
         #[arg(long, default_value = "0.2")]
         ollama_temperature: f32,
+
+        /// Seed passed to the Ollama model for reproducible synthesis.
+        #[arg(long)]
+        qa_seed: Option<u64>,
+
+        /// Also run the regex heuristics that guess QA pairs from prose (off by default; tuned for resume-style pages).
+        #[arg(long, default_value_t = false)]
+        qa_heuristics: bool,
     },
 
     /// Build a factual claims corpus from an existing search index.
@@ -349,6 +357,10 @@ enum Command {
         /// Optional claims edits file to apply.
         #[arg(long)]
         claims_edits: Option<PathBuf>,
+
+        /// Also run the regex heuristics that extract claims from prose (off by default).
+        #[arg(long, default_value_t = false)]
+        claims_heuristics: bool,
     },
 }
 
@@ -551,6 +563,8 @@ fn main() -> Result<()> {
             ollama_max_chunks,
             ollama_max_pairs_per_chunk,
             ollama_temperature,
+            qa_seed,
+            qa_heuristics,
         } => cmd_qa_corpus(
             index,
             output,
@@ -559,12 +573,15 @@ fn main() -> Result<()> {
             ollama_max_chunks,
             ollama_max_pairs_per_chunk,
             ollama_temperature,
+            qa_seed,
+            qa_heuristics,
         ),
         Command::ClaimsCorpus {
             index,
             output,
             claims_edits,
-        } => cmd_claims_corpus(index, output, claims_edits),
+            claims_heuristics,
+        } => cmd_claims_corpus(index, output, claims_edits, claims_heuristics),
     }
 }
 
@@ -926,7 +943,6 @@ fn cmd_index(
         builder.add_dense_lane(
             SCOPE_CHUNKS,
             DenseLane::from_f32(lane.spec().clone(), dim, n, &vectors, Quant::Int8)?,
-        corpus.dedup();
         )?;
     }
     if let (Some(enc), Some((sparse_docs, sparse_spec))) = (&sparse_encoder, sparse_section) {
@@ -1573,6 +1589,13 @@ fn normalize_eval_url(url: &str) -> String {
     let trimmed = s.trim_end_matches('/');
     let mut out = String::with_capacity(trimmed.len() + 1);
     if !trimmed.starts_with('/') {
+#[allow(clippy::too_many_arguments)]
+fn cmd_tune(
+    content_dir: PathBuf,
+    cms: Cms,
+    eval: Option<PathBuf>,
+    save_eval: Option<PathBuf>,
+    interactive: bool,
         out.push('/');
     }
     out.push_str(trimmed);
@@ -1672,6 +1695,7 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
     match cms {
         Cms::Hugo => Box::new(HugoParser),
         Cms::Astro => Box::new(AstroParser),
+#[allow(clippy::too_many_arguments)]
         Cms::Docusaurus => Box::new(DocusaurusParser),
         Cms::Mkdocs => Box::new(MkDocsParser),
         Cms::Eleventy => Box::new(EleventyParser),
@@ -1680,11 +1704,16 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
 }
 
 fn cmd_qa_corpus(
+    qa_seed: Option<u64>,
+    qa_heuristics: bool,
     index_path: PathBuf,
     output: PathBuf,
     ollama_model: Option<String>,
     ollama_url: String,
     ollama_max_chunks: usize,
+    if index.texts.is_empty() {
+        bail!("index does not contain chunk texts. rebuild index with current eddie first");
+    }
     ollama_max_pairs_per_chunk: usize,
     ollama_temperature: f32,
 ) -> Result<()> {
@@ -1696,37 +1725,40 @@ fn cmd_qa_corpus(
     let mut corpus = if !index.qa.is_empty() {
         eprintln!("Using embedded QA section from index...");
         QaCorpus {
+    } else {
+        if ollama_model.is_none() {
+            eprintln!(
+                "warning: the index has no qa section; without --qa-heuristics or --ollama-model the corpus will be empty"
+            );
+        }
+        QaCorpus {
+            version: 1,
+            entries: Vec::new(),
+        }
             version: 1,
             entries: index.qa.clone(),
         }
-    } else {
-        if index.texts.is_empty() {
-            bail!(
-                "index does not contain chunk texts (v2 index). rebuild index with current eddie first"
-            );
-        }
+    } else if qa_heuristics {
         let built = build_qa_corpus_from_chunks(&index.texts, &index.metadata);
         eprintln!("Heuristic QA entries: {}", built.entries.len());
         built
     };
 
     if let Some(model) = ollama_model {
-        if index.texts.is_empty() {
-            bail!("index does not contain chunk texts required for synthesis");
-        }
+            seed: qa_seed,
         eprintln!("Running Ollama synthesis with model {}...", model);
         let cfg = OllamaConfig {
             model,
             endpoint: ollama_url,
             max_chunks: ollama_max_chunks,
             max_pairs_per_chunk: ollama_max_pairs_per_chunk,
+    corpus.dedup();
             temperature: ollama_temperature,
             ..Default::default()
         };
         let llm_entries = synthesize_with_ollama_from_chunks(&index.texts, &index.metadata, &cfg)?;
         eprintln!("Ollama QA entries: {}", llm_entries.len());
         corpus.entries.extend(llm_entries);
-        corpus.dedup();
     }
 
     let json = serde_json::to_string_pretty(&corpus)?;
@@ -1738,11 +1770,15 @@ fn cmd_qa_corpus(
         output.display()
     );
 
+    claims_heuristics: bool,
     Ok(())
 }
 
 fn cmd_claims_corpus(
     index_path: PathBuf,
+    if index.texts.is_empty() {
+        bail!("index does not contain chunk texts. rebuild index with current eddie first");
+    }
     output: PathBuf,
     claims_edits: Option<PathBuf>,
 ) -> Result<()> {
@@ -1750,18 +1786,27 @@ fn cmd_claims_corpus(
     let bytes = fs::read(&index_path)
         .with_context(|| format!("opening index file {}", index_path.display()))?;
     let index = SearchIndex::from_bytes(&bytes)?;
+    } else if claims_heuristics {
+        let built = build_claim_corpus_from_chunks(&index.texts, &index.metadata);
+        eprintln!("Heuristic claims: {}", built.claims.len());
+        built
 
     let mut corpus = if !index.claims.is_empty() {
         eprintln!("Using embedded claims section from index...");
-        eddie::claims::ClaimCorpus {
+        ClaimCorpus {
             version: 1,
             claims: index.claims.clone(),
         }
     } else {
-        if index.texts.is_empty() {
-            bail!("index does not contain chunk texts. rebuild index with current eddie first");
+        if claims_edits.is_none() {
+            eprintln!(
+                "warning: the index has no claims section; without --claims-heuristics or --claims-edits the corpus will be empty"
+            );
         }
-        build_claim_corpus_from_chunks(&index.texts, &index.metadata)
+        ClaimCorpus {
+            version: 1,
+            claims: Vec::new(),
+        }
     };
     if let Some(path) = claims_edits {
         let raw = fs::read_to_string(&path)
