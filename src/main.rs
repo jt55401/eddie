@@ -34,8 +34,8 @@ use eddie::index::{
 use eddie::manifest::{DenseSpec, Quant, RuntimeSpec, SparseSpec, SparseTerm};
 use eddie::models;
 use eddie::parse::{
-    AstroParser, ContentParser, DocusaurusParser, EleventyParser, HtmlParser, HugoParser,
-    JekyllParser, MkDocsParser, parse_content_dir, parse_content_dir_report,
+    AstroParser, ContentParser, DocusaurusParser, EleventyParser, HtmlOptions, HtmlParser,
+    HugoParser, JekyllParser, MkDocsParser, parse_content_dir, parse_content_dir_report,
 };
 use eddie::qa::{
     OllamaConfig, OpenRouterConfig, QaCorpus, QaEntry, build_qa_corpus_from_chunks_with_subject,
@@ -72,6 +72,10 @@ enum Command {
         /// CMS parser profile used to parse content files.
         #[arg(long, default_value = "hugo")]
         cms: Cms,
+
+        /// With --cms html, also index pages whose <meta name="robots"> says noindex.
+        #[arg(long, default_value_t = false)]
+        include_noindex: bool,
 
         /// Output path for the index file.
         #[arg(long, default_value = "index.ed")]
@@ -240,7 +244,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         explain: bool,
 
-        /// RRF weights as dense,sparse,bm25 (default 1,1,0.8).
+        /// RRF weights as dense,sparse,bm25 (default 1.2,0.8,0.6).
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
@@ -290,7 +294,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
 
-        /// RRF weights as dense,sparse,bm25 (default 1,1,0.8).
+        /// RRF weights as dense,sparse,bm25 (default 1.2,0.8,0.6).
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
@@ -541,6 +545,7 @@ fn main() -> Result<()> {
         Command::Index {
             content_dir,
             cms,
+            include_noindex,
             output,
             dense_model,
             model,
@@ -575,6 +580,7 @@ fn main() -> Result<()> {
         } => cmd_index(
             content_dir,
             cms,
+            include_noindex,
             output,
             &resolve_index_models(
                 preset,
@@ -726,6 +732,7 @@ fn main() -> Result<()> {
 fn cmd_index(
     content_dir: PathBuf,
     cms: Cms,
+    include_noindex: bool,
     output: PathBuf,
     model_opts: &IndexModelOptions,
     chunk_size: usize,
@@ -787,7 +794,7 @@ fn cmd_index(
         content_dir.display(),
         cms.as_str()
     );
-    let parser = parser_for(cms);
+    let parser = parser_for_with(cms, include_noindex);
     let report = parse_content_dir_report(&content_dir, parser.as_ref(), false)?;
     let docs = report.docs;
     eprintln!(
@@ -2404,6 +2411,10 @@ fn cmd_tune(
 }
 
 fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
+    parser_for_with(cms, false)
+}
+
+fn parser_for_with(cms: Cms, include_noindex: bool) -> Box<dyn ContentParser> {
     match cms {
         Cms::Hugo => Box::new(HugoParser),
         Cms::Astro => Box::new(AstroParser),
@@ -2411,9 +2422,7 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
         Cms::Mkdocs => Box::new(MkDocsParser),
         Cms::Eleventy => Box::new(EleventyParser),
         Cms::Jekyll => Box::new(JekyllParser),
-        // `--include-noindex` isn't wired up as a CLI flag yet (HtmlOptions
-        // supports it at the library level); noindex pages are skipped.
-        Cms::Html => Box::new(HtmlParser),
+        Cms::Html => Box::new(HtmlParser::with_options(HtmlOptions { include_noindex })),
     }
 }
 

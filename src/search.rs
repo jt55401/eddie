@@ -74,9 +74,9 @@ pub struct Weights {
 impl Default for Weights {
     fn default() -> Self {
         Self {
-            dense: 1.0,
-            sparse: 1.0,
-            bm25: 0.8,
+            dense: 1.2,
+            sparse: 0.8,
+            bm25: 0.6,
         }
     }
 }
@@ -1032,8 +1032,9 @@ mod tests {
         assert!(!r.arms.dense && !r.arms.sparse && r.arms.bm25);
         assert_eq!(r.degraded.len(), 2);
         assert!(!r.ranked.is_empty());
-        // BM25 alone is weighted 1.0 when sparse did not run.
-        assert!((r.ranked[0].score - 1.0 / (RRF_K + 1.0)).abs() < 1e-12);
+        // BM25 alone takes max(bm25, sparse) weight when sparse did not run.
+        let w = q.weights.bm25.max(q.weights.sparse);
+        assert!((r.ranked[0].score - w / (RRF_K + 1.0)).abs() < 1e-12);
 
         q.mode = Mode::Keyword;
         let r = retrieve(&index, &q).unwrap();
@@ -1104,13 +1105,14 @@ mod tests {
             r.degraded,
             vec!["sparse: query has no terms in the index vocabulary".to_string()]
         );
-        // BM25 stands in at weight 1.0, exactly as when the tokenizer is missing.
+        // BM25 stands in at max(bm25, sparse) weight, exactly as when the tokenizer is missing.
         let bm25_only = r
             .ranked
             .iter()
             .find(|c| c.bm25_rank.is_some() && c.dense_rank.is_none())
             .expect("a bm25-only chunk");
-        let expected = 1.0 / (RRF_K + bm25_only.bm25_rank.unwrap() as f64);
+        let w = q.weights.bm25.max(q.weights.sparse);
+        let expected = w / (RRF_K + bm25_only.bm25_rank.unwrap() as f64);
         assert!((bm25_only.score - expected).abs() < 1e-12);
         q.sparse = None;
         let r2 = retrieve(&index, &q).unwrap();
