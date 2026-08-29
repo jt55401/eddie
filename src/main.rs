@@ -42,7 +42,10 @@ use eddie::qa::{
 use eddie::search::{
     Mode, PageResult, Query, Retrieval, Weights, group_pages, query_terms, retrieve,
 };
-use eddie::sparse::{SparseDocEncoder, SparseOptions, sparse_query_terms};
+use eddie::sparse::{
+    SparseDocEncoder, SparseOptions, sparse_query_terms, sparse_tokenizer_from_bytes,
+    tokenizer_json_sha256,
+};
 
 const DEFAULT_MODEL: &str = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1";
 
@@ -1064,8 +1067,11 @@ fn lane_list(index: &SearchIndex) -> String {
 }
 
 /// Fetch the sparse arm's `tokenizer.json` from HuggingFace (pinned to the
-/// manifest revision). Returns `None`, with a warning, when it cannot be
-/// loaded so the search degrades instead of failing.
+/// manifest revision), verify its SHA-256 against the manifest `vocab_hash`
+/// and prepare it like the document side (no padding, truncation at 512).
+/// Returns `None`, with a warning, when it cannot be loaded or does not
+/// match, so the search degrades instead of failing or scoring against the
+/// wrong vocabulary.
 fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
     let spec = index.manifest.sparse.as_ref()?;
     let fetch = || -> Result<tokenizers::Tokenizer> {
@@ -1074,7 +1080,18 @@ fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
         let path = repo
             .get("tokenizer.json")
             .with_context(|| format!("downloading tokenizer.json from {}", spec.tokenizer))?;
-        tokenizers::Tokenizer::from_file(&path).map_err(|e| anyhow::anyhow!("{}", e))
+        let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let actual = tokenizer_json_sha256(&bytes);
+        if !actual.eq_ignore_ascii_case(&spec.vocab_hash) {
+            bail!(
+                "tokenizer.json from {} (revision {}) has sha256 {} but the index was built with vocab_hash {}; its token ids would not match the sparse postings",
+                spec.tokenizer,
+                spec.revision.as_deref().unwrap_or("main"),
+                actual,
+                spec.vocab_hash
+            );
+        }
+        sparse_tokenizer_from_bytes(&bytes, eddie::sparse::DEFAULT_MAX_SEQ_LEN)
     };
     match fetch() {
         Ok(t) => Some(t),
