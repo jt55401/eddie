@@ -47,3 +47,12 @@ test("cacheKey and timeouts", () => {
   assert.equal(u.timeoutForFile("config.json"), 60000);
   assert.equal(u.isWeightsFile("tokenizer.json"), false);
 });
+
+test("cacheKeyFromUrl inverts hfFileUrl and rejects other hosts", () => {
+  const url = u.hfFileUrl("onnx-community/Qwen3-Embedding-0.6B-ONNX", "main", "onnx/model_q4.onnx");
+  assert.equal(u.cacheKeyFromUrl(url), "onnx-community/Qwen3-Embedding-0.6B-ONNX@main/onnx/model_q4.onnx");
+  assert.equal(u.cacheKeyFromUrl(u.hfFileUrl("org/repo", "abc", "a b.json") + "?download=true"), "org/repo@abc/a b.json");
+  assert.equal(u.cacheKeyFromUrl("https://cdn.jsdelivr.net/npm/x/model.onnx"), null);
+  assert.equal(u.cacheKeyFromUrl("/models/org/repo/config.json"), null);
+  assert.equal(u.cacheKeyFromUrl(null), null);
+});

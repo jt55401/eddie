@@ -81,7 +81,9 @@ its state on that element for page CSS and tests:
 4. Sparse lane: the manifest's `tokenizer.json` is fetched the same way and
    its SHA-256 is checked against `vocab_hash` before `init_sparse_tokenizer`.
 5. WebGPU lanes import transformers.js from jsDelivr and embed queries in the
-   worker; the vector is passed to `search` together with the lane id.
+   worker; the vector is passed to `search` together with the lane id. Its
+   ONNX files go into the same IndexedDB store (`env.customCache`), keyed
+   like the wasm lane files.
 6. A lane that fails is reported once in `degraded`; search continues with
    the remaining arms and the widget shows a "keyword-only" notice. A trapped
    WASM panic is fatal: the worker reports it and the widget offers Retry,

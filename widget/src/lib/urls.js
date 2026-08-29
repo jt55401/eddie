@@ -63,6 +63,15 @@
     return `${repo}@${revision || "main"}/${file}`;
   }
 
+  const HF_RESOLVE_RE = /^https:\/\/huggingface\.co\/([^/]+\/[^/]+)\/resolve\/([^/]+)\/([^?#]+)/;
+
+  /** The `cacheKey` of an `hfFileUrl`-shaped URL, or null for any other URL. */
+  function cacheKeyFromUrl(url) {
+    const m = HF_RESOLVE_RE.exec(String(url || ""));
+    if (!m) return null;
+    return cacheKey(m[1], decodeURIComponent(m[2]), m[3].split("/").map(decodeURIComponent).join("/"));
+  }
+
   function isWeightsFile(file) {
     return /\.(safetensors|onnx|onnx_data|bin|data|pt|gguf)$/i.test(String(file));
   }
@@ -80,6 +89,7 @@
     assetUrl,
     hfFileUrl,
     cacheKey,
+    cacheKeyFromUrl,
     isWeightsFile,
     timeoutForFile,
   };

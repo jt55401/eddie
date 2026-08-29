@@ -293,6 +293,13 @@ async function loadWebGpuLane(lane) {
   const runtime = lane.runtime;
   postStatus("loading_model", { lane: laneSummary(lane), file: "transformers.js" });
   const tf = await import(TRANSFORMERS_URL);
+  if (state.db && tf.env) {
+    // Keep the ONNX files in the same IndexedDB store as the wasm lanes: the
+    // Cache API rejects multi-hundred-MB entries on some profiles, and one
+    // store means one eviction policy (evictStaleFiles) and one consent check.
+    tf.env.useCustomCache = true;
+    tf.env.customCache = transformersCache();
+  }
   const dtype = lib.pickDtype(runtime, state.gpu && state.gpu.hasF16);
   let last = 0;
   const extractor = await tf.pipeline("feature-extraction", runtime.repo, {
@@ -554,12 +561,37 @@ const idbDelete = (key) => idbRequest(IDB_FILES, "readwrite", (s) => s.delete(ke
 const idbMetaGet = (key) => idbRequest(IDB_META, "readonly", (s) => s.get(key));
 const idbMetaPut = (key, value) => idbRequest(IDB_META, "readwrite", (s) => s.put(value, key));
 
+/**
+ * transformers.js cache (`env.customCache`) over the model-file store.
+ * transformers.js calls `match`/`put` with string keys: the HuggingFace URL
+ * for remote files (mapped onto the repo@revision/file scheme) or a local
+ * model path (never stored, so `match` misses and the URL key is tried next).
+ */
+function transformersCache() {
+  const keyOf = (req) => {
+    const url = typeof req === "string" ? req : req && req.url ? req.url : String(req);
+    return lib.cacheKeyFromUrl(url) || "url:" + url;
+  };
+  return {
+    async match(req) {
+      const stored = await idbGet(keyOf(req));
+      if (!stored) return undefined;
+      const size = typeof stored.size === "number" ? stored.size : stored.byteLength;
+      return new Response(stored, { headers: { "Content-Length": String(size) } });
+    },
+    async put(req, response) {
+      const blob = await response.blob();
+      await idbPut(keyOf(req), blob);
+    },
+  };
+}
+
 /** Delete cached files that belong to models this index no longer references. */
 async function evictStaleFiles() {
   if (!state.db || !state.manifest) return;
-  const keep = [];
+  const keep = ["url:"];
   for (const lane of state.manifest.dense || []) {
-    if (lib.isWasmLane(lane)) keep.push(`${lib.laneRepo(lane)}@${lib.laneRevision(lane)}/`);
+    keep.push(`${lib.laneRepo(lane)}@${lib.laneRevision(lane)}/`);
   }
   if (state.manifest.sparse) {
     const s = state.manifest.sparse;
