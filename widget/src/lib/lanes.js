@@ -65,8 +65,31 @@
     return files.length ? files.slice() : DEFAULT_WASM_FILES.slice();
   }
 
+  function isWeightsFile(file) {
+    return /\.(safetensors|bin|pt|gguf|onnx)$/i.test(String(file));
+  }
+
   /**
-   * Ordered dense-lane candidates for this browser.
+   * Why the WASM loader (init_dense_wasm) cannot run a wasm-candle lane, or
+   * null when it can: it accepts BERT-family lanes with config.json,
+   * tokenizer.json and exactly one unsharded model.safetensors.
+   */
+  function wasmLaneProblem(lane) {
+    if (!isWasmLane(lane)) return "not a wasm-candle lane";
+    if (lane.family && lane.family !== "bert") return `family ${lane.family} is not supported in WASM`;
+    const files = laneFiles(lane);
+    for (const need of ["config.json", "tokenizer.json"]) {
+      if (!files.includes(need)) return `runtime.files lacks ${need}`;
+    }
+    const weights = files.filter(isWeightsFile);
+    if (weights.length === 1 && weights[0] === "model.safetensors") return null;
+    if (weights.length === 0) return "runtime.files lists no weights file";
+    return `WASM needs a single model.safetensors, not ${weights.join(", ")}`;
+  }
+
+  /**
+   * Ordered dense-lane candidates for this browser, plus the lanes skipped
+   * because this runtime cannot load them (`skipped: [{lane, reason}]`).
    * `denseRuntime`: "auto" | "wasm" | "webgpu"; `hasWebGpu`: an adapter was obtained.
    */
   function chooseDenseLanes(manifest, opts) {
@@ -74,9 +97,14 @@
     const runtime = (opts && opts.denseRuntime) || "auto";
     const hasWebGpu = !!(opts && opts.hasWebGpu);
     const webgpu = lanes.filter(isWebGpuLane);
-    const wasm = lanes.filter(isWasmLane);
+    const skipped = [];
+    const wasm = lanes.filter(isWasmLane).filter((lane) => {
+      const problem = wasmLaneProblem(lane);
+      if (problem) skipped.push({ lane, reason: problem });
+      return !problem;
+    });
     if (lanes.length === 0) {
-      return { candidates: [], reason: "index has no dense lane" };
+      return { candidates: [], skipped, reason: "index has no dense lane" };
     }
     let candidates;
     if (runtime === "wasm") {
@@ -88,13 +116,13 @@
     }
     let reason = null;
     if (candidates.length === 0) {
-      if (runtime === "wasm") reason = "index has no wasm-candle lane";
+      if (runtime === "wasm") reason = skipped.length ? "no wasm-candle lane the WASM loader can run" : "index has no wasm-candle lane";
       else if (!hasWebGpu && webgpu.length && !wasm.length) reason = "no WebGPU adapter";
       else if (runtime === "webgpu" && !hasWebGpu) reason = "no WebGPU adapter";
       else if (runtime === "webgpu") reason = "index has no webgpu-onnx lane";
       else reason = "no runnable dense lane";
     }
-    return { candidates, reason };
+    return { candidates, skipped, reason };
   }
 
   /** transformers.js dtype for a webgpu-onnx lane on this adapter. */
@@ -169,6 +197,8 @@
     laneRepo,
     laneRevision,
     laneFiles,
+    isWeightsFile,
+    wasmLaneProblem,
     chooseDenseLanes,
     pickDtype,
     laneDownloadBytes,

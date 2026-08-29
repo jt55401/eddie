@@ -82,3 +82,21 @@ test("degraded notice names the missing arm", () => {
   assert.match(L.degradedNotice({ dense: true, sparse: false, bm25: true }, ["sparse: no query terms (tokenizer not loaded)"]), /sparse/);
   assert.deepEqual(L.filterDesignDegraded(["dense: index has no dense lane", "sparse: x"]), ["sparse: x"]);
 });
+
+test("wasm lanes the WASM loader cannot run are skipped with a reason", () => {
+  const bin = Object.assign({}, minilm, { id: "bin", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "pytorch_model.bin"] } });
+  const sharded = Object.assign({}, minilm, { id: "sharded", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"] } });
+  const xlmr = Object.assign({}, minilm, { id: "xlmr", family: "xlm-roberta" });
+  const noTok = Object.assign({}, minilm, { id: "notok", runtime: { kind: "wasm-candle", files: ["config.json", "model.safetensors"] } });
+  assert.equal(L.wasmLaneProblem(minilm), null);
+  assert.match(L.wasmLaneProblem(bin), /single model\.safetensors, not pytorch_model\.bin/);
+  assert.match(L.wasmLaneProblem(sharded), /model-00001-of-00002\.safetensors/);
+  assert.match(L.wasmLaneProblem(xlmr), /xlm-roberta/);
+  assert.match(L.wasmLaneProblem(noTok), /tokenizer\.json/);
+  const choice = L.chooseDenseLanes({ dense: [bin, sharded, minilm] }, { denseRuntime: "auto", hasWebGpu: false });
+  assert.deepEqual(choice.candidates.map((l) => l.id), ["minilm"]);
+  assert.deepEqual(choice.skipped.map((s) => s.lane.id), ["bin", "sharded"]);
+  const none = L.chooseDenseLanes({ dense: [bin] }, { denseRuntime: "wasm" });
+  assert.equal(none.candidates.length, 0);
+  assert.match(none.reason, /WASM loader/);
+});

@@ -85,7 +85,11 @@ its state on that element for page CSS and tests:
    ONNX files go into the same IndexedDB store (`env.customCache`), keyed
    like the wasm lane files.
 6. A lane that fails is reported once in `degraded`; search continues with
-   the remaining arms and the widget shows a "keyword-only" notice. A trapped
+   the remaining arms and the widget shows a "keyword-only" notice. A
+   wasm-candle lane the WASM loader cannot run (non-BERT family, sharded
+   safetensors or `pytorch_model.bin` weights) is skipped with a note and
+   the next lane is tried. A WebGPU lane whose vector is non-finite degrades
+   that query to the other arms. A trapped
    WASM panic is fatal: the worker reports it and the widget offers Retry,
    which starts a fresh worker.
 7. "Ask" (button or Shift+Enter) appears only when `data-agent-mode` is not

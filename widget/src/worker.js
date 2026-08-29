@@ -206,6 +206,10 @@ async function ensureGpu() {
   });
   state.candidates = choice.candidates;
   state.candidateReason = choice.reason;
+  for (const { lane, reason } of choice.skipped) {
+    console.warn(`eddie: dense lane ${lane.id} skipped: ${reason}`);
+    state.degraded.push(`dense: lane ${lane.id} skipped: ${reason}`);
+  }
 }
 
 async function ensureSparse() {
@@ -330,6 +334,11 @@ async function loadWebGpuLane(lane) {
     if (data.length !== lane.dim) {
       throw new Error(`lane ${lane.id}: model produced ${data.length}-d vectors but the index stores ${lane.dim}-d`);
     }
+    for (let i = 0; i < data.length; i++) {
+      if (!Number.isFinite(data[i])) {
+        throw new Error(`lane ${lane.id}: model produced a non-finite value at dimension ${i}`);
+      }
+    }
     return data;
   };
   await embed("warm up");
@@ -391,11 +400,21 @@ function webGpuMarker(lane, dtype) {
 
 // -- queries ------------------------------------------------------------
 
+/**
+ * Query vector from the WebGPU lane, or nothing (the WASM lane embeds inside
+ * search()). An embedding failure degrades the dense arm for this query
+ * instead of failing the search; `note` carries the reason.
+ */
 async function queryVector(query, mode) {
-  if (!state.dense || state.dense.kind !== "webgpu") return { laneId: null, vec: null };
-  if (mode !== "hybrid" && mode !== "dense") return { laneId: null, vec: null };
-  const vec = await state.dense.embed(query);
-  return { laneId: state.dense.lane.id, vec };
+  if (!state.dense || state.dense.kind !== "webgpu") return { laneId: null, vec: null, note: null };
+  if (mode !== "hybrid" && mode !== "dense") return { laneId: null, vec: null, note: null };
+  try {
+    const vec = await state.dense.embed(query);
+    return { laneId: state.dense.lane.id, vec, note: null };
+  } catch (err) {
+    console.warn(`eddie: dense lane ${state.dense.lane.id} query embedding failed`, err);
+    return { laneId: null, vec: null, note: `dense: embedding failed for lane ${state.dense.lane.id}: ${describe(err)}` };
+  }
 }
 
 async function handleSearch(msg) {
@@ -406,8 +425,9 @@ async function handleSearch(msg) {
     if (!query) throw new Error("search: empty query");
     const mode = msg.mode || "hybrid";
     const topK = Number(msg.topK) > 0 ? Number(msg.topK) : 8;
-    const { laneId, vec } = await queryVector(query, mode);
+    const { laneId, vec, note } = await queryVector(query, mode);
     const res = JSON.parse(wasm_bindgen.search(query, topK, mode, laneId, vec));
+    if (note) res.degraded = (res.degraded || []).concat([note]);
     const results = res.results || [];
     if (msg.evidence) {
       for (const r of results) {
@@ -419,7 +439,7 @@ async function handleSearch(msg) {
       }
     }
     let qa = undefined;
-    if (msg.qa && Number(msg.qa) > 0 && hasSection("qa")) {
+    if (msg.qa && Number(msg.qa) > 0 && hasSection("qa") && (vec || !laneId)) {
       qa = JSON.parse(wasm_bindgen.qa_lookup(query, laneId, vec, Number(msg.qa)));
     }
     self.postMessage({
