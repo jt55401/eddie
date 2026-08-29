@@ -52,6 +52,7 @@ echo "==> Generating precompressed assets (.br/.gz)..."
 compress_asset "$PROJECT_ROOT/dist/eddie.wasm"
 compress_asset "$PROJECT_ROOT/dist/eddie-wasm.js"
 compress_asset "$PROJECT_ROOT/dist/eddie-worker.js"
+compress_asset "$PROJECT_ROOT/dist/eddie-agent-worker.js"
 compress_asset "$PROJECT_ROOT/dist/eddie-widget.js"
 
 # 2. Copy dist/ into hugo-module/static/eddie/
@@ -67,6 +68,9 @@ for asset in \
   eddie-worker.js \
   eddie-worker.js.br \
   eddie-worker.js.gz \
+  eddie-agent-worker.js \
+  eddie-agent-worker.js.br \
+  eddie-agent-worker.js.gz \
   eddie-widget.js \
   eddie-widget.js.br \
   eddie-widget.js.gz

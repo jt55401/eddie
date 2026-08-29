@@ -13,6 +13,7 @@ REPORT_CSV="$DIST_DIR/asset-sizes.csv"
 FILES=(
   "eddie-widget.js"
   "eddie-worker.js"
+  "eddie-agent-worker.js"
   "eddie-wasm.js"
   "eddie.wasm"
 )

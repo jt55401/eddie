@@ -364,6 +364,7 @@ The release pipeline emits sidecar assets for every runtime file:
 - `eddie.wasm.br` / `eddie.wasm.gz`
 - `eddie-wasm.js.br` / `eddie-wasm.js.gz`
 - `eddie-worker.js.br` / `eddie-worker.js.gz`
+- `eddie-agent-worker.js.br` / `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
 - `eddie-widget.js.br` / `eddie-widget.js.gz`
 
 Use the plain filenames in HTML (`eddie-widget.js`, `eddie.wasm`, etc). Your

@@ -27,10 +27,12 @@ jobs:
           tracked="$(git ls-files 'integrations/*/assets/eddie-wasm.js' \
                                     'integrations/*/assets/eddie-widget.js' \
                                     'integrations/*/assets/eddie-worker.js' \
+                                    'integrations/*/assets/eddie-agent-worker.js' \
                                     'integrations/*/assets/eddie.wasm' \
                                     'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js' \
                                     'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js' \
                                     'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-agent-worker.js' \
                                     'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie.wasm')"
           if [[ -n "$tracked" ]]; then
             echo "Committed widget runtime assets found (these must be generated, not committed):" >&2
@@ -158,6 +160,7 @@ jobs:
           test -f dist/eddie.wasm
           test -f dist/eddie-wasm.js
           test -f dist/eddie-worker.js
+          test -f dist/eddie-agent-worker.js
           test -f dist/eddie-widget.js
 
       - name: Set up Node

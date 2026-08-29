@@ -25,7 +25,7 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
   bash "$PROJECT_ROOT/widget/build.sh"
 fi
 
-ASSETS=(eddie-widget.js eddie-worker.js eddie-wasm.js eddie.wasm)
+ASSETS=(eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm)
 for asset in "${ASSETS[@]}"; do
   if [[ ! -f "$DIST_DIR/$asset" ]]; then
     echo "Missing built asset: $DIST_DIR/$asset (run without --no-build first)" >&2

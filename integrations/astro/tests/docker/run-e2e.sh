@@ -108,6 +108,7 @@ if ! curl -fsS http://127.0.0.1:4321 >/tmp/astro-home.html; then
 fi
 grep -q "eddie-widget.js" /tmp/astro-home.html
 curl -fsS http://127.0.0.1:4321/eddie/eddie-worker.js >/tmp/astro-worker.js
+curl -fsS http://127.0.0.1:4321/eddie/eddie-agent-worker.js >/tmp/astro-agent-worker.js
 curl -fsS http://127.0.0.1:4321/eddie/eddie-wasm.js >/tmp/astro-wasm.js
 curl -fsS http://127.0.0.1:4321/eddie/eddie.wasm >/tmp/astro-engine.wasm
 

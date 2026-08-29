@@ -14,5 +14,6 @@ Arguments:
 - Second argument: Eddie runtime asset directory containing:
   - `eddie-widget.js`
   - `eddie-worker.js`
+  - `eddie-agent-worker.js` (loaded only when a visitor clicks Ask)
   - `eddie-wasm.js`
   - `eddie.wasm`

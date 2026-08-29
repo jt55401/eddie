@@ -35,6 +35,7 @@ five runners (no cross-compilation) and produces:
 - `eddie.wasm`, `eddie.wasm.br`, `eddie.wasm.gz`
 - `eddie-wasm.js`, `eddie-wasm.js.br`, `eddie-wasm.js.gz`
 - `eddie-worker.js`, `eddie-worker.js.br`, `eddie-worker.js.gz`
+- `eddie-agent-worker.js`, `eddie-agent-worker.js.br`, `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
 - `eddie-widget.js`, `eddie-widget.js.br`, `eddie-widget.js.gz`
 - `ASSET_SIZES.md`, `asset-sizes.csv`
 - `eddie-hugo-module.tar.gz`

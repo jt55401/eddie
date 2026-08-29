@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ matrix.assets_dir }}"
-          for asset in eddie-widget.js eddie-worker.js eddie-wasm.js eddie.wasm; do
+          for asset in eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm; do
             cp "/tmp/widget-dist/$asset" "${{ matrix.assets_dir }}/$asset"
           done
           ls -l "${{ matrix.assets_dir }}"

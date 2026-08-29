@@ -18,10 +18,13 @@ hugo-module/static/eddie/*.wasm
 integrations/*/npm/assets/eddie-wasm.js
 integrations/*/npm/assets/eddie-widget.js
 integrations/*/npm/assets/eddie-worker.js
+integrations/*/npm/assets/eddie-agent-worker.js
 integrations/*/gem/assets/eddie-wasm.js
 integrations/*/gem/assets/eddie-widget.js
 integrations/*/gem/assets/eddie-worker.js
+integrations/*/gem/assets/eddie-agent-worker.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js
 integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js
+integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-agent-worker.js
 .playwright-mcp/

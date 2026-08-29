@@ -13,13 +13,14 @@ require_asset() {
   fi
 }
 
-for asset in eddie-widget.js eddie-worker.js eddie-wasm.js eddie.wasm; do
+for asset in eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm; do
   require_asset "$asset"
 done
 
 mkdir -p "$SITE_DIR/public/eddie"
 cp "$ASSET_ROOT/eddie-widget.js" "$SITE_DIR/public/eddie/eddie-widget.js"
 cp "$ASSET_ROOT/eddie-worker.js" "$SITE_DIR/public/eddie/eddie-worker.js"
+cp "$ASSET_ROOT/eddie-agent-worker.js" "$SITE_DIR/public/eddie/eddie-agent-worker.js"
 cp "$ASSET_ROOT/eddie-wasm.js" "$SITE_DIR/public/eddie/eddie-wasm.js"
 cp "$ASSET_ROOT/eddie.wasm" "$SITE_DIR/public/eddie/eddie.wasm"
 

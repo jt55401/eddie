@@ -50,6 +50,7 @@ For npm targets, `build` is optional and runs before validation/publish. Use it 
 The CMS installer packages (`integrations/{hugo,astro,docusaurus,eleventy}/npm`,
 `integrations/jekyll/gem`, `integrations/mkdocs/pypi`) each ship a copy of the
 built widget runtime (`eddie.wasm`, `eddie-wasm.js`, `eddie-worker.js`,
+`eddie-agent-worker.js` (loaded only when a visitor clicks Ask),
 `eddie-widget.js`) so their install scripts can drop it straight into a site.
 These files are **generated, never committed**. `ci.yml`'s
 `packaging-check` job fails the build if one is checked in, and `.gitignore`
@@ -62,7 +63,7 @@ Every publish workflow (`publish-npm.yml`, `publish-pypi.yml`,
 `publish-rubygems.yml`) now has a `build-widget-dist` job that runs
 `widget/build.sh` exactly once and uploads `dist/` as a workflow artifact.
 Each matrix target with an `assets_dir` entry downloads that artifact and
-copies the four files in before validating/building/publishing, so every
+copies the five files in before validating/building/publishing, so every
 package in one publish run ships identical bits.
 
 For local testing, `scripts/sync-integration-assets.sh` does the same thing

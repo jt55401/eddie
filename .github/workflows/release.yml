@@ -133,6 +133,9 @@ jobs:
           cp dist/eddie-worker.js release-assets/
           cp dist/eddie-worker.js.br release-assets/
           cp dist/eddie-worker.js.gz release-assets/
+          cp dist/eddie-agent-worker.js release-assets/
+          cp dist/eddie-agent-worker.js.br release-assets/
+          cp dist/eddie-agent-worker.js.gz release-assets/
           cp dist/eddie-widget.js release-assets/
           cp dist/eddie-widget.js.br release-assets/
           cp dist/eddie-widget.js.gz release-assets/
@@ -170,6 +173,9 @@ jobs:
             release-assets/eddie-worker.js
             release-assets/eddie-worker.js.br
             release-assets/eddie-worker.js.gz
+            release-assets/eddie-agent-worker.js
+            release-assets/eddie-agent-worker.js.br
+            release-assets/eddie-agent-worker.js.gz
             release-assets/eddie-widget.js
             release-assets/eddie-widget.js.br
             release-assets/eddie-widget.js.gz
