@@ -261,7 +261,36 @@
     return { answer: text, citations, nohit: text === "" };
   }
 
+
+  // FAQ card gate: prefer the WASM's fused `confident` flag (qa_lookup v0.4.1+);
+  // older indexes only carry a dense score, so fall back to a plain cutoff.
+  function faqPasses(hit, qaMode) {
+    if (!hit || typeof hit !== "object") return false;
+    if (qaMode === "off") return false;
+    if (qaMode === "always") return true;
+    if (typeof hit.confident === "boolean") return hit.confident;
+    return typeof hit.score === "number" && hit.score >= 0.5;
+  }
+
+  // Turn confident QA hits into agent evidence items ("Q: … A: …") so the
+  // answer model sees the FAQ lane, not only chunk text.
+  function qaEvidence(hits, max) {
+    const limit = max == null ? 2 : max;
+    const out = [];
+    for (const h of Array.isArray(hits) ? hits : []) {
+      if (out.length >= limit) break;
+      if (!faqPasses(h, "auto")) continue;
+      const q = String(h.question || "").trim();
+      const a = String(h.answer || "").trim();
+      if (!q || !a) continue;
+      out.push({ title: "FAQ: " + q, url: h.source_url || "", text: "Q: " + q + "\nA: " + a, faq: true });
+    }
+    return out;
+  }
+
   return {
+    faqPasses,
+    qaEvidence,
     NOHIT,
     AGENT_MODEL_SIZES,
     PLAN_SCHEMA,

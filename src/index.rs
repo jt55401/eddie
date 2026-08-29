@@ -34,6 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Read, Write};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use brotli::{CompressorReader, Decompressor};
@@ -42,7 +43,7 @@ use crate::bm25::{Bm25Index, ByteCursor, write_varint};
 use crate::chunk::ChunkMeta;
 use crate::claims::ClaimEntry;
 use crate::manifest::{
-    Bm25Params, DenseSpec, FORMAT_VERSION, Manifest, Quant, SparseSpec, SparseTerm,
+    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SparseSpec, SparseTerm,
 };
 use crate::qa::QaEntry;
 
@@ -574,6 +575,9 @@ pub struct SearchIndex {
     pub qa_dense: Vec<DenseLane>,
     pub claims: Vec<ClaimEntry>,
     pub claims_dense: Vec<DenseLane>,
+    /// BM25 over `question + " " + answer` of every QA entry, built on first
+    /// use by [`SearchIndex::qa_bm25`] (never serialized).
+    qa_bm25: OnceLock<Bm25Index>,
 }
 
 /// Byte accounting for one payload section (see [`SearchIndex::inspect`]).
@@ -913,6 +917,7 @@ impl SearchIndex {
             qa_dense,
             claims,
             claims_dense,
+            qa_bm25: OnceLock::new(),
         })
     }
 
@@ -961,6 +966,49 @@ impl SearchIndex {
     pub fn claims_lane(&self, id: &str) -> Option<&DenseLane> {
         self.claims_dense.iter().find(|l| l.spec.id == id)
     }
+
+    /// Keyword index over the QA entries (`question + " " + answer`), built
+    /// on the first call and cached. Cheap: QA sections are a few hundred
+    /// short strings. Empty (zero documents) when the index has no qa section.
+    pub fn qa_bm25(&self) -> &Bm25Index {
+        self.qa_bm25.get_or_init(|| {
+            let texts: Vec<String> = self
+                .qa
+                .iter()
+                .map(|e| format!("{} {}", e.question, e.answer))
+                .collect();
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            Bm25Index::build(&refs)
+        })
+    }
+}
+
+/// Page context prepended to a chunk's *indexed* text (dense, sparse and
+/// BM25 inputs) so a query that names the page finds a chunk whose body never
+/// repeats the title: `"{title}"`, plus `" — {section}"` when the chunk has a
+/// section that differs from the title. Empty when the chunk has neither.
+pub fn context_prefix(meta: &ChunkMeta) -> String {
+    let title = meta.title.trim();
+    let section = meta
+        .section
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(title));
+    match (title.is_empty(), section) {
+        (true, None) => String::new(),
+        (true, Some(section)) => section.to_string(),
+        (false, None) => title.to_string(),
+        (false, Some(section)) => format!("{} — {}", title, section),
+    }
+}
+
+/// `prefix + "\n" + text`, or `text` alone when the prefix is empty.
+pub fn with_context(prefix: &str, text: &str) -> String {
+    if prefix.is_empty() {
+        text.to_string()
+    } else {
+        format!("{}\n{}", prefix, text)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -972,6 +1020,11 @@ impl SearchIndex {
 pub struct IndexBuilder {
     metadata: Vec<ChunkMeta>,
     texts: Vec<String>,
+    /// What BM25 is built from when it differs from the stored texts
+    /// (see [`IndexBuilder::add_chunks_indexed`]).
+    index_texts: Option<Vec<String>>,
+    title_context: bool,
+    fusion: Option<FusionWeights>,
     overlap_words: Vec<u16>,
     bm25_params: Bm25Params,
     sparse: Option<(SparseIndex, SparseSpec)>,
@@ -1014,8 +1067,48 @@ impl IndexBuilder {
             .collect();
         self.metadata = metadata;
         self.texts = clean;
+        self.index_texts = None;
         self.overlap_words = overlap_words;
         Ok(self)
+    }
+
+    /// Like [`IndexBuilder::add_chunks`], but BM25 is built from
+    /// `index_texts[i]` instead of the stored text: typically the clean text
+    /// with a [`context_prefix`] in front. `stored_texts` are still stripped
+    /// of their overlap prefix and are what display and snippets use;
+    /// `index_texts` are consumed here and never written to the file.
+    pub fn add_chunks_indexed(
+        &mut self,
+        metadata: Vec<ChunkMeta>,
+        stored_texts: Vec<String>,
+        index_texts: Vec<String>,
+        overlap_words: Vec<u16>,
+    ) -> Result<&mut Self> {
+        if index_texts.len() != metadata.len() {
+            bail!(
+                "add_chunks_indexed: {} metadata but {} index texts",
+                metadata.len(),
+                index_texts.len()
+            );
+        }
+        self.add_chunks(metadata, stored_texts, overlap_words)?;
+        self.index_texts = Some(index_texts);
+        Ok(self)
+    }
+
+    /// Record in the manifest that the indexed texts carried a
+    /// [`context_prefix`] (so `eddie stats` and `eddie search --explain` can
+    /// say so). Does not change what is indexed; pair it with
+    /// [`IndexBuilder::add_chunks_indexed`].
+    pub fn title_context(&mut self, enabled: bool) -> &mut Self {
+        self.title_context = enabled;
+        self
+    }
+
+    /// Bake fusion weights into the manifest (`eddie index --weights`).
+    pub fn fusion(&mut self, weights: Option<FusionWeights>) -> &mut Self {
+        self.fusion = weights;
+        self
     }
 
     /// BM25 parameters (defaults: k1 1.2, b 0.75). The arm is always built.
@@ -1089,7 +1182,8 @@ impl IndexBuilder {
 
     pub fn finish(self) -> Result<SearchIndex> {
         let chunks = self.metadata.len();
-        let refs: Vec<&str> = self.texts.iter().map(String::as_str).collect();
+        let bm25_source = self.index_texts.as_ref().unwrap_or(&self.texts);
+        let refs: Vec<&str> = bm25_source.iter().map(String::as_str).collect();
         let bm25 = Bm25Index::build_with_params(&refs, self.bm25_params);
 
         for lane in &self.dense {
@@ -1123,6 +1217,8 @@ impl IndexBuilder {
             .collect();
         manifest.bm25 = self.bm25_params;
         manifest.built_at = self.built_at;
+        manifest.title_context = self.title_context;
+        manifest.fusion = self.fusion;
         let (sparse, sparse_spec) = match self.sparse {
             Some((idx, spec)) => (Some(idx), Some(spec)),
             None => (None, None),
@@ -1147,6 +1243,7 @@ impl IndexBuilder {
             qa_dense: self.qa_dense,
             claims: self.claims,
             claims_dense: self.claims_dense,
+            qa_bm25: OnceLock::new(),
         };
         // Lanes for empty sections are dropped (nothing to score).
         if index.qa.is_empty() {
@@ -2176,6 +2273,92 @@ mod tests {
     }
 
     #[test]
+    fn context_prefix_joins_title_and_distinct_section() {
+        let mut m = meta("/a/", 0, "fine");
+        m.title = "Programming Languages".into();
+        m.section = None;
+        assert_eq!(context_prefix(&m), "Programming Languages");
+        m.section = Some("Rust".into());
+        assert_eq!(context_prefix(&m), "Programming Languages — Rust");
+        // Section equal to the title (any case, padded) is not repeated.
+        m.section = Some(" programming languages ".into());
+        assert_eq!(context_prefix(&m), "Programming Languages");
+        m.section = Some("   ".into());
+        assert_eq!(context_prefix(&m), "Programming Languages");
+        m.title = "  ".into();
+        m.section = Some("Rust".into());
+        assert_eq!(context_prefix(&m), "Rust");
+        m.section = None;
+        assert_eq!(context_prefix(&m), "");
+        assert_eq!(with_context("", "body"), "body");
+        assert_eq!(with_context("T — S", "body"), "T — S\nbody");
+    }
+
+    #[test]
+    fn indexed_texts_feed_bm25_but_not_storage() {
+        let metadata = vec![meta("/a/", 0, "fine"), meta("/b/", 0, "fine")];
+        let stored = vec![
+            "I've been coding since age 6.".to_string(),
+            "Unrelated body text.".to_string(),
+        ];
+        let indexed: Vec<String> = metadata
+            .iter()
+            .zip(&stored)
+            .map(|(m, t)| with_context(&context_prefix(m), t))
+            .collect();
+        let mut b = IndexBuilder::new();
+        assert!(
+            b.add_chunks_indexed(metadata.clone(), stored.clone(), vec![], vec![0, 0])
+                .is_err()
+        );
+        b.add_chunks_indexed(metadata.clone(), stored.clone(), indexed, vec![0, 0])
+            .unwrap();
+        b.title_context(true);
+        let index = b.finish().unwrap();
+        assert!(index.manifest.title_context);
+        // Stored text is clean; BM25 knows the title ("Title /a/") and section.
+        assert_eq!(index.texts, stored);
+        assert_eq!(index.bm25.search("title", 10).len(), 2);
+        assert!(index.bm25.postings_for("s0").is_some());
+        // Round trip keeps the flag; BM25 bytes carry the prefixed terms.
+        let restored = SearchIndex::from_bytes(&ed_bytes(&index)).unwrap();
+        assert!(restored.manifest.title_context);
+        assert_eq!(restored.bm25, index.bm25);
+        assert_eq!(restored.texts, stored);
+        // Plain add_chunks after add_chunks_indexed forgets the index texts.
+        let mut b = IndexBuilder::new();
+        b.add_chunks_indexed(
+            metadata.clone(),
+            stored.clone(),
+            vec!["zzz".into(), "zzz".into()],
+            vec![0, 0],
+        )
+        .unwrap();
+        b.add_chunks(metadata, stored, vec![0, 0]).unwrap();
+        let index = b.finish().unwrap();
+        assert!(index.bm25.postings_for("zzz").is_none());
+        assert!(!index.manifest.title_context);
+    }
+
+    #[test]
+    fn qa_bm25_is_lazy_and_covers_question_and_answer() {
+        let index = sample_index();
+        assert!(!index.qa.is_empty());
+        let bm25 = index.qa_bm25();
+        assert_eq!(bm25.num_docs, index.qa.len());
+        // sample_index's entry is "Who?" / "Them.": both sides are indexed.
+        assert_eq!(
+            bm25.search("them", 5),
+            vec![(0, bm25.search("them", 5)[0].1)]
+        );
+        assert!(!bm25.search("who", 5).is_empty());
+        assert!(std::ptr::eq(bm25, index.qa_bm25()));
+        let (empty, _) = testutil::build_synthetic_index(4, 4, Quant::F32, false);
+        assert_eq!(empty.qa_bm25().num_docs, 0);
+        assert!(empty.qa_bm25().search("anything", 3).is_empty());
+    }
+
+    #[test]
     fn strip_leading_words_cases() {
         assert_eq!(strip_leading_words("a b c", 0), "a b c");
         assert_eq!(strip_leading_words("a b c", 1), "b c");
@@ -2418,7 +2601,7 @@ mod tests {
                 sparse: Some(sparse.clone()),
                 mode: crate::search::Mode::Hybrid,
                 top_k: 8,
-                weights: crate::search::Weights::default(),
+                ..crate::search::Query::default()
             };
             let r = crate::search::retrieve(&index, &query).unwrap();
             let pages =

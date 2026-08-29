@@ -1,6 +1,6 @@
 [package]
 name = "eddie"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Semantic search and simple Q&A for static sites — index at build time, query in the browser via WASM"
@@ -43,6 +43,14 @@ hf-hub = { version = "1", features = ["blocking"] }
 # 0.22 matches the pin inside candle-core 0.11 so only one copy is compiled.
 tokenizers = { version = "0.22", features = ["onig", "esaxx_fast"] }
 ureq = { version = "2", features = ["json"] }
+# HTML parsing for the `html` CMS profile (src/parse/html.rs). `tl` is a
+# forgiving, allocation-light HTML5-ish tokenizer with a small DOM/query-selector
+# API — enough to find `<main>`/`<article>`/meta tags and walk the tree to strip
+# nav/footer/widget content. `scraper`/`html5ever` pull in a full CSS engine and
+# a strict tree-construction pass we don't need; `tl` is a fraction of the
+# dependency weight for the same job. Native-only (this module is
+# `#[cfg(not(target_arch = "wasm32"))]`), so it never touches the WASM build.
+tl = "0.7"
 
 # --- WASM dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -997,8 +997,7 @@
       return;
     }
     const best = hits[0];
-    const threshold = config.qaMode === "always" ? 0 : 0.5;
-    if (!best || typeof best.score !== "number" || best.score < threshold) {
+    if (!lib.faqPasses(best, config.qaMode)) {
       hide(faqCard);
       return;
     }
@@ -1224,7 +1223,12 @@
       const evidence = lib.mergeEvidence(lists, 6);
       await expandShortEvidence(evidence);
       if (run.aborted) return;
-      run.evidence = evidence.map((r) => ({ title: r.title, url: r.url, text: r.text || r.snippet || "" }));
+      // Confident FAQ entries (build-time QA lane) go first: they are short,
+      // direct, and already carry a source page.
+      const faqHits = await callWorker("qa", { query: question, k: 3 }).then((m) => m.hits || []).catch(() => []);
+      if (run.aborted) return;
+      const faqItems = lib.qaEvidence(faqHits, 2);
+      run.evidence = faqItems.concat(evidence.map((r) => ({ title: r.title, url: r.url, text: r.text || r.snippet || "" })));
       answerProgress.textContent = "Answering…";
       await streamAnswer(run);
     } catch (err) {

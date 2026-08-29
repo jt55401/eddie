@@ -89,10 +89,20 @@ EDDIE_BATCH_SIZE=32
 EDDIE_CHUNK_SIZE=256
 EDDIE_OVERLAP=32
 EDDIE_CHUNK_STRATEGY=heading
+# Per-page summary chunk (title + description + headings); 0 disables it.
+EDDIE_SUMMARY_LANE=1
 
 # Optional embedded sections (1 = enabled, 0 = disabled)
 EDDIE_QA=0
 EDDIE_CLAIMS=0
+
+# How QA entries name the site's owner (passed as --qa-subject when set).
+# Synthesis otherwise writes "the author"; visitors ask by name.
+EDDIE_QA_SUBJECT=
+
+# Set to 1 to index chunk text without the "{title} — {section}" line
+# eddie prepends for the dense, sparse and BM25 arms (--no-title-context).
+EDDIE_NO_TITLE_CONTEXT=0
 
 # Optional claims edits file (applied only when EDDIE_CLAIMS=1)
 EDDIE_CLAIMS_EDITS=.eddie/claims.edits.toml
@@ -158,6 +168,7 @@ BATCH_SIZE="${EDDIE_BATCH_SIZE:-32}"
 CHUNK_SIZE="${EDDIE_CHUNK_SIZE:-256}"
 OVERLAP="${EDDIE_OVERLAP:-32}"
 CHUNK_STRATEGY="${EDDIE_CHUNK_STRATEGY:-heading}"
+SUMMARY_LANE="${EDDIE_SUMMARY_LANE:-1}"
 
 mkdir -p "$(dirname "$ROOT_DIR/$OUTPUT_PATH")"
 
@@ -170,6 +181,10 @@ CMD=(
   --overlap "$OVERLAP"
   --chunk-strategy "$CHUNK_STRATEGY"
 )
+
+if [[ "$SUMMARY_LANE" != "1" ]]; then
+  CMD+=(--no-summary-lane)
+fi
 
 if [[ -n "$PRESET" ]]; then
   CMD+=(--preset "$PRESET")
@@ -186,8 +201,15 @@ else
   CMD+=(--batch-size "$BATCH_SIZE")
 fi
 
+if [[ "${EDDIE_NO_TITLE_CONTEXT:-0}" == "1" ]]; then
+  CMD+=(--no-title-context)
+fi
+
 if [[ "${EDDIE_QA:-0}" == "1" ]]; then
   CMD+=(--qa)
+  if [[ -n "${EDDIE_QA_SUBJECT:-}" ]]; then
+    CMD+=(--qa-subject "$EDDIE_QA_SUBJECT")
+  fi
   if [[ -n "${EDDIE_QA_OPENROUTER_MODEL:-}" ]]; then
     CMD+=(--qa-openrouter-model "$EDDIE_QA_OPENROUTER_MODEL")
     CMD+=(--qa-openrouter-url "${EDDIE_QA_OPENROUTER_URL:-https://openrouter.ai/api/v1/chat/completions}")

@@ -16,7 +16,10 @@
 //! page(url)   -> JSON {title, url, date, chunks:[{id, section, granularity, text}]}   // finest granularity only, document order
 //! chunk(id)   -> JSON {id, title, url, section, date, text}
 //! qa_lookup(query, dense_lane_id|null, dense_query_vec|null, k)
-//!     -> JSON [{id, question, answer, source_title, source_url, source_section, score}]
+//!     -> JSON [{id, question, answer, source_title, source_url, source_section,
+//!               score, dense, overlap, bm25_rank, confident}]
+//!     // score = 0.6·dense + 0.4·lexical, see crate::search::rank_qa; without a
+//!     // query vector the ranking is lexical only (never confident)
 //! ```
 //!
 //! All ranking logic lives in [`crate::search`] so it is tested natively.
@@ -364,7 +367,8 @@ pub fn search(
             sparse,
             mode,
             top_k,
-            weights: Weights::default(),
+            weights: Weights::for_index(&engine.index),
+            ..Query::default()
         };
         let retrieval =
             rank::retrieve(&engine.index, &q).map_err(|e| js_err("search failed", e))?;
@@ -478,11 +482,20 @@ struct QaHit<'a> {
     source_title: &'a str,
     source_url: &'a str,
     source_section: Option<&'a str>,
-    score: f32,
+    /// Fused score (see [`crate::search::rank_qa`]); `dense`, `overlap`,
+    /// `bm25_rank` and `confident` are its components.
+    score: f64,
+    dense: f64,
+    overlap: f64,
+    bm25_rank: Option<usize>,
+    confident: bool,
 }
 
-/// Nearest QA entries by cosine on the qa dense lane. Returns `[]` when the
-/// index has no qa section or no query vector can be produced.
+/// QA entries ranked by [`crate::search::rank_qa`]: the qa dense lane's
+/// cosine fused with lexical overlap and a BM25 pass over the questions and
+/// answers. Returns `[]` when the index has no qa section; without a query
+/// vector (no runnable embedder) the ranking is lexical only and no hit is
+/// `confident`.
 #[wasm_bindgen]
 pub fn qa_lookup(
     query: &str,
@@ -502,27 +515,31 @@ pub fn qa_lookup(
             query,
             true,
         )?;
-        let Some((_, lane_id, vec)) = dense else {
-            return Ok("[]".to_string());
+        let dense_hits: Vec<(usize, f32)> = match dense {
+            Some((_, lane_id, vec)) => match engine.index.qa_lane(&lane_id) {
+                Some(lane) => lane
+                    .top_k(&vec, rank::qa_fetch_k(k))
+                    .map_err(|e| js_err("qa_lookup", anyhow!("{}", e)))?,
+                None => Vec::new(),
+            },
+            None => Vec::new(),
         };
-        let Some(lane) = engine.index.qa_lane(&lane_id) else {
-            return Ok("[]".to_string());
-        };
-        let hits = lane
-            .top_k(&vec, k)
-            .map_err(|e| js_err("qa_lookup", anyhow!("{}", e)))?;
-        let out: Vec<QaHit> = hits
+        let out: Vec<QaHit> = rank::rank_qa(&engine.index, query, &dense_hits, k)
             .into_iter()
-            .map(|(id, score)| {
-                let e = &engine.index.qa[id];
+            .map(|h| {
+                let e = &engine.index.qa[h.id];
                 QaHit {
-                    id,
+                    id: h.id,
                     question: &e.question,
                     answer: &e.answer,
                     source_title: &e.source_title,
                     source_url: &e.source_url,
                     source_section: e.source_section.as_deref(),
-                    score,
+                    score: h.score,
+                    dense: h.dense,
+                    overlap: h.overlap,
+                    bm25_rank: h.bm25_rank,
+                    confident: h.confident,
                 }
             })
             .collect();
