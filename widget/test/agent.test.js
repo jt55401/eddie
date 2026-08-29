@@ -111,3 +111,30 @@ test("prompts carry the site name and the schema is well-formed", () => {
   assert.equal(A.PLAN_SCHEMA.properties.queries.maxItems, 3);
   assert.equal(A.baseModelId("Qwen3.5-2B-q4f32_1-MLC"), "Qwen3.5-2B");
 });
+
+test("post-processing handles a dangling <think> and keeps citations after it", () => {
+  const r = A.postProcessAnswer("<think>\nreasoning that never closed\nJason writes about Rust [1].", ev);
+  assert.equal(r.answer, "reasoning that never closed\nJason writes about Rust [1].");
+  assert.deepEqual(r.citations.map((c) => c.n), [1]);
+});
+
+test("post-processing with no evidence drops every citation", () => {
+  const r = A.postProcessAnswer("Something [1][2].", []);
+  assert.equal(r.answer, "Something.");
+  assert.deepEqual(r.citations, []);
+  assert.equal(r.nohit, false);
+});
+
+test("post-processing keeps sentence order and dedupes repeated citations", () => {
+  const r = A.postProcessAnswer("A [2]. B [2] [2]. C [1, 2].", ev);
+  assert.equal(r.answer, "A [2]. B [2]. C [1][2].");
+  assert.deepEqual(r.citations.map((c) => c.n), [1, 2]);
+});
+
+test("model selection: the auto threshold is exactly 2 GiB", () => {
+  assert.equal(A.selectAgentModel({ mode: "auto", maxBufferSize: 2 * GIB, isMobile: false }).base, "Qwen3.5-2B");
+  assert.equal(A.selectAgentModel({ mode: "auto", maxBufferSize: 2 * GIB - 1, isMobile: false }).base, "Qwen3.5-0.8B");
+  assert.equal(A.selectAgentModel({ mode: "auto" }).base, "Qwen3.5-0.8B");
+  assert.equal(A.selectAgentModel({}).id, "Qwen3.5-0.8B-q4f32_1-MLC");
+  assert.equal(A.agentModelBytes("Qwen3.5-0.8B-q4f16_1-MLC"), 0.4e9);
+});

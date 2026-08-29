@@ -123,3 +123,31 @@ test("sha256 helpers", async () => {
   assert.equal(await D.verifySha256(abc, "nothex"), false);
   assert.equal(await D.verifySha256(abc, ""), false);
 });
+
+// The worker's sparse-tokenizer path: download, then verify against the
+// manifest's vocab_hash before handing the bytes to WASM.
+async function downloadVerified(url, expectedHex, fetchImpl) {
+  const bytes = await D.fetchBytes(url, { fetch: fetchImpl, sleep: noSleep });
+  if (!(await D.verifySha256(bytes, expectedHex))) {
+    throw new Error("tokenizer.json SHA-256 does not match the index's vocab_hash");
+  }
+  return bytes;
+}
+
+test("sha256 verification of a fetched file accepts the right hash", async () => {
+  const body = new TextEncoder().encode('{"version":"1.0","model":{"type":"WordPiece"}}');
+  const want = await D.sha256Hex(body);
+  const fetchImpl = async () => response([body.subarray(0, 10), body.subarray(10)], { "Content-Length": String(body.length) });
+  const got = await downloadVerified("https://huggingface.co/org/repo/resolve/main/tokenizer.json", want, fetchImpl);
+  assert.equal(new TextDecoder().decode(got), new TextDecoder().decode(body));
+});
+
+test("sha256 verification of a fetched file rejects a tampered body", async () => {
+  const body = new TextEncoder().encode('{"version":"1.0"}');
+  const want = await D.sha256Hex(body);
+  const tampered = new TextEncoder().encode('{"version":"1.1"}');
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return response([tampered], { "Content-Length": String(tampered.length) }); };
+  await assert.rejects(downloadVerified("https://x/tokenizer.json", want, fetchImpl), /vocab_hash/);
+  assert.equal(calls, 1, "a hash mismatch is not a network error and must not retry");
+});
