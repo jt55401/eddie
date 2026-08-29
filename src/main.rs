@@ -209,7 +209,7 @@ enum Command {
         #[arg(long, default_value = "hybrid")]
         mode: SearchMode,
 
-        /// Dense lane id to embed the query with (default: the index's first wasm-candle lane).
+        /// Dense lane id to embed the query with (default: the index's first lane).
         #[arg(long)]
         lane: Option<String>,
 
@@ -247,7 +247,7 @@ enum Command {
         #[arg(long, default_value = "hybrid")]
         mode: SearchMode,
 
-        /// Dense lane id (default: the index's first wasm-candle lane).
+        /// Dense lane id to embed the queries with (default: the index's first lane).
         #[arg(long)]
         lane: Option<String>,
 
@@ -975,7 +975,11 @@ struct QueryEmbedder {
 }
 
 impl QueryEmbedder {
-    /// Pick `lane_id` (or the first wasm-candle lane) and load its model.
+    /// Pick `lane_id` (default: the index's first lane) and load its model
+    /// natively. Every family the indexer can build (bert, xlm-roberta,
+    /// qwen3) can embed queries here, whatever browser runtime the lane
+    /// declares; the lane's own pooling, prefixes and sequence cap are
+    /// applied so query vectors match the stored document vectors.
     fn for_index(index: &SearchIndex, lane_id: Option<&str>) -> Result<Self> {
         if index.manifest.dense.is_empty() {
             bail!("index has no dense lane; use --mode keyword or --mode sparse");
@@ -992,37 +996,26 @@ impl QueryEmbedder {
                     )
                 })?
                 .clone(),
-            None => index
-                .manifest
-                .first_wasm_lane()
-                .with_context(|| {
-                    format!(
-                        "index has only webgpu lanes ({}); the CLI can embed queries only for wasm-candle (BERT) lanes",
-                        lane_list(index)
-                    )
-                })?
-                .clone(),
+            None => index.manifest.dense[0].clone(),
         };
-        if !matches!(spec.runtime, RuntimeSpec::WasmCandle { .. }) {
-            bail!(
-                "lane {:?} is a webgpu-onnx lane; the CLI can embed queries only for wasm-candle (BERT) lanes",
-                spec.id
-            );
-        }
         let lane = index
             .dense_lane(&spec.id)
             .with_context(|| format!("index has no dense section for lane {:?}", spec.id))?;
         eprintln!(
-            "Loading embedding model for lane {}: {}...",
-            spec.id, spec.model
+            "Loading embedding model for lane {} ({:?}, {}): {}...",
+            spec.id,
+            spec.family,
+            runtime_kind(&spec.runtime),
+            spec.model
         );
         let device = select_device(DevicePref::Auto)?;
         let overrides = DenseOverrides {
             lane_id: Some(spec.id.clone()),
             revision: spec.revision.clone(),
-            ..DenseOverrides::default()
+            batch_size: None,
         };
-        let embedder = load_dense(&spec.model, &device, &overrides)?;
+        let embedder = load_dense(&spec.model, &device, &overrides)
+            .with_context(|| format!("loading the model for lane {:?}", spec.id))?;
         if embedder.dim() != spec.dim {
             bail!(
                 "model {} produces {}-d vectors but lane {:?} stores {}-d",
@@ -1055,13 +1048,7 @@ fn lane_list(index: &SearchIndex) -> String {
         .manifest
         .dense
         .iter()
-        .map(|d| {
-            let kind = match d.runtime {
-                RuntimeSpec::WasmCandle { .. } => "wasm-candle",
-                RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
-            };
-            format!("{} [{}]", d.id, kind)
-        })
+        .map(|d| format!("{} [{}]", d.id, runtime_kind(&d.runtime)))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1090,6 +1077,13 @@ fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
                 actual,
                 spec.vocab_hash
             );
+            family: Some(spec.family),
+            pooling: Some(spec.pooling),
+            max_seq_len: Some(spec.max_seq_len),
+            query_prefix: Some(spec.query_prefix.clone()),
+            doc_prefix: Some(spec.doc_prefix.clone()),
+            normalize: Some(spec.normalize),
+            runtime: Some(spec.runtime.clone()),
         }
         sparse_tokenizer_from_bytes(&bytes, eddie::sparse::DEFAULT_MAX_SEQ_LEN)
     };
@@ -1112,15 +1106,25 @@ struct QueryRuntime {
 
 impl QueryRuntime {
     fn new(index: &SearchIndex, mode: Mode, lane: Option<&str>) -> Result<Self> {
-        let dense = if matches!(mode, Mode::Hybrid | Mode::Dense) {
-            Some(QueryEmbedder::for_index(index, lane)?)
-        } else {
-            None
+        let dense = match mode {
+            Mode::Hybrid if index.manifest.dense.is_empty() => {
+                eprintln!("warning: index has no dense lane; hybrid runs without the dense arm");
+                None
+            }
+            Mode::Hybrid | Mode::Dense => Some(QueryEmbedder::for_index(index, lane)?),
+            Mode::Sparse | Mode::Keyword => None,
         };
         let sparse_tokenizer =
             if matches!(mode, Mode::Hybrid | Mode::Sparse) && index.sparse.is_some() {
                 load_sparse_tokenizer(index)
             } else {
+fn runtime_kind(runtime: &RuntimeSpec) -> &'static str {
+    match runtime {
+        RuntimeSpec::WasmCandle { .. } => "wasm-candle",
+        RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
+    }
+}
+
                 None
             };
         Ok(Self {
