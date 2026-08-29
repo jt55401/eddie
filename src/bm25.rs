@@ -22,12 +22,19 @@ use anyhow::{Context, Result, bail};
 
 use crate::manifest::Bm25Params;
 
+/// Longest token `tokenize` emits, in characters. Alphanumeric runs beyond
+/// this (pasted hashes, minified blobs, unspaced scripts) are split into
+/// pieces so every term fits the `u16` length in the section body.
+pub const MAX_TOKEN_CHARS: usize = 64;
+
 /// A BM25 inverted index built from chunk texts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bm25Index {
     /// Number of documents (chunks).
     pub num_docs: usize,
-    /// Average document length in tokens.
+    /// Average document length in tokens, rounded through `f32` (the stored
+    /// precision) so an index reloaded from bytes scores exactly like the
+    /// one built in memory.
     pub avg_doc_len: f64,
     /// Per-document token count.
     pub doc_lengths: Vec<u32>,
@@ -76,12 +83,7 @@ impl Bm25Index {
             .map(|t| postings_map.remove(t).unwrap_or_default())
             .collect();
 
-        let total_len: u64 = doc_lengths.iter().map(|&l| l as u64).sum();
-        let avg_doc_len = if num_docs > 0 {
-            total_len as f64 / num_docs as f64
-        } else {
-            0.0
-        };
+        let avg_doc_len = average_doc_len(&doc_lengths);
 
         Self {
             num_docs,
@@ -163,8 +165,13 @@ impl Bm25Index {
         out.extend_from_slice(&u32::try_from(self.terms.len())?.to_le_bytes());
         for (term, postings) in self.terms.iter().zip(&self.postings) {
             let bytes = term.as_bytes();
-            let len = u16::try_from(bytes.len())
-                .with_context(|| format!("bm25 term longer than 65535 bytes: {:?}", term))?;
+            let len = u16::try_from(bytes.len()).with_context(|| {
+                format!(
+                    "bm25 term of {} bytes exceeds the 65535-byte limit (starts {:?})",
+                    bytes.len(),
+                    term.chars().take(16).collect::<String>()
+                )
+            })?;
             out.extend_from_slice(&len.to_le_bytes());
             out.extend_from_slice(bytes);
             out.extend_from_slice(&u32::try_from(postings.len())?.to_le_bytes());
@@ -191,13 +198,23 @@ impl Bm25Index {
                 expected_docs
             );
         }
-        let avg_doc_len = c.f32().context("bm25 avg_len")? as f64;
-        if !avg_doc_len.is_finite() || avg_doc_len < 0.0 {
+        let stored_avg = c.f32().context("bm25 avg_len")?;
+        if !stored_avg.is_finite() || stored_avg < 0.0 {
             bail!("bm25 avg_len is not a finite non-negative number");
         }
         let mut doc_lengths = Vec::with_capacity(num_docs.min(c.remaining() / 4));
         for _ in 0..num_docs {
             doc_lengths.push(c.u32().context("bm25 doc_lengths")?);
+        }
+        // Recompute exactly as the builder does; the stored value is a
+        // consistency check on doc_lengths, never the source of truth.
+        let avg_doc_len = average_doc_len(&doc_lengths);
+        if (avg_doc_len as f32).to_bits() != stored_avg.to_bits() {
+            bail!(
+                "bm25 avg_len {} does not match the {} computed from doc_lengths",
+                stored_avg,
+                avg_doc_len
+            );
         }
         let term_count = c.u32().context("bm25 term count")? as usize;
         let mut terms: Vec<String> = Vec::with_capacity(term_count.min(c.remaining() / 7));
@@ -265,12 +282,22 @@ impl Bm25Index {
     }
 }
 
+/// Mean of `doc_lengths` in f64, rounded to the f32 the section stores.
+fn average_doc_len(doc_lengths: &[u32]) -> f64 {
+    if doc_lengths.is_empty() {
+        return 0.0;
+    }
+    let total: u64 = doc_lengths.iter().map(|&l| l as u64).sum();
+    (total as f64 / doc_lengths.len() as f64) as f32 as f64
+}
+
 /// Tokenize text for BM25 and query-term matching.
 ///
-/// Lowercase; runs of Unicode alphanumerics become one token each; runs of
-/// CJK characters (Han, Hiragana, Katakana, Hangul) become character bigrams
-/// (a lone CJK character is emitted as is). Single-character Latin tokens are
-/// kept so `C`, `R` and `Go` remain searchable.
+/// Lowercase; runs of Unicode alphanumerics become one token each (runs
+/// longer than [`MAX_TOKEN_CHARS`] are split into pieces of that length);
+/// runs of CJK characters (Han, Hiragana, Katakana, Hangul) become character
+/// bigrams (a lone CJK character is emitted as is). Single-character Latin
+/// tokens are kept so `C`, `R` and `Go` remain searchable.
 pub fn tokenize(text: &str) -> Vec<String> {
     #[derive(PartialEq, Clone, Copy)]
     enum Class {
@@ -297,7 +324,15 @@ pub fn tokenize(text: &str) -> Vec<String> {
             return;
         }
         match class {
-            Class::Word => out.push(run.to_lowercase()),
+            Class::Word => {
+                let lower = run.to_lowercase();
+                if lower.chars().count() <= MAX_TOKEN_CHARS {
+                    out.push(lower);
+                } else {
+                    let chars: Vec<char> = lower.chars().collect();
+                    out.extend(chars.chunks(MAX_TOKEN_CHARS).map(|c| c.iter().collect()));
+                }
+            }
             Class::Cjk => {
                 let chars: Vec<char> = run.chars().collect();
                 if chars.len() == 1 {
@@ -454,6 +489,54 @@ mod tests {
             vec!["东京", "tokyo", "1", "93", "1"]
         );
         assert_eq!(tokenize("Größe résumé"), vec!["größe", "résumé"]);
+    }
+
+    #[test]
+    fn long_runs_are_split_so_terms_always_serialize() {
+        let long = "a".repeat(70_000);
+        let tokens = tokenize(&long);
+        assert_eq!(tokens.len(), 70_000usize.div_ceil(MAX_TOKEN_CHARS));
+        assert!(tokens.iter().all(|t| t.chars().count() <= MAX_TOKEN_CHARS));
+        assert_eq!(tokens.last().unwrap().len(), 70_000 % MAX_TOKEN_CHARS);
+        let exact = "b".repeat(MAX_TOKEN_CHARS);
+        assert_eq!(tokenize(&exact), vec![exact.clone()]);
+        // Multi-byte characters count as one character each.
+        let wide = "ü".repeat(MAX_TOKEN_CHARS + 1);
+        let tokens = tokenize(&wide);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1], "ü");
+
+        let index = Bm25Index::build(&[&long, "short text"]);
+        let bytes = index.to_bytes().unwrap();
+        let restored = Bm25Index::from_bytes(&bytes, 2, Bm25Params::default()).unwrap();
+        assert_eq!(restored, index);
+
+        // A hand-built oversized term still fails with a short message.
+        let mut bad = Bm25Index::build(&["x"]);
+        bad.terms[0] = "y".repeat(70_000);
+        let err = bad.to_bytes().unwrap_err().to_string();
+        assert!(err.len() < 200, "{}", err);
+        assert!(err.contains("70000"), "{}", err);
+    }
+
+    #[test]
+    fn avg_doc_len_round_trips_for_inexact_averages() {
+        // 1, 1 and 2 tokens: the mean 4/3 is not representable in f32.
+        let texts = vec!["one", "two", "three four"];
+        let built = Bm25Index::build(&texts);
+        assert_eq!(built.avg_doc_len, (4.0f64 / 3.0) as f32 as f64);
+        let bytes = built.to_bytes().unwrap();
+        let restored = Bm25Index::from_bytes(&bytes, 3, Bm25Params::default()).unwrap();
+        assert_eq!(restored, built);
+        assert_eq!(restored.search("three", 3), built.search("three", 3));
+
+        // A stored average that disagrees with doc_lengths is corruption.
+        let mut bad = bytes.clone();
+        bad[4..8].copy_from_slice(&2.0f32.to_le_bytes());
+        let err = Bm25Index::from_bytes(&bad, 3, Bm25Params::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("avg_len"), "{}", err);
     }
 
     #[test]
