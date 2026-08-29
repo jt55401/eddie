@@ -899,6 +899,14 @@ fn cmd_index(
     );
     let mut all_chunks = Vec::new();
     for doc in &docs {
+        // Reserve room for the "{title} — {section}" prefix the indexed text
+        // carries (title_context) so a full-size chunk is never truncated by it.
+        let reserve = if title_context {
+            count(&doc.meta.title) + TITLE_CONTEXT_RESERVE
+        } else {
+            0
+        };
+        let budget = budget.saturating_sub(reserve).max(MIN_CHUNK_BUDGET);
         let mut fine = chunk_document_with_budget(doc, budget, overlap, strategy, &count);
         for chunk in &mut fine {
             chunk.meta.granularity = Some("fine".to_string());
@@ -907,7 +915,9 @@ fn cmd_index(
 
         if let Some(coarse_size) = coarse_chunk_size {
             let coarse_overlap = coarse_overlap.unwrap_or(overlap);
-            let coarse_budget = chunk_budget(primary, coarse_size)?;
+            let coarse_budget = chunk_budget(primary, coarse_size)?
+                .saturating_sub(reserve)
+                .max(MIN_CHUNK_BUDGET);
             let mut coarse =
                 chunk_document_with_budget(doc, coarse_budget, coarse_overlap, strategy, &count);
             for chunk in &mut coarse {
@@ -2852,6 +2862,12 @@ fn doc_prefix_tokens(lane: &dyn DenseEncoder) -> usize {
 /// Token budget for one chunk: `chunk_size` capped at the lane's sequence
 /// limit, minus the document prefix the encoder prepends, so a full chunk
 /// still fits once prefixed and nothing is truncated at embedding time.
+/// Tokens reserved per chunk for the section part of the title-context prefix
+/// (" — {section}" plus the separator newline); the title itself is counted.
+const TITLE_CONTEXT_RESERVE: usize = 12;
+/// Never shrink a chunk budget below this many tokens.
+const MIN_CHUNK_BUDGET: usize = 32;
+
 fn chunk_budget(lane: &dyn DenseEncoder, chunk_size: usize) -> Result<usize> {
     let spec = lane.spec();
     let prefix = doc_prefix_tokens(lane);
