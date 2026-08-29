@@ -77,6 +77,10 @@ enum Command {
         #[arg(long, default_value_t = false)]
         include_noindex: bool,
 
+        /// Fusion weights to bake into the index as dense,sparse,bm25 (e.g. the best row of `eddie eval --sweep`); default 1,1.2,1.
+        #[arg(long, value_name = "D,S,B")]
+        weights: Option<String>,
+
         /// Output path for the index file.
         #[arg(long, default_value = "index.ed")]
         output: PathBuf,
@@ -551,6 +555,7 @@ fn main() -> Result<()> {
             content_dir,
             cms,
             include_noindex,
+            weights,
             output,
             dense_model,
             model,
@@ -587,6 +592,7 @@ fn main() -> Result<()> {
             content_dir,
             cms,
             include_noindex,
+            weights.as_deref(),
             output,
             &resolve_index_models(
                 preset,
@@ -739,6 +745,7 @@ fn cmd_index(
     content_dir: PathBuf,
     cms: Cms,
     include_noindex: bool,
+    fusion_weights: Option<&str>,
     output: PathBuf,
     model_opts: &IndexModelOptions,
     chunk_size: usize,
@@ -1134,6 +1141,14 @@ fn cmd_index(
     let mut builder = IndexBuilder::new();
     builder.add_chunks_indexed(metadata, chunk_texts, index_texts, overlap_words)?;
     builder.title_context(title_context);
+    if let Some(spec) = fusion_weights {
+        let w = Weights::parse(spec)?;
+        builder.fusion(Some(eddie::manifest::FusionWeights {
+            dense: w.dense,
+            sparse: w.sparse,
+            bm25: w.bm25,
+        }));
+    }
     for (lane, vectors) in lanes.iter().zip(lane_vectors) {
         let dim = lane.dim();
         builder.add_dense_lane(
@@ -1492,7 +1507,7 @@ fn run_query(
         sparse: inputs.sparse.clone(),
         mode,
         top_k,
-        weights: options.weights.unwrap_or_default(),
+        weights: options.weights.unwrap_or_else(|| Weights::for_index(index)),
         fetch_k: options.fetch_k,
         rrf_k: options.rrf_k,
     };
@@ -2190,7 +2205,10 @@ fn cmd_eval(
         mrr: main.mrr,
         ndcg_at_k: main.ndcg_at_k,
         graded: opts.graded,
-        weights: opts.ranking.weights.unwrap_or_default(),
+        weights: opts
+            .ranking
+            .weights
+            .unwrap_or_else(|| Weights::for_index(&index)),
         fetch_k: opts
             .ranking
             .fetch_k

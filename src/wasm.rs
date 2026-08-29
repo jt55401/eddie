@@ -367,6 +367,7 @@ pub fn search(
             sparse,
             mode,
             top_k,
+            weights: Weights::for_index(&engine.index),
             ..Query::default()
         };
         let retrieval =

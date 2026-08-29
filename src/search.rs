@@ -71,12 +71,27 @@ pub struct Weights {
     pub bm25: f64,
 }
 
+impl Weights {
+    /// The weights an index asks for (`manifest.fusion`, set by
+    /// `eddie index --weights`), else the built-in defaults.
+    pub fn for_index(index: &SearchIndex) -> Self {
+        match index.manifest.fusion {
+            Some(f) => Self {
+                dense: f.dense,
+                sparse: f.sparse,
+                bm25: f.bm25,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
 impl Default for Weights {
     fn default() -> Self {
         Self {
-            dense: 1.2,
-            sparse: 0.8,
-            bm25: 0.6,
+            dense: 1.0,
+            sparse: 1.2,
+            bm25: 1.0,
         }
     }
 }
@@ -923,7 +938,7 @@ mod tests {
         // A chunk that appears in two arms outranks one at the same rank in one arm.
         let single = RankedChunk {
             chunk: 1,
-            score: 1.0 / (RRF_K + 1.0),
+            score: Weights::default().dense / (RRF_K + 1.0),
             dense_rank: Some(1),
             sparse_rank: None,
             bm25_rank: None,
@@ -933,10 +948,11 @@ mod tests {
             .iter()
             .find(|c| c.dense_rank.is_some() && c.bm25_rank.is_some());
         if let Some(d) = double {
-            let expected = 1.0 / (RRF_K + d.dense_rank.unwrap() as f64)
-                + 0.8 / (RRF_K + d.bm25_rank.unwrap() as f64)
+            let w = Weights::default();
+            let expected = w.dense / (RRF_K + d.dense_rank.unwrap() as f64)
+                + w.bm25 / (RRF_K + d.bm25_rank.unwrap() as f64)
                 + d.sparse_rank
-                    .map(|s| 1.0 / (RRF_K + s as f64))
+                    .map(|s| w.sparse / (RRF_K + s as f64))
                     .unwrap_or(0.0);
             assert!((d.score - expected).abs() < 1e-12);
             let _ = single;

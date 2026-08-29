@@ -659,5 +659,4 @@ Hello world."#;
         assert_eq!(urlize("My Post Title!", true), "my-post-title");
         assert_eq!(urlize("v1.2+beta", true), "v1.2+beta");
     }
-
 }

@@ -154,6 +154,16 @@ pub struct SparseTerm {
     pub weight: f32,
 }
 
+/// Per-arm reciprocal-rank-fusion weights baked into an index by
+/// `eddie index --weights D,S,B` (usually the best row of `eddie eval --sweep`).
+/// Absent means the runtime's built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FusionWeights {
+    pub dense: f64,
+    pub sparse: f64,
+    pub bm25: f64,
+}
+
 /// Uncompressed header of an `.ed` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -173,6 +183,9 @@ pub struct Manifest {
     pub sections: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub built_at: Option<String>,
+    /// Fusion weights chosen for this index (see [`FusionWeights`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<FusionWeights>,
     /// Whether the indexed text of every chunk (dense, sparse and BM25
     /// inputs) was prefixed with the page title and section
     /// (`crate::index::context_prefix`). Stored texts stay clean either way.
@@ -192,6 +205,7 @@ impl Manifest {
             bm25: Bm25Params::default(),
             sections: Vec::new(),
             built_at: None,
+            fusion: None,
             title_context: false,
         }
     }

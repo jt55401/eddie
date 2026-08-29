@@ -43,7 +43,7 @@ use crate::bm25::{Bm25Index, ByteCursor, write_varint};
 use crate::chunk::ChunkMeta;
 use crate::claims::ClaimEntry;
 use crate::manifest::{
-    Bm25Params, DenseSpec, FORMAT_VERSION, Manifest, Quant, SparseSpec, SparseTerm,
+    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SparseSpec, SparseTerm,
 };
 use crate::qa::QaEntry;
 
@@ -1024,6 +1024,7 @@ pub struct IndexBuilder {
     /// (see [`IndexBuilder::add_chunks_indexed`]).
     index_texts: Option<Vec<String>>,
     title_context: bool,
+    fusion: Option<FusionWeights>,
     overlap_words: Vec<u16>,
     bm25_params: Bm25Params,
     sparse: Option<(SparseIndex, SparseSpec)>,
@@ -1101,6 +1102,12 @@ impl IndexBuilder {
     /// [`IndexBuilder::add_chunks_indexed`].
     pub fn title_context(&mut self, enabled: bool) -> &mut Self {
         self.title_context = enabled;
+        self
+    }
+
+    /// Bake fusion weights into the manifest (`eddie index --weights`).
+    pub fn fusion(&mut self, weights: Option<FusionWeights>) -> &mut Self {
+        self.fusion = weights;
         self
     }
 
@@ -1211,6 +1218,7 @@ impl IndexBuilder {
         manifest.bm25 = self.bm25_params;
         manifest.built_at = self.built_at;
         manifest.title_context = self.title_context;
+        manifest.fusion = self.fusion;
         let (sparse, sparse_spec) = match self.sparse {
             Some((idx, spec)) => (Some(idx), Some(spec)),
             None => (None, None),
