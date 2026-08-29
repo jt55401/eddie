@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::bm25::tokenize;
+use crate::bm25::{Bm25Index, tokenize};
 use crate::index::{SearchIndex, query_vector_problem, strip_leading_words};
 use crate::manifest::SparseTerm;
 
@@ -660,10 +660,11 @@ pub fn sparse_query_terms_local(
 pub const QA_DENSE_WEIGHT: f64 = 0.6;
 /// Share of the QA score that comes from the lexical signal (overlap + BM25).
 pub const QA_LEXICAL_WEIGHT: f64 = 0.4;
-/// A hit is `confident` when `score >= QA_CONFIDENT_SCORE` and either
-/// `overlap >= QA_CONFIDENT_OVERLAP` or `dense >= QA_CONFIDENT_DENSE`.
+/// The top hit is `confident` when `score >= QA_CONFIDENT_SCORE` and either
+/// `overlap >= QA_CONFIDENT_OVERLAP` (IDF-weighted) or `dense >= QA_CONFIDENT_DENSE`;
+/// lower-ranked hits are never confident.
 pub const QA_CONFIDENT_SCORE: f64 = 0.55;
-pub const QA_CONFIDENT_OVERLAP: f64 = 0.34;
+pub const QA_CONFIDENT_OVERLAP: f64 = 0.30;
 pub const QA_CONFIDENT_DENSE: f64 = 0.80;
 
 /// One QA entry ranked by [`rank_qa`].
@@ -745,17 +746,26 @@ pub fn rank_qa(
         .into_values()
         .map(|mut h| {
             let entry = &index.qa[h.id];
-            h.overlap = overlap_ratio(&terms, &format!("{} {}", entry.question, entry.answer));
+            h.overlap = overlap_ratio_idf(
+                &terms,
+                &format!("{} {}", entry.question, entry.answer),
+                index.qa_bm25(),
+            );
             let bm25 = bm25_norm.get(&h.id).copied().unwrap_or(0.0);
             let lexical = 0.5 * h.overlap + 0.5 * bm25;
             h.score = QA_DENSE_WEIGHT * h.dense.max(0.0) + QA_LEXICAL_WEIGHT * lexical;
-            h.confident = h.score >= QA_CONFIDENT_SCORE
-                && (h.overlap >= QA_CONFIDENT_OVERLAP || h.dense >= QA_CONFIDENT_DENSE);
             h
         })
         .collect();
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
     hits.truncate(k);
+    // Only the best hit can be shown as an answer: it must clear the fused
+    // threshold and agree with the query either lexically (IDF-weighted, so a
+    // name shared by most entries does not count) or strongly in the dense arm.
+    if let Some(top) = hits.first_mut() {
+        top.confident = top.score >= QA_CONFIDENT_SCORE
+            && (top.overlap >= QA_CONFIDENT_OVERLAP || top.dense >= QA_CONFIDENT_DENSE);
+    }
     hits
 }
 
@@ -826,16 +836,30 @@ fn is_qa_function_word(t: &str) -> bool {
 }
 
 /// `|terms ∩ tokens(text)| / |terms|`, 0 when `terms` is empty.
-fn overlap_ratio(terms: &[String], text: &str) -> f64 {
+/// Share of the query's terms found in `text`, each term weighted by its IDF
+/// over the QA entries (`bm25`), so a term that appears in almost every entry
+/// (the site owner's name on a personal site) barely counts while a rare
+/// content word ("long", "coding") carries the match.
+fn overlap_ratio_idf(terms: &[String], text: &str, bm25: &Bm25Index) -> f64 {
     if terms.is_empty() {
         return 0.0;
     }
     let present: HashSet<String> = tokenize(text).into_iter().collect();
-    let matched = terms
+    let n = bm25.num_docs.max(1) as f64;
+    let idf = |t: &str| {
+        let df = bm25.postings_for(t).map(|p| p.len()).unwrap_or(0) as f64;
+        ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+    };
+    let total: f64 = terms.iter().map(|t| idf(t)).sum();
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let matched: f64 = terms
         .iter()
         .filter(|t| present.contains(t.as_str()))
-        .count();
-    matched as f64 / terms.len() as f64
+        .map(|t| idf(t))
+        .sum();
+    matched / total
 }
 
 #[cfg(test)]
@@ -1263,13 +1287,19 @@ mod tests {
         assert_eq!(hits[1].id, 0);
         let best = &hits[0];
         assert!((best.dense - 0.62).abs() < 1e-6);
-        assert!((best.overlap - 2.0 / 3.0).abs() < 1e-9);
+        // IDF-weighted overlap: "long" (rare) and "jason" (in every entry)
+        // match, "programming" does not; the name contributes almost nothing.
+        assert!(
+            best.overlap > 0.30 && best.overlap < 0.40,
+            "{}",
+            best.overlap
+        );
         assert_eq!(best.bm25_rank, Some(1));
-        // 0.6·0.62 + 0.4·(0.5·0.667 + 0.5·1.0)
         let expected =
             QA_DENSE_WEIGHT * best.dense + QA_LEXICAL_WEIGHT * (0.5 * best.overlap + 0.5);
         assert!((best.score - expected).abs() < 1e-9);
-        assert!((best.score - 0.7053).abs() < 1e-3);
+        assert!(best.confident, "{:?}", best);
+        assert!(hits.iter().skip(1).all(|h| !h.confident), "{:?}", hits);
         assert!(best.confident);
         assert!(!hits[1].confident, "{:?}", hits[1]);
         assert!(hits[1].overlap < QA_CONFIDENT_OVERLAP);
