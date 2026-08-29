@@ -641,11 +641,16 @@ fn ollama_generate(
         options.insert("seed".to_string(), json!(seed));
     }
 
+    // `think: false` keeps thinking models (qwen3, qwen3.5, deepseek-r1, ...)
+    // from spending the whole generation in their `thinking` field and
+    // returning an empty `response`; models without a thinking mode accept
+    // the flag and ignore it.
     let body = json!({
         "model": cfg.model,
         "prompt": prompt,
         "stream": false,
         "format": "json",
+        "think": false,
         "options": Value::Object(options),
     });
 
@@ -655,10 +660,20 @@ fn ollama_generate(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    if text_out.trim().is_empty() {
-        bail!("Ollama returned an empty response body");
+    if !text_out.trim().is_empty() {
+        return Ok(text_out);
     }
-    Ok(text_out)
+    // Older Ollama builds ignore `think`; the JSON then lands in `thinking`.
+    let thinking = response
+        .get("thinking")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if thinking.starts_with('{') || thinking.starts_with('[') {
+        return Ok(thinking);
+    }
+    bail!("Ollama returned an empty response body")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
