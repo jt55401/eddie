@@ -68,9 +68,13 @@ query ─┬─ BM25: in-index tokenizer, no model ─────────�
   adapter). If neither is runnable, dense is skipped and BM25 + sparse still
   run.
 
-Fusion is reciprocal rank fusion (`k=60`) with per-arm weights (dense 1.2,
-sparse 0.8, BM25 0.6, picked by graded sweeps on two labelled sites; BM25
-takes the sparse weight when an index has no sparse arm),
+Fusion is reciprocal rank fusion (`k=60`) with per-arm weights (dense 1.0,
+sparse 1.2, BM25 1.0 by default, the setting with the best mean and worst-case
+graded nDCG across three labelled sets: a resume site, a business site and an
+EnterpriseRAG Confluence subset; BM25 takes the sparse weight when an index
+has no sparse arm). `eddie index --weights D,S,B` bakes site-specific weights
+into the index, typically the best row of `eddie eval --sweep`, and the widget
+uses them.
 followed by page-level grouping (best chunk per URL, with a bounded
 agreement bonus when a second chunk on the same page also scored well) and
 a recency tie-breaker for dated pages.

@@ -253,7 +253,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         explain: bool,
 
-        /// RRF weights as dense,sparse,bm25 (default 1.2,0.8,0.6).
+        /// RRF weights as dense,sparse,bm25 (default 1,1.2,1).
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
@@ -303,7 +303,7 @@ enum Command {
         #[arg(long, default_value_t = false)]
         json: bool,
 
-        /// RRF weights as dense,sparse,bm25 (default 1.2,0.8,0.6).
+        /// RRF weights as dense,sparse,bm25 (default 1,1.2,1).
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
