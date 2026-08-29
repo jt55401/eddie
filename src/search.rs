@@ -549,35 +549,14 @@ fn trim_to_words(text: &str, terms: &HashSet<&str>, max_chars: usize) -> String 
 }
 
 /// Query-side sparse terms: WordPiece ids of the query weighted by the IDF the
-/// index stores for them; ids without an IDF (not in the postings) are
-/// dropped and duplicates collapse to their maximum weight.
-///
-// TODO(integrator): replace with `sparse::sparse_query_terms` once
-// `src/sparse.rs` lands; keep the same contract (sorted by token_id).
+/// index stores for them (see `crate::sparse::sparse_query_terms`). Kept as a
+/// `Result` for callers that treat tokenizer failures as errors.
 pub fn sparse_query_terms_local(
     tokenizer: &tokenizers::Tokenizer,
     idf: &dyn Fn(u32) -> Option<f32>,
     query: &str,
 ) -> Result<Vec<SparseTerm>> {
-    let encoding = tokenizer
-        .encode(query, false)
-        .map_err(|e| anyhow::anyhow!("sparse tokenizer error: {}", e))?;
-    let mut best: HashMap<u32, f32> = HashMap::new();
-    for &id in encoding.get_ids() {
-        if let Some(w) = idf(id)
-            && w > 0.0
-            && w.is_finite()
-        {
-            let e = best.entry(id).or_insert(0.0);
-            *e = e.max(w);
-        }
-    }
-    let mut terms: Vec<SparseTerm> = best
-        .into_iter()
-        .map(|(token_id, weight)| SparseTerm { token_id, weight })
-        .collect();
-    terms.sort_by_key(|t| t.token_id);
-    Ok(terms)
+    Ok(crate::sparse::sparse_query_terms(tokenizer, idf, query))
 }
 
 #[cfg(test)]
