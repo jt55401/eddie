@@ -113,6 +113,7 @@ if ! curl -fsS http://127.0.0.1:8000 >/tmp/mkdocs-home.html; then
 fi
 grep -q "eddie-widget.js" /tmp/mkdocs-home.html
 curl -fsS http://127.0.0.1:8000/eddie/eddie-worker.js >/tmp/mkdocs-worker.js
+curl -fsS http://127.0.0.1:8000/eddie/eddie-agent-worker.js >/tmp/mkdocs-agent-worker.js
 curl -fsS http://127.0.0.1:8000/eddie/eddie-wasm.js >/tmp/mkdocs-wasm.js
 curl -fsS http://127.0.0.1:8000/eddie/eddie.wasm >/tmp/mkdocs-engine.wasm
 

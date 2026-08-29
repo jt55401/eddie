@@ -108,6 +108,7 @@ done
 curl -fsS http://127.0.0.1:1313 >/tmp/hugo-home.html
 grep -q "eddie-widget.js" /tmp/hugo-home.html
 curl -fsS http://127.0.0.1:1313/eddie/eddie-worker.js >/tmp/hugo-worker.js
+curl -fsS http://127.0.0.1:1313/eddie/eddie-agent-worker.js >/tmp/hugo-agent-worker.js
 curl -fsS http://127.0.0.1:1313/eddie/eddie-wasm.js >/tmp/hugo-wasm.js
 curl -fsS http://127.0.0.1:1313/eddie/eddie.wasm >/tmp/hugo-engine.wasm
 

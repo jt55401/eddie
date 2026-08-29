@@ -1,24 +1,26 @@
-# 0120 LLM Model Selection
+# 0120 Agent Model Selection
 
 [Requirements Home](../../0000-README.md) | [Area Overview](../0000-high-level-requirements.md)
 
 ## User Story
 
-As a site owner, I can choose which LLM to use for Q&A synthesis, or disable Q&A entirely, via `<script>` data attributes.
+As a site owner, I can choose which model the in-browser agent uses, or
+disable the agent entirely, via `<script>` data attributes (or Hugo
+`[params.eddie]`).
 
 ## Key Fields/Parameters
 
-- `data-qa-enabled` — `"true"` (default) or `"false"` to hide Ask button entirely
-- `data-qa-model` — WebLLM model ID (default: `Qwen2.5-0.5B-Instruct-q4f16_1-MLC`, ~350MB)
-- runtime: WebLLM only (no wllama — search-only fallback when WebGPU unavailable)
-- recommended models: `Qwen2.5-0.5B-Instruct-q4f16_1-MLC` (350MB), `Qwen2.5-1.5B-Instruct-q4f16_1-MLC` (900MB)
+- `data-agent-mode`: `off` or `auto` (default); `off` hides the Ask affordance entirely regardless of device capability
+- `data-agent-model`: `auto` (default, `Qwen3.5-0.8B`), `quality` (`Qwen3.5-2B`), or any other value passed through as a literal WebLLM model id
+- runtime: WebLLM only; search-only fallback whenever the device gate (see [0300-qa-runtime](../../0300-qa-runtime/0100-webgpu-detection/0110-webgpu-detection-fallback.md)) fails
+- this is distinct from `data-qa-mode`, which controls the non-LLM inline retrieval answer blend (see [0420](../../0400-widget-ui/0400-qa-mode/0420-inline-retrieval-answer-blend.md)) and needs no model at all
 
 ## Acceptance Criteria
 
-- Q&A can be disabled entirely via `data-qa-enabled="false"` (Ask button not rendered).
-- The LLM model is configurable via `data-qa-model` attribute.
-- Default model is permissively licensed (Apache 2.0 or MIT).
-- Configuration is read from the `<script>` tag's data attributes (same pattern as existing widget config).
+- The agent can be disabled entirely via `data-agent-mode="off"` (Ask affordance not rendered).
+- The agent model is configurable via `data-agent-model`.
+- Both built-in choices (`auto`, `quality`) are permissively licensed (Qwen3.5, Apache-2.0-family license).
+- Configuration is read from the `<script>` tag's data attributes (same pattern as existing widget config), or from `[params.eddie]` via the Hugo Module partial.
 
 ## Evidence
 

@@ -17,9 +17,9 @@ Detailed per-area requirements live in [requirements/0000-README.md](requirement
 
 | Req ID | Requirement | Acceptance Evidence | Linked Tickets | Status |
 |---|---|---|---|---|
-| INDEX-REQ-001 | CLI parses markdown/HTML and produces chunked embeddings | `tests/cli/test_indexer.rs` | — | Proposed |
-| SEARCH-REQ-001 | WASM module embeds queries and returns ranked results | `tests/wasm/test_search.rs` | — | Proposed |
-| QA-REQ-001 | Optional LLM synthesis from retrieved chunks via WebGPU | `tests/integration/test_qa.js` | — | Proposed |
-| WIDGET-REQ-001 | Floating button + modal with search and Q&A modes | `tests/integration/test_widget.js` | — | Proposed |
-| INTEG-REQ-001 | GitHub Action indexes Hugo content at build time | `.github/workflows/index.yml` | — | Proposed |
-| CONFIG-REQ-001 | Embedding model, LLM, and UI are configurable | `eddie.toml` | — | Proposed |
+| INDEX-REQ-001 | CLI parses markdown and produces BM25 + sparse + dense retrieval arms | `tests/cli/test_indexer.rs` | (none) | Proposed |
+| SEARCH-REQ-001 | WASM module embeds queries and returns fused, ranked results | `tests/wasm/test_search.rs` | (none) | Proposed |
+| QA-REQ-001 | Optional in-browser agent (WebLLM) answers from retrieved chunks via WebGPU | `tests/integration/test_qa.js` | (none) | Proposed |
+| WIDGET-REQ-001 | Floating button + modal with type-ahead search and optional answer blend/agent | `tests/integration/test_widget.js` | (none) | Proposed |
+| INTEG-REQ-001 | GitHub Action indexes Hugo content at build time with a pinned, verified CLI version | `.github/workflows/example-hugo.yml` | (none) | Proposed |
+| CONFIG-REQ-001 | Dense/sparse model choice, agent model choice, and UI are configurable via CLI flags and `data-*` attributes (no config file) | `docs/guides/hugo.md` | (none) | Proposed |

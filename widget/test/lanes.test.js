@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: GPL-3.0-only
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const L = require("../src/lib/lanes.js");
+
+const minilm = {
+  id: "minilm", model: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1", family: "bert", dim: 384,
+  pooling: "cls", normalize: true, revision: "abc", quant: "int8",
+  runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "model.safetensors"] },
+};
+const qwen = {
+  id: "qwen3e", model: "Qwen/Qwen3-Embedding-0.6B", family: "qwen3", dim: 1024, pooling: "last", normalize: true,
+  runtime: { kind: "webgpu-onnx", repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX", dtype: "q4", dtype_f16: "q4f16", pooling: "last_token" },
+};
+
+test("auto prefers webgpu when available, wasm otherwise", () => {
+  const m = { dense: [minilm, qwen] };
+  assert.deepEqual(L.chooseDenseLanes(m, { denseRuntime: "auto", hasWebGpu: true }).candidates.map((l) => l.id), ["qwen3e", "minilm"]);
+  assert.deepEqual(L.chooseDenseLanes(m, { denseRuntime: "auto", hasWebGpu: false }).candidates.map((l) => l.id), ["minilm"]);
+});
+
+test("forced runtimes", () => {
+  const m = { dense: [minilm, qwen] };
+  assert.deepEqual(L.chooseDenseLanes(m, { denseRuntime: "wasm", hasWebGpu: true }).candidates.map((l) => l.id), ["minilm"]);
+  assert.deepEqual(L.chooseDenseLanes(m, { denseRuntime: "webgpu", hasWebGpu: true }).candidates.map((l) => l.id), ["qwen3e"]);
+  const none = L.chooseDenseLanes(m, { denseRuntime: "webgpu", hasWebGpu: false });
+  assert.equal(none.candidates.length, 0);
+  assert.equal(none.reason, "no WebGPU adapter");
+});
+
+test("empty and unrunnable manifests explain why", () => {
+  assert.equal(L.chooseDenseLanes({ dense: [] }, {}).reason, "index has no dense lane");
+  assert.equal(L.chooseDenseLanes({}, {}).reason, "index has no dense lane");
+  assert.equal(L.chooseDenseLanes({ dense: [qwen] }, { denseRuntime: "auto", hasWebGpu: false }).reason, "no WebGPU adapter");
+  assert.equal(L.chooseDenseLanes({ dense: [qwen] }, { denseRuntime: "wasm", hasWebGpu: true }).reason, "index has no wasm-candle lane");
+});
+
+test("lane files, repo, revision", () => {
+  assert.deepEqual(L.laneFiles(minilm), ["config.json", "tokenizer.json", "model.safetensors"]);
+  assert.deepEqual(L.laneFiles({ runtime: { kind: "wasm-candle" } }), L.DEFAULT_WASM_FILES);
+  assert.deepEqual(L.laneFiles(qwen), []);
+  assert.equal(L.laneRepo(minilm), "sentence-transformers/multi-qa-MiniLM-L6-cos-v1");
+  assert.equal(L.laneRepo(qwen), "onnx-community/Qwen3-Embedding-0.6B-ONNX");
+  assert.equal(L.laneRevision(minilm), "abc");
+  assert.equal(L.laneRevision(qwen), "main");
+  // The manifest pins lane.model, not the ONNX repo a webgpu lane downloads from.
+  assert.equal(L.laneRevision(Object.assign({}, qwen, { revision: "97b0c614" })), "main");
+});
+
+test("dtype picks f16 only with shader-f16", () => {
+  assert.equal(L.pickDtype(qwen.runtime, true), "q4f16");
+  assert.equal(L.pickDtype(qwen.runtime, false), "q4");
+  assert.equal(L.pickDtype({ dtype: "q8" }, true), "q8");
+});
+
+test("download sizes and formatting", () => {
+  assert.equal(L.laneDownloadBytes(minilm), 91e6);
+  assert.equal(L.laneDownloadBytes(qwen), 900e6);
+  assert.equal(L.laneDownloadBytes({ model: "someone/unknown", runtime: { kind: "wasm-candle" } }), null);
+  assert.equal(L.formatBytes(91e6), "91 MB");
+  assert.equal(L.formatBytes(1.2e9), "1.2 GB");
+  assert.equal(L.formatBytes(700e3), "700 KB");
+  assert.equal(L.formatBytes(null), "unknown size");
+});
+
+test("consent copy states size, honours save-data and overrides", () => {
+  const text = L.consentCopy({ sizeBytes: 91e6, model: "MiniLM" });
+  assert.match(text, /91 MB/);
+  assert.match(text, /MiniLM/);
+  assert.doesNotMatch(text, /Data saver/);
+  assert.match(L.consentCopy({ sizeBytes: 91e6, saveData: true }), /^Data saver is on\./);
+  assert.match(L.consentCopy({ sizeBytes: null }), /size unknown/);
+  assert.equal(L.consentCopy({ sizeBytes: 570e6, model: "bge-m3", consentText: "Get {model} ({size})?" }), "Get bge-m3 (570 MB)?");
+});
+
+test("degraded notice names the missing arm", () => {
+  assert.equal(L.degradedNotice({ dense: true, sparse: true, bm25: true }, []), null);
+  assert.equal(L.degradedNotice({ dense: false, sparse: false, bm25: true }, ["dense: index has no dense lane"]), null);
+  assert.match(L.degradedNotice({ dense: false, sparse: false, bm25: true }, ["dense: no query vector (no runnable embedder)"]), /^Keyword-only results/);
+  assert.match(L.degradedNotice({ dense: false, sparse: true, bm25: true }, ["dense: model failed"]), /dense model/);
+  assert.match(L.degradedNotice({ dense: true, sparse: false, bm25: true }, ["sparse: no query terms (tokenizer not loaded)"]), /sparse/);
+  assert.deepEqual(L.filterDesignDegraded(["dense: index has no dense lane", "sparse: x"]), ["sparse: x"]);
+});
+
+test("wasm lanes the WASM loader cannot run are skipped with a reason", () => {
+  const bin = Object.assign({}, minilm, { id: "bin", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "pytorch_model.bin"] } });
+  const sharded = Object.assign({}, minilm, { id: "sharded", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"] } });
+  const xlmr = Object.assign({}, minilm, { id: "xlmr", family: "xlm-roberta" });
+  const noTok = Object.assign({}, minilm, { id: "notok", runtime: { kind: "wasm-candle", files: ["config.json", "model.safetensors"] } });
+  assert.equal(L.wasmLaneProblem(minilm), null);
+  assert.match(L.wasmLaneProblem(bin), /single model\.safetensors, not pytorch_model\.bin/);
+  assert.match(L.wasmLaneProblem(sharded), /model-00001-of-00002\.safetensors/);
+  assert.match(L.wasmLaneProblem(xlmr), /xlm-roberta/);
+  assert.match(L.wasmLaneProblem(noTok), /tokenizer\.json/);
+  const choice = L.chooseDenseLanes({ dense: [bin, sharded, minilm] }, { denseRuntime: "auto", hasWebGpu: false });
+  assert.deepEqual(choice.candidates.map((l) => l.id), ["minilm"]);
+  assert.deepEqual(choice.skipped.map((s) => s.lane.id), ["bin", "sharded"]);
+  const none = L.chooseDenseLanes({ dense: [bin] }, { denseRuntime: "wasm" });
+  assert.equal(none.candidates.length, 0);
+  assert.match(none.reason, /WASM loader/);
+});

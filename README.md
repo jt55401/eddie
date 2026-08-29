@@ -1,32 +1,34 @@
 # Eddie
 
 <p align="center">
-  <img src="assets/eddie-header.png" alt="Eddie — Your site's shipboard computer" width="400" />
+  <img src="assets/eddie-header.png" alt="Eddie, your site's shipboard computer" width="400" />
 </p>
 
 **Your site's shipboard computer.**
 
-Hybrid semantic + keyword search for static sites, with optional experimental Q&A — fully client-side, no server required. Runs entirely in your visitor's browser via WebAssembly.
+Hybrid search for static sites, combining BM25, a learned sparse arm, and
+dense embeddings, fused and ranked client-side. An optional in-browser
+agent answers questions with citations. No server, no API key. Runs
+entirely in your visitor's browser via WebAssembly and, where available,
+WebGPU.
 
 > *"I'm just so happy to be doing this for you."*
-> — Eddie, the Heart of Gold's shipboard computer
+> Eddie, the Heart of Gold's shipboard computer
 
 ## Don't Panic
 
 Eddie does three things:
 
-1. **Build time:** A CLI reads your markdown/HTML content, chunks it, and generates embeddings using a sentence-transformer model. The result is a compact binary index shipped as a static asset. Simple, elegant, like a fjord.
-
-2. **Runtime:** A WASM module in the browser downloads the same embedding model (from HuggingFace CDN, cached after first use), embeds the visitor's query, and performs hybrid semantic + keyword search against the pre-built index.
-
-3. **Optional Q&A (experimental):** On browsers with WebGPU support, a small language model can synthesize a short answer from retrieved content. This is still experimental and falls back gracefully to search-only on browsers without WebGPU.
+1. **Build time:** A CLI reads your markdown content, chunks it by heading (or by semantic boundary), and builds three retrieval arms: a BM25 keyword index, a learned sparse index, and one or more dense embedding lanes. The result is a single Brotli-compressed index file (`.ed`, format v5).
+2. **Runtime:** A WASM module downloads whichever models the retrieval arms need (cached after first use), embeds the visitor's query, and fuses BM25 + sparse + dense scores with reciprocal rank fusion.
+3. **Optional agent:** On browsers with a WebGPU adapter, a small LLM (WebLLM, Qwen3.5) runs a bounded tool loop over the same retriever and streams a cited answer. Falls back to search-only everywhere else.
 
 ## Quick Start
 
 ### 1. Index your content
 
 ```bash
-eddie index --content-dir content/ --output static/eddie/index.ed
+eddie index --content-dir content/ --cms hugo --output static/eddie/index.ed --preset balanced
 ```
 
 ### 2. Embed the widget
@@ -35,9 +37,305 @@ eddie index --content-dir content/ --output static/eddie/index.ed
 <script src="/eddie-widget.js"></script>
 ```
 
+Using Hugo? The [`eddie-hugo` module](docs/guides/hugo.md) wires this up
+for you, including every `data-*` attribute, from `[params.eddie]` in your
+`hugo.toml`.
+
 ### 3. Share and Enjoy
 
-Visitors see a floating search button. First search triggers a one-time model download (~87MB cache footprint with the default model), then searches are instant. The answer to how long subsequent queries take is not 42 — it's closer to 42 milliseconds.
+Visitors see a floating search button. The first search triggers a one-time
+model download, then searches run in milliseconds. Which model downloads,
+and how large it is, depends on the preset you indexed with and what the
+visitor's browser can run. See the model table below.
+
+## Retrieval architecture
+
+```
+query ─┬─ BM25: in-index tokenizer, no model ────────────────────┐
+       ├─ sparse: WordPiece(query) × IDF, no model ───────────────┤ weighted RRF → page grouping → snippets
+       └─ dense: WASM candle (bert) or transformers.js (WebGPU) ──┘
+```
+
+- **BM25** (`k1=1.2`, `b=0.75`) always runs; it costs nothing extra since the
+  tokenizer and postings are in every index.
+- **Sparse** is a learned, inference-free arm: the index stores per-term IDF
+  weights computed at build time with `opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill`,
+  and the browser just tokenizes the query and looks weights up; it costs no
+  extra model download and no extra forward pass.
+- **Dense** runs one of two ways depending on what the visitor's browser
+  supports: `wasm-candle` (bert-family models, CPU, always available) or
+  `webgpu-onnx` (larger models via transformers.js, only with a WebGPU
+  adapter). If neither is runnable, dense is skipped and BM25 + sparse still
+  run.
+
+Fusion is reciprocal rank fusion (`k=60`) with per-arm weights (dense 1.0,
+sparse 1.0, BM25 0.8; BM25 goes to 1.0 when an index has no sparse arm),
+followed by page-level grouping (best chunk per URL, with a bounded
+agreement bonus when a second chunk on the same page also scored well) and
+a recency tie-breaker for dated pages.
+
+## CLI reference
+
+```
+eddie index --content-dir <path> --cms <hugo|astro|docusaurus|eleventy|jekyll|mkdocs> --output <index.ed>
+            [--dense-model <id>]...  [--sparse | --sparse-model <id>]
+            [--device auto|cpu|cuda] [--batch-size 32]
+            [--chunk-size 256] [--overlap 32] [--chunk-strategy heading|semantic]
+            [--qa ...] [--claims ...] [--preset fast|balanced|quality|gpu]
+
+eddie search --index <index.ed> --query <text>
+             [--mode hybrid|dense|sparse|keyword] [--lane <id>] [--top-k 8] [--json]
+
+eddie stats --index <index.ed>
+eddie eval  --index <index.ed> --labels <labels.toml>
+eddie tune  --content-dir <path> --eval <labels.toml> [...]
+```
+
+`eddie search` reads the dense lane(s), the sparse arm, and the tokenizer
+from the index itself; there is no `--model` flag, so query-time and
+index-time embeddings can't drift apart. `eddie stats` prints the manifest,
+lane ids, and sparse term count; `eddie eval`/`eddie tune` compute Hit@k,
+MRR, and nDCG against a labelled query set.
+
+### Presets
+
+`--preset` bundles a dense model set (and device) in one flag:
+
+| Preset | Dense lane(s) | Sparse | Device |
+|---|---|---|---|
+| `fast` | MiniLM-L6 | no | CPU |
+| `balanced` | bge-small-en-v1.5 | yes | CPU |
+| `quality` | bge-small-en-v1.5 + Qwen3-Embedding-0.6B | yes | CPU |
+| `gpu` | same as `quality` | yes | CUDA |
+
+CUDA acceleration at index time is not part of the published release binary;
+build it yourself with `cargo build --release --features cuda` against a
+local CUDA toolkit.
+
+## Models
+
+Dense embedding models run in one of two lanes. The `wasm-candle` lane
+(bert-family architectures only) runs on CPU in the WASM module and works
+in every browser. The `webgpu-onnx` lane runs larger models via
+transformers.js and only activates when the visitor's browser gives a
+WebGPU adapter; otherwise that lane is skipped and BM25 + sparse still
+serve results.
+
+| Model | Lane | License | Dimensions | Notes |
+|---|---|---|---|---|
+| `sentence-transformers/multi-qa-MiniLM-L6-cos-v1` | `wasm-candle` | Apache-2.0 | 384 | Default, retrieval-tuned |
+| `BAAI/bge-small-en-v1.5` | `wasm-candle` | MIT | 384 | `balanced`/`quality` preset default |
+| `Snowflake/snowflake-arctic-embed-s` | `wasm-candle` | Apache-2.0 | 384 | Clean training-data provenance |
+| `Qwen/Qwen3-Embedding-0.6B` | `webgpu-onnx` | Apache-2.0 | 1024 | `quality`/`gpu` preset; 184 ms/query warm (q4, WebGPU) |
+| `microsoft/harrier-oss-v1-0.6b` | `webgpu-onnx` | MIT | 1024 | Last-token pooling, 32k context |
+| `BAAI/bge-m3` | `webgpu-onnx` | MIT | 1024 | 779 ms/query warm (q8, WebGPU) |
+
+Models are fetched from HuggingFace at runtime; Eddie doesn't redistribute
+weights. WebGPU dtype selection depends on the adapter: `q4f16_1`-style
+builds need `shader-f16`; without it, Eddie falls back to an `f32`
+variant, which is slower but works everywhere WebGPU itself works.
+
+## Optional in-browser agent
+
+On top of retrieval, a small LLM can run a bounded tool loop (plan → search
+→ optionally read a page → answer, four tool calls max) over the same
+retriever and stream a cited answer. It needs a WebGPU adapter with at
+least 1 GiB of buffer capacity, and it asks for consent before downloading
+anything. The consent prompt states the download size up front, and the
+choice is remembered in `localStorage`.
+
+| `data-agent-model` | Model | Weights |
+|---|---|---|
+| `auto` (default) | Qwen3.5-0.8B | ≈ 0.4 GB |
+| `quality` | Qwen3.5-2B | ≈ 1.2 GB |
+| any other value | passed through as a literal WebLLM model id | varies |
+
+Runtime is [WebLLM](https://github.com/mlc-ai/web-llm). On Linux
+Chromium/Vulkan without `shader-f16`, the `q4f16_1` build variant fails WGSL
+validation; Eddie uses `q4f32_1` there instead, which measured 62 tok/s
+(0.8B) and 52 tok/s (2B) on an RTX 4090. Answers cite retrieved evidence as
+`[n]`; when there's no supporting evidence, the agent says the site doesn't
+cover the question instead of guessing.
+
+Q&A retrieval (build-time question/answer synthesis via `--qa`) still runs
+at index time and feeds the agent's evidence list. See the CLI reference
+above.
+
+## Index format
+
+Indexes use format v5 (`SAED` container, `SAGI` payload sections for
+metadata, texts, BM25, sparse, and one or more dense lanes). A v0.4 CLI
+rejects v1-v4 index files with a "rebuild with eddie 0.4" message. There's
+no in-place migration, so rebuild with `eddie index` after upgrading.
+
+## Configuration
+
+There's no config file (`eddie.toml`). The indexer reads CLI flags, and the
+widget reads `data-*` attributes on its `<script>` tag (or, on Hugo,
+`[params.eddie]` in `hugo.toml`, which the module partial turns into those
+same attributes for you):
+
+```html
+<script src="/eddie-widget.js"
+        data-index-url="/eddie/index.ed"
+        data-position="bottom-right"
+        data-theme="auto"
+        data-qa-mode="auto"
+        data-top-k="8"
+        data-answer-top-k="5"
+        data-agent-mode="auto"
+        data-agent-model="auto"
+        data-dense-runtime="auto"
+        data-consent-text=""
+></script>
+```
+
+- `data-position` accepts `top-left`, `top-right`, `bottom-left`, or `bottom-right`.
+- `data-theme` accepts `light`, `dark`, or `auto` (follows `prefers-color-scheme`).
+- `data-qa-mode` accepts `off`, `auto`, or `always` for the retrieval-only answer blend.
+- `data-agent-mode` accepts `off` or `auto` for the in-browser LLM agent.
+- `data-agent-model` accepts `auto`, `quality`, or an explicit WebLLM model id (see the agent table above).
+- `data-dense-runtime` accepts `auto`, `wasm`, or `webgpu` to force one dense lane instead of auto-selecting.
+- `data-consent-text` overrides the widget's built-in model-download consent copy.
+
+## Tuning chunk size and ranking
+
+Keep acceptance tests in your site repo, not inside Eddie. Start from the
+example suite:
+
+```bash
+cp examples/acceptance-suite.json /path/to/your-site/eddie.acceptance.json
+```
+
+Run an automated parameter sweep over chunk size and overlap:
+
+```bash
+eddie tune \
+  --content-dir content/ \
+  --eval eddie.acceptance.json \
+  --chunk-sizes 192,256,320 \
+  --overlaps 16,32,48 \
+  --mode hybrid \
+  --report tune-report.json
+```
+
+Or run the guided interactive loop, which asks for a query, the phrases you
+expect to see, and a rating, then re-tunes from what it collects:
+
+```bash
+eddie tune --content-dir content/ --interactive --save-eval eddie.acceptance.json
+```
+
+## Human-friendly claim edits
+
+Build-time claim extraction (`--claims`) can mislabel or miss a fact. Fix it
+without graph tooling by writing a `claims.edits.toml` (see
+`examples/claims.edits.toml` for a template):
+
+```toml
+[[redact]]
+predicate = "worked_for"
+object = "Old Company"
+
+[[add]]
+subject = "Site Subject"
+predicate = "worked_for"
+object = "Nike"
+evidence = "Manual correction"
+source_url = "/about/"
+confidence = 1.0
+tags = ["manual"]
+```
+
+Apply it during indexing:
+
+```bash
+eddie index --content-dir content/ --output static/eddie/index.ed --claims --claims-edits claims.edits.toml
+```
+
+## Benchmark suite
+
+`scripts/benchmark_suite.py` runs model/dataset matrix timing and quality
+comparisons:
+
+1. Caches benchmark corpora locally (git sparse checkouts, excluded from git).
+2. Runs clean index/search timing loops across any dataset/model combination.
+3. Optionally uses OpenRouter to generate a stable query set per dataset and to judge retrieval quality for sampled queries.
+4. Writes CSV (and optional Parquet) plus a markdown summary table.
+5. Computes Hit@k, MRR, and nDCG@k against human-maintained labels in `benchmarks/relevance_labels.toml`.
+
+```bash
+python3 scripts/benchmark_suite.py prepare
+python3 scripts/benchmark_suite.py run --generate-queries
+python3 scripts/benchmark_suite.py render-report .bench/results/<run_id>
+```
+
+See `benchmarks/README.md` for the full option list.
+
+## How It Compares
+
+| Tool | Deployment | Search | Q&A | Server | Cost |
+|------|-----------|--------|-----|--------|------|
+| **Eddie** | Client (WASM/WebGPU) | BM25 + learned sparse + dense, RRF-fused | Agent, cited (WebGPU) | No | Free |
+| Pagefind | Client (WASM) | Keyword | No | No | Free |
+| Algolia DocSearch | Cloud | Keyword + neural | No | Yes | Free for OSS |
+| kapa.ai | Cloud | Semantic (RAG) | Yes | Yes | Enterprise |
+| DocsBot | Cloud | Semantic (RAG) | Yes | Yes | $16-$416/mo |
+
+## How It Works
+
+Eddie is a single Rust codebase that compiles to two targets:
+
+1. **Native CLI** (`eddie`), which runs at build time to index your content
+2. **WASM module**, which runs in the browser for retrieval, ranking, and (via WebGPU) the agent
+
+### Indexing Flow (Build Time)
+
+```mermaid
+flowchart LR
+  A[Markdown Content] --> B[Parse + Clean]
+  B --> C[Chunking<br/>heading or semantic]
+  C --> D[Dense Embeddings<br/>one or more lanes]
+  C --> E[BM25]
+  C --> F[Learned Sparse]
+  C --> G[QA / Claims<br/>optional]
+  D --> H[index.ed v5]
+  E --> H
+  F --> H
+  G --> H
+```
+
+### Widget Flow (Runtime)
+
+```mermaid
+flowchart LR
+  A[Visitor Opens Widget] --> B[Fetch index.ed manifest]
+  B --> C[Pick dense lane:<br/>WebGPU or WASM candle]
+  C --> D[Load Model Files<br/>cached in browser]
+  D --> E[Query]
+  E --> F[BM25 + Sparse + Dense]
+  F --> G[Weighted RRF + Page Grouping]
+  G --> H[Ranked Results]
+  H -.optional, WebGPU only.-> I[Agent: plan / search / answer]
+```
+
+ML inference uses [Candle](https://github.com/huggingface/candle)
+(HuggingFace's Rust ML framework) for the WASM lane, and
+[transformers.js](https://github.com/huggingface/transformers.js) +
+[WebLLM](https://github.com/mlc-ai/web-llm) for the WebGPU lanes.
+
+## Papers and References
+
+- [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://arxiv.org/abs/1810.04805)
+- [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](https://arxiv.org/abs/1908.10084)
+- [MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers](https://arxiv.org/abs/2002.10957)
+- [Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
+- [The Probabilistic Relevance Framework: BM25 and Beyond](https://www.nowpublishers.com/article/Details/INR-019)
+- [BGE M3-Embedding: Multi-Lingual, Multi-Functionality, Multi-Granularity Text Embeddings](https://arxiv.org/abs/2402.03216)
+- [WebAssembly](https://webassembly.org/)
+- [WebGPU](https://www.w3.org/TR/webgpu/)
+- [Hugging Face Candle](https://github.com/huggingface/candle)
+- [WebLLM](https://github.com/mlc-ai/web-llm)
 
 ## CMS Demo Gallery
 
@@ -57,438 +355,48 @@ Refresh these screenshots with:
 bash scripts/capture-cms-gallery.sh
 ```
 
-See [docs/guides/cms-gallery.md](docs/guides/cms-gallery.md) for full workflow and options.
+See [docs/guides/cms-gallery.md](docs/guides/cms-gallery.md) for the full workflow and options.
 
-### Precompressed Runtime Assets
+### Precompressed runtime assets
 
-The release pipeline now emits sidecar assets for runtime files:
+The release pipeline emits sidecar assets for every runtime file:
 
 - `eddie.wasm.br` / `eddie.wasm.gz`
 - `eddie-wasm.js.br` / `eddie-wasm.js.gz`
 - `eddie-worker.js.br` / `eddie-worker.js.gz`
+- `eddie-agent-worker.js.br` / `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
 - `eddie-widget.js.br` / `eddie-widget.js.gz`
 
-Use normal URLs in HTML (`eddie-widget.js`, `eddie.wasm`, etc). Browsers should receive compressed bytes through standard HTTP content negotiation (`Accept-Encoding`).
-
-Important: browser JS should not manually switch to `.br` filenames unless your host also sets correct response headers (`Content-Encoding: br` and the correct content type). Without those headers, `.br` files are just opaque bytes.
-
-### Hugo Module Convenience Bootstrap
-
-If you use `eddie-hugo`, you can scaffold local, gitignored settings + a one-command index wrapper:
-
-```bash
-bash scripts/eddie-init-site.sh /path/to/your-hugo-site
-```
-
-This creates:
-
-1. `.eddie/local.env` (machine-local settings, gitignored)
-2. `.eddie/claims.edits.toml` (optional manual claim edits, gitignored)
-3. `scripts/eddie-index.sh` (convenience wrapper around `eddie index`)
-
-Then you can index with:
-
-```bash
-bash scripts/eddie-index.sh
-```
-
-### Quality vs Speed Profiles (`.eddie/local.env`)
-
-You can tune index quality by trading off build time:
-
-```bash
-# Fast profile
-EDDIE_MODEL=sentence-transformers/all-MiniLM-L6-v2
-EDDIE_CHUNK_SIZE=256
-EDDIE_OVERLAP=32
-EDDIE_QA_OLLAMA_MODEL=
-
-# Quality-first local workstation profile
-EDDIE_MODEL=sentence-transformers/all-MiniLM-L12-v2
-EDDIE_CHUNK_SIZE=320
-EDDIE_OVERLAP=48
-EDDIE_QA_OLLAMA_MODEL=qwen2.5:32b
-EDDIE_QA_OLLAMA_MAX_CHUNKS=96
-EDDIE_QA_OLLAMA_MAX_PAIRS_PER_CHUNK=4
-EDDIE_QA_OLLAMA_TEMPERATURE=0.1
-```
-
-Guideline:
-
-1. Larger embedder + larger chunks typically improve recall/answer grounding.
-2. Stronger Ollama model at index time improves QA/claim synthesis quality.
-3. Build time and memory usage increase substantially.
-
-## Guided Chunking Tuning (Site-Owned Acceptance Tests)
-
-Keep acceptance tests in your site repo, not inside Eddie.
-
-Example suite:
-
-```bash
-cp examples/acceptance-suite.json /path/to/your-site/eddie.acceptance.json
-```
-
-Run automated parameter sweep:
-
-```bash
-eddie tune \
-  --content-dir content/ \
-  --eval eddie.acceptance.json \
-  --chunk-sizes 192,256,320 \
-  --overlaps 16,32,48 \
-  --mode hybrid \
-  --report tune-report.json
-```
-
-Run guided interactive loop (collect query, expected phrases, user rating, then re-tune):
-
-```bash
-eddie tune \
-  --content-dir content/ \
-  --interactive \
-  --save-eval eddie.acceptance.json
-```
-
-## Benchmark Suite (Tickets 8 + 14)
-
-Eddie now includes a configurable benchmark harness for model/dataset matrix runs.
-
-What it does:
-
-1. Caches benchmark corpora locally (git sparse checkouts, excluded from git).
-2. Runs clean index/search timing loops across any dataset/model combination.
-3. Optionally uses OpenRouter:
-   - larger model to generate stable query sets per dataset
-   - smaller model to judge retrieval quality for sampled queries
-4. Writes machine-friendly outputs (`CSV`, optional `Parquet`) plus markdown summary tables.
-5. Computes deterministic retrieval metrics (`Hit@k`, `MRR`, `nDCG@k`) from human-maintained labels in `benchmarks/relevance_labels.toml`.
-
-Default benchmark config: `benchmarks/benchmark.toml`
-Deterministic relevance labels: `benchmarks/relevance_labels.toml`
-
-Prepare datasets:
-
-```bash
-python3 scripts/benchmark_suite.py prepare
-```
-
-Generate stored query files (stable benchmark inputs):
-
-```bash
-export OPENROUTER_API_KEY=...
-python3 scripts/benchmark_suite.py generate-queries
-```
-
-Run full matrix:
-
-```bash
-python3 scripts/benchmark_suite.py run --generate-queries
-```
-
-Filter example (single dataset/model quick run):
-
-```bash
-python3 scripts/benchmark_suite.py run \
-  --dataset fastapi_docs \
-  --model sentence-transformers/multi-qa-MiniLM-L6-cos-v1 \
-  --runs-per-combo 1 \
-  --query-limit 10
-```
-
-Render benchmark table:
-
-```bash
-python3 scripts/benchmark_suite.py render-report .bench/results/<run_id>
-# or:
-python3 scripts/render_benchmark_report.py .bench/results/<run_id>
-```
-
-## Single `index.ed` With Sections
-
-Eddie now stores everything in one `index.ed` file:
-
-1. `chunks` section: primary hybrid retrieval corpus (semantic + BM25).
-2. `qa` section (optional): question/answer pairs with source attribution.
-3. `claims` section (optional): atomic factual claims with evidence and source attribution.
-4. `summary` lane (optional): lightweight doc summaries stored as retrieval chunks.
-
-Note: this uses a new v4 index layout; rebuild indexes with the current Eddie binary.
-
-Build with embedded QA + claims:
-
-```bash
-eddie index \
-  --content-dir content/ \
-  --output static/eddie/index.ed \
-  --chunk-strategy semantic \
-  --coarse-chunk-size 640 \
-  --coarse-overlap 96 \
-  --summary-lane \
-  --qa \
-  --claims
-```
-
-Build with local Ollama QA synthesis (good fit for a 4090 workstation):
-
-```bash
-eddie index \
-  --content-dir content/ \
-  --output static/eddie/index.ed \
-  --chunk-strategy semantic \
-  --coarse-chunk-size 640 \
-  --summary-lane \
-  --qa \
-  --claims \
-  --qa-ollama-model qwen2.5:7b-instruct \
-  --qa-ollama-url http://127.0.0.1:11434/api/generate
-```
-
-Build with OpenRouter QA synthesis (optional, local-first still supported):
-
-```bash
-export OPENROUTER_API_KEY=...
-eddie index \
-  --content-dir content/ \
-  --output static/eddie/index.ed \
-  --chunk-strategy semantic \
-  --coarse-chunk-size 640 \
-  --summary-lane \
-  --qa \
-  --claims \
-  --qa-openrouter-model openai/gpt-4.1-mini \
-  --qa-openrouter-url https://openrouter.ai/api/v1/chat/completions \
-  --qa-openrouter-api-key-env OPENROUTER_API_KEY
-```
-
-Search specific lanes:
-
-```bash
-eddie search --index static/eddie/index.ed --query "who has the subject worked for" --mode hybrid --scope all
-eddie search --index static/eddie/index.ed --query "how many years has the subject been programming" --mode semantic --scope qa
-eddie search --index static/eddie/index.ed --query "worked for nike" --mode semantic --scope claims
-```
-
-Recommended architecture:
-
-1. Build time: use larger model (Ollama/OpenRouter) to synthesize high-signal QA and claims.
-2. Runtime: use retrieval-first from `chunks` and optionally blend `qa`/`claims` lanes.
-3. Answer generation: keep small runtime models grounded on cited evidence.
-4. Runtime ranking now includes recency decay boost and multi-granularity fusion bonus.
-
-## Human-Friendly Claim Edits
-
-You can manually add or redact claims without graph tooling.
-
-Create `claims.edits.toml`:
-
-```toml
-[[redact]]
-predicate = "worked_for"
-object = "Old Company"
-
-[[add]]
-subject = "Site Subject"
-predicate = "worked_for"
-object = "Nike"
-evidence = "Manual correction"
-source_url = "/about/"
-confidence = 1.0
-tags = ["manual"]
-```
-
-Apply during index build:
-
-```bash
-eddie index \
-  --content-dir content/ \
-  --output static/eddie/index.ed \
-  --claims \
-  --claims-edits claims.edits.toml
-```
-
-Export standalone corpora (optional debug/inspection):
-
-```bash
-eddie qa-corpus --index static/eddie/index.ed --output static/eddie/qa-corpus.json
-eddie claims-corpus --index static/eddie/index.ed --output static/eddie/claims-corpus.json --claims-edits claims.edits.toml
-```
-
-## How It Compares
-
-Eddie is built around fast hybrid retrieval (semantic + BM25) with snippets and ranking. Q&A is included as an optional experimental layer on top.
-
-| Tool | Deployment | Search | Q&A | Server | Cost |
-|------|-----------|--------|-----|--------|------|
-| **Eddie** | Client (WASM) | Hybrid semantic + BM25 | Experimental (WebGPU) | No | Free |
-| Pagefind | Client (WASM) | Keyword | No | No | Free |
-| Algolia DocSearch | Cloud | Keyword + neural | No | Yes | Free for OSS |
-| kapa.ai | Cloud | Semantic (RAG) | Yes | Yes | Enterprise |
-| DocsBot | Cloud | Semantic (RAG) | Yes | Yes | $16–$416/mo |
-
-## Configuration
-
-Create `eddie.toml` in your site root (optional — defaults are carefully chosen, unlike Marvin's personality):
-
-```toml
-[embedding]
-model = "sentence-transformers/multi-qa-MiniLM-L6-cos-v1"
-
-[qa]
-enabled = true
-runtime = "webllm"
-model = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
-
-[widget]
-theme = "auto"
-position = "bottom-right"
-offsetX = 0
-offsetY = 0
-qaMode = "auto"
-qaSubject = "site subject"
-topK = 8
-answerTopK = 5
-```
-
-`position` accepts `"top-left"`, `"top-right"`, `"bottom-left"`, or `"bottom-right"`.
-Use `offsetX`/`offsetY` (pixels, can be negative) to nudge the launcher away from theme toggles or other fixed UI.
-`qaMode` accepts `"off"`, `"auto"`, or `"always"` for experimental factual answer blending.
-`qaSubject` lets site owners tune subject-specific factual prompts like `"does <subject> know X"`.
-
-### Embedding Model Alternatives
-
-The default model (`multi-qa-MiniLM-L6-cos-v1`) is Apache 2.0 and tuned for retrieval tasks. Models are fetched from HuggingFace CDN at runtime — Eddie doesn't redistribute model weights. If training data provenance matters to you:
-
-| Model | License | Params |
-|-------|---------|--------|
-| `BAAI/bge-small-en-v1.5` | MIT | 33M |
-| `Snowflake/snowflake-arctic-embed-s` | Apache 2.0 | 33M |
-| `nomic-ai/modernbert-embed-base` | Apache 2.0 | 110M |
-
-## How It Works
-
-Eddie is a single Rust codebase that compiles to two targets — one might say it's *improbably* versatile:
-
-1. **Native CLI** (`eddie`) — runs at build time to index your content
-2. **WASM module** — runs in the browser for search and embedding
-
-## Architecture
-
-### Indexing Flow (Build Time)
-
-```mermaid
-flowchart LR
-  A[Markdown / HTML Content] --> B[Parse + Clean]
-  B --> C[Chunking<br/>heading or semantic]
-  C --> D[Embeddings]
-  C --> E[BM25]
-  C --> F[QA / Claims Extraction<br/>optional]
-  D --> G[index.ed Sections]
-  E --> G
-  F --> G
-  G --> H[Compressed Static Asset]
-```
-
-### Widget Flow (Runtime)
-
-```mermaid
-flowchart LR
-  A[Visitor Opens Widget] --> B[Load Worker + WASM]
-  B --> C[Fetch index.ed]
-  C --> D[Load Model Files<br/>cached in browser]
-  D --> E[Query]
-  E --> F[Hybrid Retrieval<br/>semantic + BM25]
-  F --> G[Optional QA / Claims Blend]
-  G --> H[Ranked Results + Summary UI]
-```
-
-The indexing pipeline:
-
-```
-Markdown/HTML → parse → chunk → embed (MiniLM, 384-dim) → BM25 index
-                           ↘ optional QA/claims synthesis + embeddings
-                           → serialize sections into one index.ed → Brotli pack (.ed)
-```
-
-The search pipeline (browser):
-
-```
-Query → download model (first use) → embed query → cosine similarity + BM25 → RRF fusion → ranked results
-```
-
-ML inference uses [Candle](https://github.com/huggingface/candle) (HuggingFace's Rust ML framework), which compiles to WASM without complaint. This is neural network inference running in a browser to search a blog — far more intelligent than the task demands, which Eddie would tell you is *exactly how he likes it*.
-
-## Q&A Status (Experimental)
-
-The core product value today is hybrid retrieval and result summaries/snippets. Q&A is a best-effort experimental mode and quality is highly dependent on your corpus and client hardware.
-
-What this means in practice:
-
-1. Smaller browser models can produce useful summaries, but factual precision can drift.
-2. Broader or inconsistent corpora increase hallucination and contradiction risk.
-3. On weaker devices, latency can be too high for a good UX.
-
-Suggested model range to try (if supported by your chosen runtime/toolchain):
-
-- `HuggingFaceTB/SmolLM2-1.7B-Instruct` (current default)
-- `Qwen/Qwen2.5-1.5B-Instruct`
-- `microsoft/Phi-3.5-mini-instruct`
-
-Corpus strategies that generally improve answer quality:
-
-- Keep content focused by domain/use-case rather than mixing unrelated material.
-- Prefer explicit, factual writing with clear headings and stable terminology.
-- Add canonical FAQ and glossary pages for key entities, policies, and definitions.
-- Keep time-sensitive pages date-stamped and archive/redirect stale copies.
-- Avoid indexing low-signal pages (thin marketing copy, duplicate boilerplate).
-
-Likely future direction:
-
-1. Use larger LLMs at index/build time (offline) to generate structured QA artifacts.
-2. Produce question-answer pairs grounded in source chunks.
-3. Build entity/fact cards with citations and claim-to-source maps.
-4. Keep browser runtime lightweight for retrieval and synthesis over precomputed evidence.
-
-This should improve factual reliability without requiring large on-device models for every query, while browser hardware catches up for stronger local Q&A.
-
-## Papers and References
-
-Foundational reading and implementation references behind the current approach:
-
-- [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://arxiv.org/abs/1810.04805)
-- [Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks](https://arxiv.org/abs/1908.10084)
-- [MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers](https://arxiv.org/abs/2002.10957)
-- [Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf)
-- [The Probabilistic Relevance Framework: BM25 and Beyond](https://www.nowpublishers.com/article/Details/INR-019)
-- [WebAssembly](https://webassembly.org/)
-- [WebGPU](https://www.w3.org/TR/webgpu/)
-- [Hugging Face Candle](https://github.com/huggingface/candle)
-
-## Q&A Papers (2025/2026)
-
-Recent papers and resources we track for factual grounding with smaller runtime models:
-
-- [SR-RAG: Learning to Retrieve and Reason in LLMs via Self-Reflection](https://arxiv.org/abs/2504.01018)
-- [Adaptive Retrieval without Self-Knowledge?](https://arxiv.org/abs/2501.12835)
-- [CER: Contrastive Evidence Re-ranking for Attributed Generation](https://arxiv.org/abs/2512.05012)
-- [BRIGHT: A Realistic and Challenging Benchmark for Retrieval](https://arxiv.org/abs/2407.12883)
-- [GraphRAG (paper)](https://arxiv.org/abs/2404.16130)
-- [GraphRAG project updates](https://www.microsoft.com/en-us/research/project/graphrag/)
+Use the plain filenames in HTML (`eddie-widget.js`, `eddie.wasm`, etc). Your
+host should serve compressed bytes via standard `Accept-Encoding`
+negotiation. Browser JS should not switch to the `.br`/`.gz` filenames
+directly unless your host also sets `Content-Encoding` and the correct
+content type on them. Without those headers, they're just opaque bytes.
 
 ## GitHub Actions
 
+Use `.github/workflows/example-hugo.yml` in this repo as a template. It
+pins the Hugo version and the `@jt55401/eddie-cli` version explicitly
+(never `latest`), and the CLI launcher verifies the downloaded binary
+against the release's `SHA256SUMS` before running it:
+
 ```yaml
-- name: Index content
-  run: |
-    curl -L https://github.com/jt55401/eddie/releases/latest/download/eddie-linux-amd64 -o eddie
-    chmod +x eddie
-    ./eddie index --content-dir content/ --output public/eddie/index.ed
+- name: Generate Eddie index into Hugo static/
+  run: npx -y @jt55401/eddie-cli@0.4.0 index --cms hugo --content-dir content/ --output public/eddie/index.ed
 ```
+
+See [docs/guides/github-actions.md](docs/guides/github-actions.md) for the
+full release pipeline, including the platform binaries `eddie-linux-x86_64`,
+`eddie-linux-aarch64`, `eddie-macos-x86_64`, `eddie-macos-aarch64`, and
+`eddie-windows-x86_64.exe` published on every tag.
 
 ## Project Layout
 
 ```
 src/           Rust source (CLI + WASM shared core)
+widget/        Browser widget JS (worker, UI, agent)
+integrations/  Per-CMS installer packages (npm, gem, PyPI)
+hugo-module/   Hugo Module (partial, init script, defaults)
 requirements/  Requirements-as-code
 docs/plans/    Design documents
 ```
@@ -499,19 +407,19 @@ This project uses [requirements-as-code](https://github.com/jt55401/requirements
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome — just don't ask Eddie to be less cheerful about it.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome. Just don't ask Eddie to be less cheerful about it.
 
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).
 
-Copyright (c) 2026 Jason Grey. Project name and branding are not licensed under GPL — see [TRADEMARKS.md](TRADEMARKS.md).
+Copyright (c) 2026 Jason Grey. Project name and branding are not licensed under GPL; see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## Support
 
 If you find Eddie useful, use the GitHub Sponsor button on the repository.
 
-For commercial integration or support, [Improbability Engineers](https://improbabilityengineers.com) offers consulting — they built the ship, after all.
+For commercial integration or support, [Improbability Engineers](https://improbabilityengineers.com) offers consulting. They built the ship, after all.
 
 ---
 

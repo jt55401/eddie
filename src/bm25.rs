@@ -1,163 +1,464 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! BM25 keyword search index for hybrid retrieval.
+//! BM25 keyword arm for hybrid retrieval.
 //!
-//! Complements semantic (embedding) search with exact keyword matching.
-//! The BM25 index is built from chunk texts and serialized alongside
-//! the embedding index.
+//! The index is built from the clean chunk texts and stored in the `bm25`
+//! section of the `.ed` payload as a sorted term dictionary with binary
+//! postings, so identical content always produces identical bytes.
+//!
+//! Section body:
+//!
+//! ```text
+//! u32 num_docs | f32 avg_len | u32 doc_lengths[num_docs] | u32 terms
+//! per term: u16 len | UTF-8 bytes | u32 postings | (varint doc_delta, varint tf)*
+//! ```
+//!
+//! Terms are sorted bytewise; postings are sorted by document id and stored
+//! as deltas (the first delta is the absolute id, later deltas are >= 1).
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result, bail};
 
-/// BM25 parameters.
-const K1: f64 = 1.2;
-const B: f64 = 0.75;
+use crate::manifest::Bm25Params;
+
+/// Longest token `tokenize` emits, in characters. Alphanumeric runs beyond
+/// this (pasted hashes, minified blobs, unspaced scripts) are split into
+/// pieces so every term fits the `u16` length in the section body.
+pub const MAX_TOKEN_CHARS: usize = 64;
 
 /// A BM25 inverted index built from chunk texts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Bm25Index {
     /// Number of documents (chunks).
     pub num_docs: usize,
-    /// Average document length in tokens.
+    /// Average document length in tokens, rounded through `f32` (the stored
+    /// precision) so an index reloaded from bytes scores exactly like the
+    /// one built in memory.
     pub avg_doc_len: f64,
     /// Per-document token count.
-    pub doc_lengths: Vec<usize>,
-    /// Inverted index: term → list of (doc_id, term_frequency).
-    pub postings: HashMap<String, Vec<(usize, u32)>>,
+    pub doc_lengths: Vec<u32>,
+    /// Sorted term dictionary; `postings[i]` belongs to `terms[i]`.
+    pub terms: Vec<String>,
+    /// Per term: `(doc_id, term_frequency)` sorted by `doc_id`.
+    pub postings: Vec<Vec<(u32, u32)>>,
+    pub params: Bm25Params,
 }
 
 impl Bm25Index {
-    /// Build a BM25 index from chunk texts.
+    /// Build a BM25 index from chunk texts with the default parameters.
     pub fn build(texts: &[&str]) -> Self {
+        Self::build_with_params(texts, Bm25Params::default())
+    }
+
+    /// Build a BM25 index from chunk texts.
+    pub fn build_with_params(texts: &[&str], params: Bm25Params) -> Self {
         let num_docs = texts.len();
         let mut doc_lengths = Vec::with_capacity(num_docs);
-        let mut postings: HashMap<String, Vec<(usize, u32)>> = HashMap::new();
+        let mut postings_map: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
 
         for (doc_id, text) in texts.iter().enumerate() {
             let tokens = tokenize(text);
-            doc_lengths.push(tokens.len());
+            doc_lengths.push(tokens.len() as u32);
 
-            // Count term frequencies in this document
             let mut tf_map: HashMap<&str, u32> = HashMap::new();
             for token in &tokens {
                 *tf_map.entry(token.as_str()).or_default() += 1;
             }
 
+            // Documents are visited in order, so every posting list stays
+            // sorted by doc id without an explicit sort.
             for (term, freq) in tf_map {
-                postings
+                postings_map
                     .entry(term.to_string())
                     .or_default()
-                    .push((doc_id, freq));
+                    .push((doc_id as u32, freq));
             }
         }
 
-        let total_len: usize = doc_lengths.iter().sum();
-        let avg_doc_len = if num_docs > 0 {
-            total_len as f64 / num_docs as f64
-        } else {
-            0.0
-        };
+        let mut terms: Vec<String> = postings_map.keys().cloned().collect();
+        terms.sort_unstable();
+        let postings: Vec<Vec<(u32, u32)>> = terms
+            .iter()
+            .map(|t| postings_map.remove(t).unwrap_or_default())
+            .collect();
+
+        let avg_doc_len = average_doc_len(&doc_lengths);
 
         Self {
             num_docs,
             avg_doc_len,
             doc_lengths,
+            terms,
             postings,
+            params,
         }
     }
 
-    /// Score all documents against a query, returning (doc_id, score) pairs
-    /// sorted descending by score.
+    /// Number of distinct terms.
+    pub fn term_count(&self) -> usize {
+        self.terms.len()
+    }
+
+    /// Posting list for a term, if present.
+    pub fn postings_for(&self, term: &str) -> Option<&[(u32, u32)]> {
+        self.terms
+            .binary_search_by(|t| t.as_str().cmp(term))
+            .ok()
+            .map(|i| self.postings[i].as_slice())
+    }
+
+    /// Score all documents against a query, returning `(doc_id, score)` pairs
+    /// sorted by score descending, ties broken by ascending doc id.
     pub fn search(&self, query: &str, top_k: usize) -> Vec<(usize, f64)> {
-        let query_tokens = tokenize(query);
-        let mut scores = vec![0.0f64; self.num_docs];
+        if top_k == 0 || self.num_docs == 0 {
+            return Vec::new();
+        }
+        let mut query_tokens = tokenize(query);
+        query_tokens.sort_unstable();
+        query_tokens.dedup();
 
+        let k1 = self.params.k1;
+        let b = self.params.b;
+        let avg = if self.avg_doc_len > 0.0 {
+            self.avg_doc_len
+        } else {
+            1.0
+        };
+        let n = self.num_docs as f64;
+
+        let mut scores: HashMap<u32, f64> = HashMap::new();
         for token in &query_tokens {
-            if let Some(posting_list) = self.postings.get(token.as_str()) {
-                let df = posting_list.len() as f64;
-                let idf = ((self.num_docs as f64 - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let Some(posting_list) = self.postings_for(token) else {
+                continue;
+            };
+            let df = posting_list.len() as f64;
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
 
-                for &(doc_id, tf) in posting_list {
-                    let tf = tf as f64;
-                    let dl = self.doc_lengths[doc_id] as f64;
-                    let numerator = tf * (K1 + 1.0);
-                    let denominator = tf + K1 * (1.0 - B + B * dl / self.avg_doc_len);
-                    scores[doc_id] += idf * numerator / denominator;
-                }
+            for &(doc_id, tf) in posting_list {
+                let tf = tf as f64;
+                let dl = self.doc_lengths[doc_id as usize] as f64;
+                let numerator = tf * (k1 + 1.0);
+                let denominator = tf + k1 * (1.0 - b + b * dl / avg);
+                *scores.entry(doc_id).or_default() += idf * numerator / denominator;
             }
         }
 
         let mut results: Vec<(usize, f64)> = scores
             .into_iter()
-            .enumerate()
             .filter(|(_, s)| *s > 0.0)
+            .map(|(d, s)| (d as usize, s))
             .collect();
-
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         results.truncate(top_k);
         results
     }
 
-    /// Serialize the BM25 index to a writer (JSON-encoded with length prefix).
-    pub fn write_to<W: Write>(&self, mut w: W) -> Result<()> {
-        let json = serde_json::to_vec(self).context("serializing BM25 index")?;
-        w.write_all(&(json.len() as u32).to_le_bytes())?;
-        w.write_all(&json)?;
-        Ok(())
+    /// Serialize the section body.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&u32::try_from(self.num_docs)?.to_le_bytes());
+        out.extend_from_slice(&(self.avg_doc_len as f32).to_le_bytes());
+        for &len in &self.doc_lengths {
+            out.extend_from_slice(&len.to_le_bytes());
+        }
+        out.extend_from_slice(&u32::try_from(self.terms.len())?.to_le_bytes());
+        for (term, postings) in self.terms.iter().zip(&self.postings) {
+            let bytes = term.as_bytes();
+            let len = u16::try_from(bytes.len()).with_context(|| {
+                format!(
+                    "bm25 term of {} bytes exceeds the 65535-byte limit (starts {:?})",
+                    bytes.len(),
+                    term.chars().take(16).collect::<String>()
+                )
+            })?;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(bytes);
+            out.extend_from_slice(&u32::try_from(postings.len())?.to_le_bytes());
+            let mut prev = 0u32;
+            for (i, &(doc, tf)) in postings.iter().enumerate() {
+                let delta = if i == 0 { doc } else { doc - prev };
+                write_varint(&mut out, delta);
+                write_varint(&mut out, tf);
+                prev = doc;
+            }
+        }
+        Ok(out)
     }
 
-    /// Deserialize a BM25 index from a reader.
-    pub fn read_from<R: Read>(mut r: R) -> Result<Self> {
-        let mut len_buf = [0u8; 4];
-        r.read_exact(&mut len_buf)
-            .context("reading BM25 index length")?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-
-        let mut json_buf = vec![0u8; len];
-        r.read_exact(&mut json_buf)
-            .context("reading BM25 index data")?;
-
-        serde_json::from_slice(&json_buf).context("parsing BM25 index JSON")
+    /// Parse a section body. `expected_docs` is the chunk count from the
+    /// manifest; every document id is validated against it.
+    pub fn from_bytes(body: &[u8], expected_docs: usize, params: Bm25Params) -> Result<Self> {
+        let mut c = ByteCursor::new(body);
+        let num_docs = c.u32().context("bm25 num_docs")? as usize;
+        if num_docs != expected_docs {
+            bail!(
+                "bm25 num_docs {} does not match chunk count {}",
+                num_docs,
+                expected_docs
+            );
+        }
+        let stored_avg = c.f32().context("bm25 avg_len")?;
+        if !stored_avg.is_finite() || stored_avg < 0.0 {
+            bail!("bm25 avg_len is not a finite non-negative number");
+        }
+        let mut doc_lengths = Vec::with_capacity(num_docs.min(c.remaining() / 4));
+        for _ in 0..num_docs {
+            doc_lengths.push(c.u32().context("bm25 doc_lengths")?);
+        }
+        // Recompute exactly as the builder does; the stored value is a
+        // consistency check on doc_lengths, never the source of truth.
+        let avg_doc_len = average_doc_len(&doc_lengths);
+        if (avg_doc_len as f32).to_bits() != stored_avg.to_bits() {
+            bail!(
+                "bm25 avg_len {} does not match the {} computed from doc_lengths",
+                stored_avg,
+                avg_doc_len
+            );
+        }
+        let term_count = c.u32().context("bm25 term count")? as usize;
+        let mut terms: Vec<String> = Vec::with_capacity(term_count.min(c.remaining() / 7));
+        let mut postings: Vec<Vec<(u32, u32)>> = Vec::with_capacity(terms.capacity());
+        for i in 0..term_count {
+            let len = c.u16().with_context(|| format!("bm25 term {} length", i))? as usize;
+            let bytes = c.bytes(len).with_context(|| format!("bm25 term {}", i))?;
+            let term = std::str::from_utf8(bytes)
+                .with_context(|| format!("bm25 term {} is not UTF-8", i))?
+                .to_string();
+            if let Some(prev) = terms.last()
+                && prev.as_str() >= term.as_str()
+            {
+                bail!("bm25 term dictionary is not strictly sorted at {:?}", term);
+            }
+            let count = c
+                .u32()
+                .with_context(|| format!("bm25 postings count for {:?}", term))?
+                as usize;
+            if count == 0 {
+                bail!("bm25 term {:?} has no postings", term);
+            }
+            let mut list = Vec::with_capacity(count.min(c.remaining() / 2));
+            let mut prev = 0u32;
+            for j in 0..count {
+                let delta = c
+                    .varint()
+                    .with_context(|| format!("bm25 posting {} of {:?}", j, term))?;
+                let doc = if j == 0 {
+                    delta
+                } else {
+                    if delta == 0 {
+                        bail!("bm25 postings for {:?} are not strictly increasing", term);
+                    }
+                    prev.checked_add(delta).context("bm25 doc id overflow")?
+                };
+                if doc as usize >= num_docs {
+                    bail!(
+                        "bm25 posting doc id {} out of range (num_docs {})",
+                        doc,
+                        num_docs
+                    );
+                }
+                let tf = c.varint().context("bm25 tf")?;
+                if tf == 0 {
+                    bail!("bm25 posting with zero tf for {:?}", term);
+                }
+                list.push((doc, tf));
+                prev = doc;
+            }
+            terms.push(term);
+            postings.push(list);
+        }
+        if c.remaining() != 0 {
+            bail!("bm25 section has {} trailing bytes", c.remaining());
+        }
+        Ok(Self {
+            num_docs,
+            avg_doc_len,
+            doc_lengths,
+            terms,
+            postings,
+            params,
+        })
     }
 }
 
-/// Tokenize text: lowercase, split on non-alphanumeric, filter short tokens.
-fn tokenize(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|s| s.len() >= 2)
-        .map(|s| s.to_string())
-        .collect()
+/// Mean of `doc_lengths` in f64, rounded to the f32 the section stores.
+fn average_doc_len(doc_lengths: &[u32]) -> f64 {
+    if doc_lengths.is_empty() {
+        return 0.0;
+    }
+    let total: u64 = doc_lengths.iter().map(|&l| l as u64).sum();
+    (total as f64 / doc_lengths.len() as f64) as f32 as f64
 }
 
-/// Combine semantic and BM25 results using Reciprocal Rank Fusion (RRF).
+/// Tokenize text for BM25 and query-term matching.
 ///
-/// RRF is parameter-free (beyond k) and works well for combining heterogeneous
-/// ranking signals. Score: `1/(k + rank_a) + 1/(k + rank_b)`.
-pub fn hybrid_rrf(
-    semantic_results: &[(usize, f32)],
-    bm25_results: &[(usize, f64)],
-    top_k: usize,
-) -> Vec<(usize, f64)> {
-    const RRF_K: f64 = 60.0;
-
-    let mut scores: HashMap<usize, f64> = HashMap::new();
-
-    for (rank, &(doc_id, _)) in semantic_results.iter().enumerate() {
-        *scores.entry(doc_id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+/// Lowercase; runs of Unicode alphanumerics become one token each (runs
+/// longer than [`MAX_TOKEN_CHARS`] are split into pieces of that length);
+/// runs of CJK characters (Han, Hiragana, Katakana, Hangul) become character
+/// bigrams (a lone CJK character is emitted as is). Single-character Latin
+/// tokens are kept so `C`, `R` and `Go` remain searchable.
+pub fn tokenize(text: &str) -> Vec<String> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Other,
+        Word,
+        Cjk,
+    }
+    fn class(ch: char) -> Class {
+        if is_cjk(ch) {
+            Class::Cjk
+        } else if ch.is_alphanumeric() {
+            Class::Word
+        } else {
+            Class::Other
+        }
     }
 
-    for (rank, &(doc_id, _)) in bm25_results.iter().enumerate() {
-        *scores.entry(doc_id).or_default() += 1.0 / (RRF_K + rank as f64 + 1.0);
+    let mut out = Vec::new();
+    let mut run = String::new();
+    let mut run_class = Class::Other;
+
+    let flush = |run: &mut String, class: Class, out: &mut Vec<String>| {
+        if run.is_empty() {
+            return;
+        }
+        match class {
+            Class::Word => {
+                let lower = run.to_lowercase();
+                if lower.chars().count() <= MAX_TOKEN_CHARS {
+                    out.push(lower);
+                } else {
+                    let chars: Vec<char> = lower.chars().collect();
+                    out.extend(chars.chunks(MAX_TOKEN_CHARS).map(|c| c.iter().collect()));
+                }
+            }
+            Class::Cjk => {
+                let chars: Vec<char> = run.chars().collect();
+                if chars.len() == 1 {
+                    out.push(run.clone());
+                } else {
+                    for pair in chars.windows(2) {
+                        out.push(pair.iter().collect());
+                    }
+                }
+            }
+            Class::Other => {}
+        }
+        run.clear();
+    };
+
+    for ch in text.chars() {
+        let c = class(ch);
+        if c != run_class {
+            flush(&mut run, run_class, &mut out);
+            run_class = c;
+        }
+        if c != Class::Other {
+            run.push(ch);
+        }
+    }
+    flush(&mut run, run_class, &mut out);
+    out
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x30FF      // Hiragana, Katakana
+        | 0x3400..=0x4DBF    // CJK Extension A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0x1100..=0x11FF    // Hangul Jamo
+        | 0x3130..=0x318F    // Hangul Compatibility Jamo
+        | 0xAC00..=0xD7AF    // Hangul Syllables
+        | 0x20000..=0x2A6DF  // CJK Extension B
+        | 0x2A700..=0x2EBEF  // CJK Extensions C-F
+        | 0x30000..=0x3134F // CJK Extension G
+    )
+}
+
+/// LEB128 unsigned varint.
+pub(crate) fn write_varint(out: &mut Vec<u8>, mut v: u32) {
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Bounds-checked little-endian reader over a byte slice. Every read checks
+/// the remaining length before touching the data, so a truncated or hostile
+/// buffer surfaces as an error rather than a panic or an oversized allocation.
+pub(crate) struct ByteCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
     }
 
-    let mut results: Vec<(usize, f64)> = scores.into_iter().collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(top_k);
-    results
+    pub(crate) fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    pub(crate) fn position(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        if n > self.remaining() {
+            bail!(
+                "need {} bytes at offset {} but only {} remain",
+                n,
+                self.pos,
+                self.remaining()
+            );
+        }
+        let s = &self.data[self.pos..self.pos + n];
+        self.pos += n;
+        Ok(s)
+    }
+
+    pub(crate) fn u8(&mut self) -> Result<u8> {
+        Ok(self.bytes(1)?[0])
+    }
+
+    pub(crate) fn u16(&mut self) -> Result<u16> {
+        let b = self.bytes(2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    pub(crate) fn u32(&mut self) -> Result<u32> {
+        let b = self.bytes(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub(crate) fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_bits(self.u32()?))
+    }
+
+    pub(crate) fn varint(&mut self) -> Result<u32> {
+        let mut result: u32 = 0;
+        for shift in (0..35).step_by(7) {
+            let byte = self.u8()?;
+            let payload = (byte & 0x7F) as u32;
+            if shift == 28 && payload > 0x0F {
+                bail!("varint overflows u32");
+            }
+            result |= payload << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+        }
+        bail!("varint longer than 5 bytes")
+    }
 }
 
 #[cfg(test)]
@@ -165,13 +466,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tokenize() {
-        let tokens = tokenize("Hello, World! This is a test.");
-        assert!(tokens.contains(&"hello".to_string()));
-        assert!(tokens.contains(&"world".to_string()));
-        assert!(tokens.contains(&"test".to_string()));
-        // Single-char tokens filtered
-        assert!(!tokens.contains(&"a".to_string()));
+    fn tokenize_basic_and_single_chars() {
+        let tokens = tokenize("Hello, World! This is a test of C++ and R.");
+        assert_eq!(
+            tokens,
+            vec![
+                "hello", "world", "this", "is", "a", "test", "of", "c", "and", "r"
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_cjk_bigrams_and_mixed_scripts() {
+        assert_eq!(
+            tokenize("我住在东京。"),
+            vec!["我住", "住在", "在东", "东京"]
+        );
+        assert_eq!(tokenize("东京"), vec!["东京"]);
+        assert_eq!(tokenize("京"), vec!["京"]);
+        assert_eq!(
+            tokenize("东京tokyo 1.93.1"),
+            vec!["东京", "tokyo", "1", "93", "1"]
+        );
+        assert_eq!(tokenize("Größe résumé"), vec!["größe", "résumé"]);
+    }
+
+    #[test]
+    fn long_runs_are_split_so_terms_always_serialize() {
+        let long = "a".repeat(70_000);
+        let tokens = tokenize(&long);
+        assert_eq!(tokens.len(), 70_000usize.div_ceil(MAX_TOKEN_CHARS));
+        assert!(tokens.iter().all(|t| t.chars().count() <= MAX_TOKEN_CHARS));
+        assert_eq!(tokens.last().unwrap().len(), 70_000 % MAX_TOKEN_CHARS);
+        let exact = "b".repeat(MAX_TOKEN_CHARS);
+        assert_eq!(tokenize(&exact), vec![exact.clone()]);
+        // Multi-byte characters count as one character each.
+        let wide = "ü".repeat(MAX_TOKEN_CHARS + 1);
+        let tokens = tokenize(&wide);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1], "ü");
+
+        let index = Bm25Index::build(&[&long, "short text"]);
+        let bytes = index.to_bytes().unwrap();
+        let restored = Bm25Index::from_bytes(&bytes, 2, Bm25Params::default()).unwrap();
+        assert_eq!(restored, index);
+
+        // A hand-built oversized term still fails with a short message.
+        let mut bad = Bm25Index::build(&["x"]);
+        bad.terms[0] = "y".repeat(70_000);
+        let err = bad.to_bytes().unwrap_err().to_string();
+        assert!(err.len() < 200, "{}", err);
+        assert!(err.contains("70000"), "{}", err);
+    }
+
+    #[test]
+    fn avg_doc_len_round_trips_for_inexact_averages() {
+        // 1, 1 and 2 tokens: the mean 4/3 is not representable in f32.
+        let texts = vec!["one", "two", "three four"];
+        let built = Bm25Index::build(&texts);
+        assert_eq!(built.avg_doc_len, (4.0f64 / 3.0) as f32 as f64);
+        let bytes = built.to_bytes().unwrap();
+        let restored = Bm25Index::from_bytes(&bytes, 3, Bm25Params::default()).unwrap();
+        assert_eq!(restored, built);
+        assert_eq!(restored.search("three", 3), built.search("three", 3));
+
+        // A stored average that disagrees with doc_lengths is corruption.
+        let mut bad = bytes.clone();
+        bad[4..8].copy_from_slice(&2.0f32.to_le_bytes());
+        let err = Bm25Index::from_bytes(&bad, 3, Bm25Params::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("avg_len"), "{}", err);
+    }
+
+    #[test]
+    fn tokenize_query_matches_document_bigrams() {
+        let index = Bm25Index::build(&["我住在东京。", "hello world"]);
+        let results = index.search("东京", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, 0);
     }
 
     #[test]
@@ -183,78 +556,89 @@ mod tests {
         ];
         let index = Bm25Index::build(&texts);
         let results = index.search("Rust programming", 3);
-
         assert!(!results.is_empty());
-        // Doc 0 ("Rust programming") should rank first
-        assert_eq!(results[0].0, 0, "expected doc 0 to rank first");
-        // Doc 2 also mentions Rust, should appear
-        assert!(
-            results.iter().any(|(id, _)| *id == 2),
-            "expected doc 2 (Rust compiler) to appear"
-        );
+        assert_eq!(results[0].0, 0);
+        assert!(results.iter().any(|(id, _)| *id == 2));
     }
 
     #[test]
     fn test_bm25_term_frequency() {
-        let texts = vec![
-            "rust rust rust is great",        // high tf for "rust"
-            "rust is a programming language", // lower tf for "rust"
-        ];
+        let texts = vec!["rust rust rust is great", "rust is a programming language"];
         let index = Bm25Index::build(&texts);
         let results = index.search("rust", 2);
-
         assert_eq!(results.len(), 2);
-        // Doc 0 has higher term frequency for "rust"
         assert_eq!(results[0].0, 0);
         assert!(results[0].1 > results[1].1);
     }
 
     #[test]
-    fn test_bm25_no_match() {
-        let texts = vec!["rust programming", "python scripting"];
-        let index = Bm25Index::build(&texts);
-        let results = index.search("javascript", 5);
-        assert!(results.is_empty());
+    fn test_bm25_no_match_and_empty_query() {
+        let index = Bm25Index::build(&["rust programming", "python scripting"]);
+        assert!(index.search("javascript", 5).is_empty());
+        assert!(index.search("??", 5).is_empty());
+        assert!(index.search("rust", 0).is_empty());
     }
 
     #[test]
-    fn test_bm25_round_trip() {
-        let texts = vec!["hello world", "foo bar baz"];
-        let index = Bm25Index::build(&texts);
-
-        let mut buf = Vec::new();
-        index.write_to(&mut buf).unwrap();
-
-        let restored = Bm25Index::read_from(std::io::Cursor::new(&buf)).unwrap();
-        assert_eq!(restored.num_docs, 2);
-        assert_eq!(restored.doc_lengths, index.doc_lengths);
-
-        // Search should produce same results
-        let r1 = index.search("hello", 2);
-        let r2 = restored.search("hello", 2);
-        assert_eq!(r1.len(), r2.len());
-        assert_eq!(r1[0].0, r2[0].0);
+    fn ties_break_by_doc_id() {
+        let index = Bm25Index::build(&["alpha beta", "alpha beta", "alpha beta"]);
+        let results = index.search("alpha", 3);
+        let ids: Vec<usize> = results.iter().map(|r| r.0).collect();
+        assert_eq!(ids, vec![0, 1, 2]);
     }
 
     #[test]
-    fn test_hybrid_rrf() {
-        // Semantic: doc 0 best, doc 1 second
-        let semantic = vec![(0, 0.95f32), (1, 0.80), (2, 0.60)];
-        // BM25: doc 2 best, doc 0 second
-        let bm25 = vec![(2, 5.0f64), (0, 3.0), (1, 1.0)];
-
-        let results = hybrid_rrf(&semantic, &bm25, 3);
-        assert_eq!(results.len(), 3);
-        // Doc 0 appears rank 1 in semantic and rank 2 in BM25 — should score well
-        // Doc 2 appears rank 3 in semantic and rank 1 in BM25 — should also score well
-        // Both should beat doc 1 which is middle in both
-        let doc0_score = results.iter().find(|(id, _)| *id == 0).unwrap().1;
-        let doc1_score = results.iter().find(|(id, _)| *id == 1).unwrap().1;
-        assert!(
-            doc0_score > doc1_score,
-            "doc 0 ({}) should score higher than doc 1 ({})",
-            doc0_score,
-            doc1_score
+    fn binary_round_trip_and_determinism() {
+        let texts = vec!["hello world", "foo bar baz", "hello foo", "东京 hello"];
+        let a = Bm25Index::build(&texts);
+        let bytes_a = a.to_bytes().unwrap();
+        let b = Bm25Index::build(&texts);
+        let bytes_b = b.to_bytes().unwrap();
+        assert_eq!(
+            bytes_a, bytes_b,
+            "identical content must give identical bytes"
         );
+
+        let restored = Bm25Index::from_bytes(&bytes_a, texts.len(), Bm25Params::default()).unwrap();
+        assert_eq!(restored, a);
+        assert_eq!(restored.search("hello", 4), a.search("hello", 4));
+        assert!(restored.terms.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn from_bytes_rejects_bad_doc_count_and_out_of_range_postings() {
+        let index = Bm25Index::build(&["hello world", "foo bar"]);
+        let bytes = index.to_bytes().unwrap();
+        assert!(Bm25Index::from_bytes(&bytes, 3, Bm25Params::default()).is_err());
+
+        // Corrupt the first posting doc id of the first term ("bar") to 200.
+        let mut bad = bytes.clone();
+        // Layout: num_docs(4) avg(4) doc_lengths(8) terms(4) len(2) "bar"(3) count(4) varint...
+        let offset = 4 + 4 + 8 + 4 + 2 + 3 + 4;
+        bad[offset] = 200;
+        assert!(Bm25Index::from_bytes(&bad, 2, Bm25Params::default()).is_err());
+
+        // Two docs x two terms: 4 postings, each varint delta + varint tf = 2 bytes.
+        let postings_bytes: usize = index.postings.iter().map(|p| p.len() * 2).sum();
+        let dict_bytes: usize = index.terms.iter().map(|t| 2 + t.len() + 4).sum();
+        assert_eq!(bytes.len(), 4 + 4 + 8 + 4 + dict_bytes + postings_bytes);
+
+        // Any truncation must be an error, never a panic.
+        for cut in 0..bytes.len() {
+            assert!(Bm25Index::from_bytes(&bytes[..cut], 2, Bm25Params::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn varint_round_trip() {
+        for v in [0u32, 1, 127, 128, 300, 16_383, 16_384, u32::MAX] {
+            let mut out = Vec::new();
+            write_varint(&mut out, v);
+            let mut c = ByteCursor::new(&out);
+            assert_eq!(c.varint().unwrap(), v);
+            assert_eq!(c.remaining(), 0);
+        }
+        let mut c = ByteCursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert!(c.varint().is_err());
     }
 }

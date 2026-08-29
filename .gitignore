@@ -11,3 +11,20 @@ pkg/
 __pycache__/
 hugo-module/static/eddie/*.js
 hugo-module/static/eddie/*.wasm
+
+# Widget runtime assets are built by widget/build.sh and copied into each
+# CMS package's assets/ dir by scripts/sync-integration-assets.sh at publish
+# time (see docs/guides/package-publishing.md). Never commit these copies.
+integrations/*/npm/assets/eddie-wasm.js
+integrations/*/npm/assets/eddie-widget.js
+integrations/*/npm/assets/eddie-worker.js
+integrations/*/npm/assets/eddie-agent-worker.js
+integrations/*/gem/assets/eddie-wasm.js
+integrations/*/gem/assets/eddie-widget.js
+integrations/*/gem/assets/eddie-worker.js
+integrations/*/gem/assets/eddie-agent-worker.js
+integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js
+integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js
+integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js
+integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-agent-worker.js
+.playwright-mcp/

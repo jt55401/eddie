@@ -4,7 +4,7 @@ set -euo pipefail
 SITE_DIR="${1:?usage: install.sh <astro-site-dir>}"
 ASSET_ROOT="${2:-}"
 PACKAGE_ROOT="${EDDIE_PACKAGE_ROOT:-}"
-ASSETS=(eddie-widget.js eddie-worker.js eddie-wasm.js eddie.wasm)
+ASSETS=(eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm)
 
 if [[ -z "$ASSET_ROOT" && -n "$PACKAGE_ROOT" ]]; then
   ASSET_ROOT="$PACKAGE_ROOT/assets"
@@ -32,6 +32,7 @@ done
 mkdir -p "$SITE_DIR/public/eddie"
 cp "$ASSET_ROOT/eddie-widget.js" "$SITE_DIR/public/eddie/eddie-widget.js"
 cp "$ASSET_ROOT/eddie-worker.js" "$SITE_DIR/public/eddie/eddie-worker.js"
+cp "$ASSET_ROOT/eddie-agent-worker.js" "$SITE_DIR/public/eddie/eddie-agent-worker.js"
 cp "$ASSET_ROOT/eddie-wasm.js" "$SITE_DIR/public/eddie/eddie-wasm.js"
 cp "$ASSET_ROOT/eddie.wasm" "$SITE_DIR/public/eddie/eddie.wasm"
 

@@ -68,15 +68,27 @@ EDDIE_BIN=eddie
 # Site paths (relative to repo root)
 EDDIE_CONTENT_DIR=content
 EDDIE_OUTPUT=static/eddie/index.ed
+EDDIE_CMS=hugo
 
-# Embedding/index settings
-EDDIE_MODEL=sentence-transformers/multi-qa-MiniLM-L6-cos-v1
+# Presets bundle a dense model set (+ sparse, + device where noted). Set one
+# and leave the manual settings below empty:
+#   fast     = MiniLM-L6
+#   balanced = bge-small-en-v1.5 + sparse
+#   quality  = bge-small-en-v1.5 + sparse + Qwen3-Embedding-0.6B lane
+#   gpu      = quality, with --device cuda
+EDDIE_PRESET=
+
+# Manual embedding config (ignored when EDDIE_PRESET is set above).
+# EDDIE_DENSE_MODELS is space-separated; each entry becomes its own
+# --dense-model lane, so more than one model can run side by side.
+EDDIE_DENSE_MODELS=sentence-transformers/multi-qa-MiniLM-L6-cos-v1
+EDDIE_SPARSE=0
+EDDIE_SPARSE_MODEL=
+EDDIE_DEVICE=auto
+EDDIE_BATCH_SIZE=32
 EDDIE_CHUNK_SIZE=256
 EDDIE_OVERLAP=32
 EDDIE_CHUNK_STRATEGY=heading
-EDDIE_COARSE_CHUNK_SIZE=
-EDDIE_COARSE_OVERLAP=
-EDDIE_SUMMARY_LANE=0
 
 # Optional embedded sections (1 = enabled, 0 = disabled)
 EDDIE_QA=0
@@ -136,13 +148,16 @@ set +a
 BIN="${EDDIE_BIN:-eddie}"
 CONTENT_DIR="${EDDIE_CONTENT_DIR:-content}"
 OUTPUT_PATH="${EDDIE_OUTPUT:-static/eddie/index.ed}"
-MODEL="${EDDIE_MODEL:-sentence-transformers/multi-qa-MiniLM-L6-cos-v1}"
+CMS="${EDDIE_CMS:-hugo}"
+PRESET="${EDDIE_PRESET:-}"
+DENSE_MODELS="${EDDIE_DENSE_MODELS:-sentence-transformers/multi-qa-MiniLM-L6-cos-v1}"
+SPARSE="${EDDIE_SPARSE:-0}"
+SPARSE_MODEL="${EDDIE_SPARSE_MODEL:-}"
+DEVICE="${EDDIE_DEVICE:-auto}"
+BATCH_SIZE="${EDDIE_BATCH_SIZE:-32}"
 CHUNK_SIZE="${EDDIE_CHUNK_SIZE:-256}"
 OVERLAP="${EDDIE_OVERLAP:-32}"
 CHUNK_STRATEGY="${EDDIE_CHUNK_STRATEGY:-heading}"
-COARSE_CHUNK_SIZE="${EDDIE_COARSE_CHUNK_SIZE:-}"
-COARSE_OVERLAP="${EDDIE_COARSE_OVERLAP:-}"
-SUMMARY_LANE="${EDDIE_SUMMARY_LANE:-0}"
 
 mkdir -p "$(dirname "$ROOT_DIR/$OUTPUT_PATH")"
 
@@ -150,21 +165,25 @@ CMD=(
   "$BIN" index
   --content-dir "$ROOT_DIR/$CONTENT_DIR"
   --output "$ROOT_DIR/$OUTPUT_PATH"
-  --model "$MODEL"
+  --cms "$CMS"
   --chunk-size "$CHUNK_SIZE"
   --overlap "$OVERLAP"
   --chunk-strategy "$CHUNK_STRATEGY"
 )
 
-if [[ -n "$COARSE_CHUNK_SIZE" ]]; then
-  CMD+=(--coarse-chunk-size "$COARSE_CHUNK_SIZE")
-  if [[ -n "$COARSE_OVERLAP" ]]; then
-    CMD+=(--coarse-overlap "$COARSE_OVERLAP")
+if [[ -n "$PRESET" ]]; then
+  CMD+=(--preset "$PRESET")
+else
+  for model in $DENSE_MODELS; do
+    CMD+=(--dense-model "$model")
+  done
+  if [[ -n "$SPARSE_MODEL" ]]; then
+    CMD+=(--sparse-model "$SPARSE_MODEL")
+  elif [[ "$SPARSE" == "1" ]]; then
+    CMD+=(--sparse)
   fi
-fi
-
-if [[ "$SUMMARY_LANE" == "1" ]]; then
-  CMD+=(--summary-lane)
+  CMD+=(--device "$DEVICE")
+  CMD+=(--batch-size "$BATCH_SIZE")
 fi
 
 if [[ "${EDDIE_QA:-0}" == "1" ]]; then

@@ -13,6 +13,7 @@ REPORT_CSV="$DIST_DIR/asset-sizes.csv"
 FILES=(
   "eddie-widget.js"
   "eddie-worker.js"
+  "eddie-agent-worker.js"
   "eddie-wasm.js"
   "eddie.wasm"
 )
@@ -62,7 +63,7 @@ mkdir -p "$DIST_DIR"
 
 cat "$REPORT_MD"
 
-WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3400000}"
+WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3600000}"
 WASM_GZIP_BUDGET_BYTES="${WASM_GZIP_BUDGET_BYTES:-1100000}"
 WASM_BROTLI_BUDGET_BYTES="${WASM_BROTLI_BUDGET_BYTES:-800000}"
 

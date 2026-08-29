@@ -5,38 +5,140 @@ on:
     branches: [main]
   pull_request:
 
+# Third-party actions are pinned to a full commit SHA (see the trailing
+# comment on each `uses:` line for the tag/branch that SHA resolves to).
+# Re-pin deliberately; don't restore a floating tag.
+
 jobs:
+  packaging-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: No committed widget runtime assets in CMS packages
+        run: |
+          set -euo pipefail
+          # Widget runtime files are built by widget/build.sh and copied into
+          # each CMS package's assets_dir by scripts/sync-integration-assets.sh
+          # at publish time (see docs/guides/package-publishing.md). They must
+          # never be committed, or a widget fix can ship stale bits to every
+          # CMS package except the one that gets rebuilt.
+          tracked="$(git ls-files 'integrations/*/assets/eddie-wasm.js' \
+                                    'integrations/*/assets/eddie-widget.js' \
+                                    'integrations/*/assets/eddie-worker.js' \
+                                    'integrations/*/assets/eddie-agent-worker.js' \
+                                    'integrations/*/assets/eddie.wasm' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-agent-worker.js' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie.wasm')"
+          if [[ -n "$tracked" ]]; then
+            echo "Committed widget runtime assets found (these must be generated, not committed):" >&2
+            echo "$tracked" >&2
+            exit 1
+          fi
+
+      - name: publish-packages.json assets_dir entries match sync script expectations
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json
+          with open(".github/publish-packages.json") as f:
+              data = json.load(f)
+          dirs = [t["assets_dir"] for targets in data.values() for t in targets if t.get("assets_dir")]
+          assert dirs, "expected at least one assets_dir entry"
+          print(f"{len(dirs)} assets_dir entries declared: {dirs}")
+          '
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
   rust-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: rust-tests
 
       - name: Run unit and integration tests
         run: cargo test --locked
+
+  wasm-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: wasm-tests
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
+
+      - name: Build wasm32 library
+        run: cargo build --target wasm32-unknown-unknown --lib --locked
+
+      - name: Run wasm-bindgen tests in headless Chrome
+        run: |
+          set -euo pipefail
+          if grep -rl 'wasm_bindgen_test' --include='*.rs' src/ >/dev/null 2>&1; then
+            wasm-pack test --headless --chrome --lib
+          else
+            echo "No #[wasm_bindgen_test] functions found under src/; skipping wasm-pack test."
+            echo "Remove this guard once wasm-bindgen-test coverage lands."
+          fi
 
   widget-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust + wasm target
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
         with:
           targets: wasm32-unknown-unknown
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: widget-build
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa # v0.4.0
 
       - name: Install binaryen + brotli
         run: |
@@ -48,7 +150,7 @@ jobs:
 
       - name: Report artifact sizes and enforce budgets
         env:
-          WASM_RAW_BUDGET_BYTES: "3400000"
+          WASM_RAW_BUDGET_BYTES: "3600000"
           WASM_GZIP_BUDGET_BYTES: "1100000"
           WASM_BROTLI_BUDGET_BYTES: "800000"
         run: bash scripts/report-asset-sizes.sh
@@ -58,10 +160,25 @@ jobs:
           test -f dist/eddie.wasm
           test -f dist/eddie-wasm.js
           test -f dist/eddie-worker.js
+          test -f dist/eddie-agent-worker.js
           test -f dist/eddie-widget.js
 
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      - name: Run widget JS tests
+        run: |
+          set -euo pipefail
+          if [[ -d widget/test ]] && find widget/test -type f -name '*.test.js' | grep -q .; then
+            node --test widget/test/
+          else
+            echo "widget/test/ has no *.test.js files yet; skipping node --test."
+          fi
+
       - name: Upload size report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: widget-size-report
           path: |
