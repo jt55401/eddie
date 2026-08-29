@@ -55,7 +55,13 @@ self.onmessage = function (e) {
 };
 
 function enqueue(fn, requestId) {
-  queue = queue.then(fn).catch((err) => postError(requestId, describe(err)));
+  queue = queue
+    .then(() => {
+      console.debug("eddie agent worker: start", requestId);
+      return fn();
+    })
+    .catch((err) => postError(requestId, describe(err)))
+    .then(() => console.debug("eddie agent worker: end", requestId));
 }
 
 async function load(msg) {
@@ -178,8 +184,12 @@ async function ask(msg) {
       max_tokens: 220,
       extra_body: { enable_thinking: false },
     });
+    // Never break out of this loop: WebLLM releases its generation lock at
+    // the end of the async generator, and an early exit skips that release,
+    // hanging every later completion. After interruptGenerate() the stream
+    // ends by itself within one decode step; drop the tokens until then.
     for await (const chunk of stream) {
-      if (active.aborted) break;
+      if (active.aborted) continue;
       const delta = chunk && chunk.choices && chunk.choices[0] && chunk.choices[0].delta ? chunk.choices[0].delta.content : null;
       if (delta) {
         if (!first) first = performance.now();
@@ -215,6 +225,7 @@ async function ask(msg) {
 }
 
 function abort(msg) {
+  console.debug("eddie agent worker: abort", msg.requestId, active ? active.requestId : null);
   if (!active) return;
   if (msg.requestId != null && msg.requestId !== active.requestId) return;
   active.aborted = true;

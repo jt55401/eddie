@@ -1137,11 +1137,18 @@
     answerText.textContent = "";
     answerText.classList.remove("sa-nohit");
     answerSources.textContent = "";
-    answerActions.textContent = "";
+    clearAnswerActions();
     answerModel.textContent = agentModel ? `${agentModel.base} · runs in your browser` : "";
     hide(answerText);
     hide(answerSources);
     hide(answerProgress);
+  }
+
+  /** Remove the answer card's buttons; if one of them had focus, return it to the input. */
+  function clearAnswerActions() {
+    const active = shadow.activeElement;
+    answerActions.textContent = "";
+    if (active && !active.isConnected) input.focus();
   }
 
   function hideAnswerCard() {
@@ -1223,11 +1230,11 @@
         ? config.consentText.replace(/\{size\}/g, size).replace(/\{model\}/g, agentModel.base)
         : `Answers come from ${agentModel.base}, a language model that runs in your browser. Download it once (about ${size})? It stays in your browser's cache.`;
       show(answerProgress);
-      answerActions.textContent = "";
+      clearAnswerActions();
       agentConsentAccept.textContent = `Download ${size} and answer`;
       agentConsentAccept.onclick = () => {
         rememberAgentConsent();
-        answerActions.textContent = "";
+        clearAnswerActions();
         resolve(true);
       };
       agentConsentCancel.onclick = () => {
@@ -1306,6 +1313,9 @@
   }
 
   function onAgentMessage(msg) {
+    if (msg.type !== "token" && msg.type !== "progress") {
+      console.debug("eddie agent event " + msg.type + " " + (msg.requestId == null ? "" : msg.requestId) + (msg.message ? " " + msg.message : ""));
+    }
     switch (msg.type) {
       case "progress":
         if (agentRun && !agentRun.done) {
@@ -1366,7 +1376,7 @@
 
   function finishAnswer(run, msg) {
     run.done = true;
-    answerActions.textContent = "";
+    clearAnswerActions();
     hide(answerProgress);
     answerText.textContent = "";
     if (msg.nohit) {
@@ -1441,7 +1451,7 @@
     if (run.resolveStream) run.resolveStream();
     if (reason === "stopped") {
       paintStream(run, true);
-      answerActions.textContent = "";
+      clearAnswerActions();
       answerProgress.textContent = "Stopped.";
       show(answerProgress);
     } else {
