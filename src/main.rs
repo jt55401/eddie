@@ -612,6 +612,35 @@ fn cmd_index(
     if docs.is_empty() {
         bail!("no documents found under {}", content_dir.display());
     }
+    // Sub-flags only take effect with their section flag; say so up front
+    // rather than silently building an index without the section.
+    if !qa_enabled {
+        let given = flags_given(&[
+            (qa_heuristics, "--qa-heuristics"),
+            (qa_seed.is_some(), "--qa-seed"),
+            (qa_ollama_model.is_some(), "--qa-ollama-model"),
+            (qa_openrouter_model.is_some(), "--qa-openrouter-model"),
+        ]);
+        if !given.is_empty() {
+            eprintln!(
+                "warning: {} ignored without --qa; no qa section will be built",
+                given.join(", ")
+            );
+        }
+    }
+    if !claims_enabled {
+        let given = flags_given(&[
+            (claims_heuristics, "--claims-heuristics"),
+            (claims_edits_path.is_some(), "--claims-edits"),
+        ]);
+        if !given.is_empty() {
+            eprintln!(
+                "warning: {} ignored without --claims; no claims section will be built",
+                given.join(", ")
+            );
+        }
+    }
+
 
     // Load models first: the first dense lane's tokenizer is the token
     // counter for chunk sizing once the chunker takes one.
@@ -671,10 +700,11 @@ fn cmd_index(
         ChunkingStrategy::Semantic => ChunkStrategy::Semantic,
     };
     let primary = lanes[0].as_ref();
-    let budget = chunk_size.min(primary.spec().max_seq_len);
+    let prefix_tokens = doc_prefix_tokens(primary);
+    let budget = chunk_budget(primary, chunk_size)?;
     let count = |text: &str| primary.count_tokens(text);
     eprintln!(
-        "Chunking documents (strategy: {:?}, budget {} tokens, overlap {} tokens, counted with lane '{}')...",
+        "Chunking documents (strategy: {:?}, budget {} tokens{}, overlap {} tokens, counted with lane '{}')...",
         chunk_strategy,
         budget,
         overlap,
@@ -691,10 +721,19 @@ fn cmd_index(
 
         if let Some(coarse_size) = coarse_chunk_size {
             let coarse_overlap = coarse_overlap.unwrap_or(overlap);
-            let coarse_budget = coarse_size.min(primary.spec().max_seq_len);
+            let coarse_budget = chunk_budget(primary, coarse_size)?;
             let mut coarse =
                 chunk_document_with_budget(doc, coarse_budget, coarse_overlap, strategy, &count);
             for chunk in &mut coarse {
+        if prefix_tokens > 0 {
+            format!(
+                " after {} for the doc prefix {:?}",
+                prefix_tokens,
+                primary.spec().doc_prefix
+            )
+        } else {
+            String::new()
+        },
                 chunk.meta.granularity = Some("coarse".to_string());
             }
             all_chunks.extend(coarse);
@@ -871,6 +910,11 @@ fn cmd_index(
 
     // --- Index assembly (format v5) -------------------------------------
     let n = metadata.len();
+        if !claims_heuristics && claims_edits_path.is_none() {
+            eprintln!(
+                "  warning: --claims without --claims-heuristics and without --claims-edits produces no entries"
+            );
+        }
     // Stored texts are the clean chunk text (no overlap prefix), so the
     // builder has nothing to strip.
     let overlap_words: Vec<u16> = vec![0; n];
@@ -882,6 +926,7 @@ fn cmd_index(
         builder.add_dense_lane(
             SCOPE_CHUNKS,
             DenseLane::from_f32(lane.spec().clone(), dim, n, &vectors, Quant::Int8)?,
+        corpus.dedup();
         )?;
     }
     if let (Some(enc), Some((sparse_docs, sparse_spec))) = (&sparse_encoder, sparse_section) {
@@ -913,12 +958,15 @@ fn cmd_index(
                 )?,
             )?;
         }
+            lane.reset_truncated_count();
+            let started = Instant::now();
         builder.add_qa(qa_entries);
     }
 
     if !claims.is_empty() {
         eprintln!("Embedding claims section ({} claims)...", claims.len());
         let claim_texts: Vec<String> = claims
+            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
             .iter()
             .map(|c| format!("{} {} {} {}", c.subject, c.predicate, c.object, c.evidence))
             .collect();
@@ -941,12 +989,15 @@ fn cmd_index(
                 )?,
             )?;
         }
+            lane.reset_truncated_count();
+            let started = Instant::now();
         builder.add_claims(claims);
     }
 
     let index = builder.finish()?;
 
     eprintln!("Writing index to {}...", output.display());
+            report_lane_timing(lane.as_ref(), refs.len(), started.elapsed().as_secs_f64());
     let file = fs::File::create(&output)
         .with_context(|| format!("creating output file {}", output.display()))?;
     let mut writer = BufWriter::new(file);
@@ -1767,7 +1818,7 @@ fn build_index_in_memory(
     for doc in docs {
         let mut chunks = match encoder {
             Some(enc) => {
-                let budget = chunk_size.min(enc.spec().max_seq_len);
+                let budget = chunk_budget(enc, chunk_size)?;
                 let count = |t: &str| enc.count_tokens(t);
                 chunk_document_with_budget(doc, budget, overlap, ChunkStrategy::Heading, &count)
             }
@@ -2013,6 +2064,46 @@ fn parse_usize_csv(csv: &str) -> Result<Vec<usize>> {
         if trimmed.is_empty() {
             continue;
         }
+/// Wordpieces the lane's document prefix adds in front of every chunk
+/// (special tokens excluded; the chunker counts those with the text).
+fn doc_prefix_tokens(lane: &dyn DenseEncoder) -> usize {
+    let prefix = &lane.spec().doc_prefix;
+    if prefix.is_empty() {
+        return 0;
+    }
+    lane.count_tokens(prefix)
+        .saturating_sub(lane.count_tokens(""))
+}
+
+/// Token budget for one chunk: `chunk_size` capped at the lane's sequence
+/// limit, minus the document prefix the encoder prepends, so a full chunk
+/// still fits once prefixed and nothing is truncated at embedding time.
+fn chunk_budget(lane: &dyn DenseEncoder, chunk_size: usize) -> Result<usize> {
+    let spec = lane.spec();
+    let prefix = doc_prefix_tokens(lane);
+    let budget = chunk_size.min(spec.max_seq_len).saturating_sub(prefix);
+    if budget == 0 {
+        bail!(
+            "chunk budget is 0: chunk size {} (capped at lane {:?} max_seq_len {}) leaves no room after the {}-token doc prefix {:?}",
+            chunk_size,
+            spec.id,
+            spec.max_seq_len,
+            prefix,
+            spec.doc_prefix
+        );
+    }
+    Ok(budget)
+}
+
+/// Names of the flags whose condition is set, for "ignored" warnings.
+fn flags_given(flags: &[(bool, &'static str)]) -> Vec<&'static str> {
+    flags
+        .iter()
+        .filter(|(given, _)| *given)
+        .map(|(_, name)| *name)
+        .collect()
+}
+
         let value = trimmed
             .parse::<usize>()
             .with_context(|| format!("parsing '{}' as usize", trimmed))?;
@@ -2262,5 +2353,43 @@ mod tests {
         assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:average").is_err());
         assert!(parse_runtime_spec("webgpu-onnx:org/repo:q4:q4f16:mean:extra").is_err());
         assert!(parse_runtime_spec("webgpu-onnx:org/repo").is_err());
+    }
+
+    /// Minimal encoder whose tokenizer counts whitespace words plus two
+    /// special tokens, enough to exercise the budget arithmetic.
+    struct WordCounter(DenseSpec);
+
+    impl DenseEncoder for WordCounter {
+        fn spec(&self) -> &DenseSpec {
+            &self.0
+        }
+        fn embed(&self, _: &[&str], _: TextKind) -> Result<Vec<Vec<f32>>> {
+            unreachable!()
+        }
+        fn truncated_count(&self) -> usize {
+            0
+        }
+        fn reset_truncated_count(&self) {}
+        fn count_tokens(&self, text: &str) -> usize {
+            text.split_whitespace().count() + 2
+        }
+    }
+
+    #[test]
+    fn chunk_budget_subtracts_the_doc_prefix() {
+        let mut spec = eddie::embed::bert_spec_skeleton("intfloat/e5-small-v2");
+        spec.max_seq_len = 512;
+        assert_eq!(spec.doc_prefix, "passage: ");
+        let lane = WordCounter(spec.clone());
+        assert_eq!(doc_prefix_tokens(&lane), 1);
+        assert_eq!(chunk_budget(&lane, 256).unwrap(), 255);
+        assert_eq!(chunk_budget(&lane, 1024).unwrap(), 511);
+        assert!(chunk_budget(&lane, 1).is_err());
+
+        spec.doc_prefix = String::new();
+        let lane = WordCounter(spec);
+        assert_eq!(doc_prefix_tokens(&lane), 0);
+        assert_eq!(chunk_budget(&lane, 256).unwrap(), 256);
+        assert_eq!(chunk_budget(&lane, 1024).unwrap(), 512);
     }
 
