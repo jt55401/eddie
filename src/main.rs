@@ -34,8 +34,8 @@ use eddie::index::{
 use eddie::manifest::{DenseSpec, Quant, RuntimeSpec, SparseSpec, SparseTerm};
 use eddie::models;
 use eddie::parse::{
-    AstroParser, ContentParser, DocusaurusParser, EleventyParser, HugoParser, JekyllParser,
-    MkDocsParser, parse_content_dir, parse_content_dir_report,
+    AstroParser, ContentParser, DocusaurusParser, EleventyParser, HtmlParser, HugoParser,
+    JekyllParser, MkDocsParser, parse_content_dir, parse_content_dir_report,
 };
 use eddie::qa::{
     OllamaConfig, OpenRouterConfig, QaCorpus, QaEntry, build_qa_corpus_from_chunks_with_subject,
@@ -503,6 +503,10 @@ enum Cms {
     Mkdocs,
     Eleventy,
     Jekyll,
+    /// Rendered HTML output (e.g. a Hugo `public/` build directory), for
+    /// sites whose copy lives in templates rather than markdown content
+    /// files. Point `--content-dir` at the built output, not the source.
+    Html,
 }
 
 impl Cms {
@@ -514,6 +518,7 @@ impl Cms {
             Cms::Mkdocs => "mkdocs",
             Cms::Eleventy => "eleventy",
             Cms::Jekyll => "jekyll",
+            Cms::Html => "html",
         }
     }
 }
@@ -2406,6 +2411,9 @@ fn parser_for(cms: Cms) -> Box<dyn ContentParser> {
         Cms::Mkdocs => Box::new(MkDocsParser),
         Cms::Eleventy => Box::new(EleventyParser),
         Cms::Jekyll => Box::new(JekyllParser),
+        // `--include-noindex` isn't wired up as a CLI flag yet (HtmlOptions
+        // supports it at the library level); noindex pages are skipped.
+        Cms::Html => Box::new(HtmlParser),
     }
 }
 
