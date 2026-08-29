@@ -69,6 +69,9 @@ impl AcceptanceSuite {
             if case.weight <= 0.0 {
                 bail!("case '{}' has non-positive weight", case.id);
             }
+            if case.top_k == Some(0) {
+                bail!("case '{}' has top_k 0; it can never pass", case.id);
+            }
             if let Some(rating) = case.user_rating
                 && !(1..=5).contains(&rating)
             {
@@ -339,5 +342,25 @@ mod tests {
         };
 
         assert!(suite.validate().is_err());
+    }
+
+    #[test]
+    fn suite_validate_rejects_zero_top_k() {
+        let mut suite = AcceptanceSuite {
+            name: None,
+            cases: vec![AcceptanceCase {
+                id: "zero".to_string(),
+                query: "query".to_string(),
+                must_match_any: vec!["x".to_string()],
+                must_include_all: vec![],
+                top_k: Some(0),
+                weight: 1.0,
+                user_rating: None,
+            }],
+        };
+        let err = suite.validate().unwrap_err().to_string();
+        assert!(err.contains("top_k 0"), "{}", err);
+        suite.cases[0].top_k = Some(3);
+        assert!(suite.validate().is_ok());
     }
 }

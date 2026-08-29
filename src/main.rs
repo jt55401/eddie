@@ -2,7 +2,7 @@
 
 //! Eddie CLI: build-time indexer for static site content.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
@@ -1447,26 +1447,58 @@ fn cmd_eval(
     let runtime = QueryRuntime::new(&index, mode, lane)?;
 
     let mut per_case = Vec::with_capacity(set.cases.len());
-    for (i, case) in set.cases.iter().enumerate() {
+    for (case, id) in set.cases.iter().zip(case_ids) {
         let (pages, _) = runtime.run(&index, &case.query, top_k)?;
         let urls: Vec<String> = pages.into_iter().map(|p| p.url).collect();
         per_case.push(CaseMetrics {
-            id: case.id.clone().unwrap_or_else(|| format!("case-{}", i + 1)),
+            id,
             query: case.query.clone(),
-            hit: hit_at_k(&urls, &case.relevant, top_k),
-            rr: mrr(&urls, &case.relevant),
-            ndcg: ndcg_at_k(&urls, &case.relevant, top_k),
-            first_relevant_rank: urls
+            hit: hit_at_k(&retrieved, &relevant, top_k),
+            rr: mrr(&retrieved, &relevant),
+            ndcg: ndcg_at_k(&retrieved, &relevant, top_k),
+            first_relevant_rank: retrieved
                 .iter()
-                .position(|u| case.relevant.iter().any(|r| r == u))
+                .position(|u| relevant.contains(u))
                 .map(|p| p + 1),
             top: urls,
+
+    // Labels and page URLs are compared in canonical form (no host, no
+    // trailing slash, lowercase); a label that names no page at all is
+    // almost always a typo, so say so before the metrics print zeros.
+    let page_urls: HashSet<String> = index
+        .metadata
+        .iter()
+        .map(|m| normalize_eval_url(&m.url))
+        .collect();
+    let case_ids: Vec<String> = set
+        .cases
+        .iter()
+        .enumerate()
+        .map(|(i, c)| c.id.clone().unwrap_or_else(|| format!("case-{}", i + 1)))
+        .collect();
+    for (case, id) in set.cases.iter().zip(&case_ids) {
+        for url in &case.relevant {
+            if !page_urls.contains(&normalize_eval_url(url)) {
+                eprintln!(
+                    "warning: {}: relevant url {:?} is not a page in the index",
+                    id, url
+                );
+            }
+        }
+    }
+
         });
     }
     let n = per_case.len() as f64;
     let report = EvalReport {
         k: top_k,
         mode,
+        let retrieved: Vec<String> = urls.iter().map(|u| normalize_eval_url(u)).collect();
+        let relevant: Vec<String> = case
+            .relevant
+            .iter()
+            .map(|u| normalize_eval_url(u))
+            .collect();
         cases: per_case.len(),
         hit_at_k: per_case.iter().map(|c| c.hit).sum::<f64>() / n,
         mrr: per_case.iter().map(|c| c.rr).sum::<f64>() / n,
@@ -1526,6 +1558,27 @@ fn cmd_tune(
     eval: Option<PathBuf>,
     save_eval: Option<PathBuf>,
     interactive: bool,
+/// Canonical form of a page URL for label matching: scheme and host
+/// dropped, a leading slash ensured, the trailing slash trimmed, lowercased.
+/// `/posts/Foo/`, `posts/foo` and `https://example.com/posts/foo` all
+/// become `/posts/foo`.
+fn normalize_eval_url(url: &str) -> String {
+    let mut s = url.trim();
+    if let Some(rest) = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+    {
+        s = rest.find('/').map_or("/", |i| &rest[i..]);
+    }
+    let trimmed = s.trim_end_matches('/');
+    let mut out = String::with_capacity(trimmed.len() + 1);
+    if !trimmed.starts_with('/') {
+        out.push('/');
+    }
+    out.push_str(trimmed);
+    out.to_lowercase()
+}
+
     model_id: &str,
     chunk_sizes: &str,
     overlaps: &str,
@@ -1550,6 +1603,9 @@ fn cmd_tune(
         AcceptanceSuite {
             name: Some("interactive-suite".to_string()),
             cases: Vec::new(),
+    if top_k == 0 {
+        bail!("--top-k must be > 0");
+    }
         }
     };
 
@@ -2391,5 +2447,19 @@ mod tests {
         assert_eq!(doc_prefix_tokens(&lane), 0);
         assert_eq!(chunk_budget(&lane, 256).unwrap(), 256);
         assert_eq!(chunk_budget(&lane, 1024).unwrap(), 512);
+    }
+
+    #[test]
+    fn eval_urls_normalize_to_host_less_lowercase_paths() {
+        assert_eq!(normalize_eval_url("/posts/Foo/"), "/posts/foo");
+        assert_eq!(normalize_eval_url("posts/foo"), "/posts/foo");
+        assert_eq!(
+            normalize_eval_url("https://Example.com/posts/foo"),
+            "/posts/foo"
+        );
+        assert_eq!(normalize_eval_url("http://example.com"), "/");
+        assert_eq!(normalize_eval_url(" /about "), "/about");
+        assert_eq!(normalize_eval_url("/"), "/");
+        assert_eq!(normalize_eval_url(""), "/");
     }
 
