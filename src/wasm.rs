@@ -37,7 +37,7 @@ use crate::embed::{DenseEncoder, bert_from_bytes};
 use crate::index::{SearchIndex, query_vector_problem};
 use crate::manifest::{DenseSpec, Family, RuntimeSpec, TextKind};
 use crate::search as rank;
-use crate::search::{Mode, PageResult, Query};
+use crate::search::{Mode, PageResult, Query, Weights};
 use crate::sparse::{DEFAULT_MAX_SEQ_LEN, sparse_tokenizer_from_bytes, tokenizer_json_sha256};
 
 struct DenseRuntime {
