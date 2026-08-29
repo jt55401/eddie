@@ -7,7 +7,7 @@ the full retrieval architecture, the model table, and the in-browser agent.
 ## Prerequisites
 
 - A Hugo site with markdown content using TOML (`+++`) or YAML (`---`) frontmatter, Hugo 0.110.0+
-- Either: Node.js 18+, Ruby 3+, or Python 3.9+ (to run the CLI via a launcher package), or a Rust toolchain (1.93.1, see `rust-toolchain.toml`) to build from source
+- Either: Node.js 18+, Ruby 3+, or Python 3.9+ (to run the CLI via a launcher package), or a Rust toolchain (1.96.0, see `rust-toolchain.toml`) to build from source
 
 ## Installing the widget
 

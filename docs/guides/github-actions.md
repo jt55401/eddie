@@ -15,7 +15,7 @@ See also: [Package Publishing Guide](package-publishing.md) for setup details.
 
 ## Toolchain pin
 
-`rust-toolchain.toml` at the repo root pins Rust `1.93.1` plus the
+`rust-toolchain.toml` at the repo root pins Rust `1.96.0` plus the
 `wasm32-unknown-unknown` target. Every workflow installs this exact version
 (no floating `stable` channel) so a Rust point release can't silently change
 what a tag produces. Update it deliberately when you bump the toolchain, and

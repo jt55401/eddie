@@ -13,7 +13,7 @@ cargo test                               # Run tests
 python3 .claude/scripts/check_requirements_conflicts.py --root requirements  # Validate requirements
 ```
 
-`rust-toolchain.toml` pins the exact Rust version CI uses (1.93.1 plus the
+`rust-toolchain.toml` pins the exact Rust version CI uses (1.96.0 plus the
 `wasm32-unknown-unknown` target); keep local `cargo`/`rustc`/`clippy` on the
 same version so `cargo build` and `cargo clippy` never disagree on a shared
 `target/`.

@@ -44,7 +44,7 @@ jobs:
           ssh-private-key: ${{ secrets.EDDIE_HUGO_DEPLOY_KEY }}
 
       - name: Install Rust + wasm target
-        uses: dtolnay/rust-toolchain@96d8491b80fc26e2ab48ff0c3928c002176297c8 # 1.93.1
+        uses: dtolnay/rust-toolchain@01ba1edad32c6f80dbcce879d3e0fa5a00b2a84e # 1.96.0
         with:
           targets: wasm32-unknown-unknown
 
