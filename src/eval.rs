@@ -232,6 +232,40 @@ pub fn ndcg_at_k(retrieved: &[String], relevant: &[String], k: usize) -> f64 {
     if idcg == 0.0 { 0.0 } else { dcg / idcg }
 }
 
+/// Graded nDCG at `k`: gain `2^grade - 1` for each retrieved id that has a
+/// grade in `grades` (0 otherwise), so a grade-3 page is worth seven
+/// grade-1 pages. Ids absent from `grades` are irrelevant. With every grade
+/// at 1 this equals [`ndcg_at_k`]. Returns 0.0 when `grades` is empty or `k`
+/// is 0.
+pub fn ndcg_graded_at_k(retrieved: &[String], grades: &[(String, u8)], k: usize) -> f64 {
+    if grades.is_empty() || k == 0 {
+        return 0.0;
+    }
+    let gain_of = |g: u8| -> f64 { 2f64.powi(g as i32) - 1.0 };
+    let top = &retrieved[..retrieved.len().min(k)];
+    let dcg: f64 = top
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let gain = grades
+                .iter()
+                .filter(|(url, _)| url == r)
+                .map(|(_, g)| gain_of(*g))
+                .fold(0.0, f64::max);
+            gain / (i as f64 + 2.0).log2()
+        })
+        .sum();
+    let mut ideal: Vec<f64> = grades.iter().map(|(_, g)| gain_of(*g)).collect();
+    ideal.sort_by(|a, b| b.total_cmp(a));
+    let idcg: f64 = ideal
+        .iter()
+        .take(k)
+        .enumerate()
+        .map(|(i, g)| g / (i as f64 + 2.0).log2())
+        .sum();
+    if idcg == 0.0 { 0.0 } else { dcg / idcg }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +358,30 @@ mod tests {
         let retrieved = ids(&["a", "b"]);
         let relevant = ids(&["a"]);
         assert_eq!(ndcg_at_k(&retrieved, &relevant, 0), 0.0);
+    }
+
+    #[test]
+    fn graded_ndcg_rewards_grade_order_and_matches_binary_at_grade_one() {
+        let grades = vec![("a".to_string(), 3u8), ("b".to_string(), 1u8)];
+        assert!((ndcg_graded_at_k(&ids(&["a", "b"]), &grades, 2) - 1.0).abs() < 1e-9);
+        let swapped = ndcg_graded_at_k(&ids(&["b", "a"]), &grades, 2);
+        assert!(swapped < 1.0 && swapped > 0.0, "{}", swapped);
+        // Binary check (a at rank 2): (7/log2(3)) / (7 + 1/log2(3)) with b at rank 1.
+        let expected = (1.0 + 7.0 / 3f64.log2()) / (7.0 + 1.0 / 3f64.log2());
+        assert!((swapped - expected).abs() < 1e-9);
+        // Only the irrelevant page: 0. Nothing graded or k = 0: 0, never NaN.
+        assert_eq!(ndcg_graded_at_k(&ids(&["z"]), &grades, 2), 0.0);
+        assert_eq!(ndcg_graded_at_k(&ids(&["a"]), &[], 2), 0.0);
+        assert_eq!(ndcg_graded_at_k(&ids(&["a"]), &grades, 0), 0.0);
+        // Grade 1 everywhere reproduces the binary metric.
+        let ones = vec![("a".to_string(), 1u8), ("c".to_string(), 1u8)];
+        let retrieved = ids(&["b", "a", "d", "c"]);
+        let binary = ndcg_at_k(&retrieved, &ids(&["a", "c"]), 4);
+        assert!((ndcg_graded_at_k(&retrieved, &ones, 4) - binary).abs() < 1e-12);
+        // Duplicate urls in the grade list take the highest grade.
+        let dup = vec![("a".to_string(), 1u8), ("a".to_string(), 2u8)];
+        let one = ndcg_graded_at_k(&ids(&["a"]), &[("a".to_string(), 2u8)], 1);
+        assert!((ndcg_graded_at_k(&ids(&["a"]), &dup, 1) - one).abs() < 1e-12 || one == 1.0);
     }
 
     #[test]

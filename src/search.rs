@@ -64,7 +64,7 @@ impl Mode {
 
 /// Per-arm RRF weights. When the sparse arm does not run, BM25 stands in for
 /// the lexical signal and uses `max(bm25, sparse)` (1.0 with the defaults).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Weights {
     pub dense: f64,
     pub sparse: f64,
