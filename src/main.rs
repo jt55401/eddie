@@ -39,9 +39,7 @@ use eddie::qa::{
     build_qa_entries_from_chunks, synthesize_with_ollama_from_chunks,
     synthesize_with_openrouter_from_chunks,
 };
-use eddie::search::{
-    Mode, PageResult, Query, Retrieval, Weights, group_pages, query_terms, retrieve,
-};
+use eddie::search::{Mode, PageResult, Query, Retrieval, group_pages, query_terms, retrieve};
 use eddie::sparse::{
     SparseDocEncoder, SparseOptions, sparse_query_terms, sparse_tokenizer_from_bytes,
     tokenizer_json_sha256,
@@ -1231,7 +1229,7 @@ impl QueryRuntime {
             sparse: self.sparse_terms(index, text)?,
             mode: self.mode,
             top_k,
-            weights: Weights::default(),
+            ..Query::default()
         };
         let retrieval = retrieve(index, &q)?;
         let pages = group_pages(index, &retrieval.ranked, &query_terms(text), top_k);
@@ -2011,7 +2009,7 @@ fn retrieve_chunk_ids(
         sparse: None,
         mode,
         top_k,
-        weights: Weights::default(),
+        ..Query::default()
     };
     let retrieval = retrieve(index, &q)?;
     let pages = group_pages(index, &retrieval.ranked, &query_terms(query), top_k);

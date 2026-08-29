@@ -81,6 +81,45 @@ impl Default for Weights {
     }
 }
 
+impl Weights {
+    /// Parse `"dense,sparse,bm25"` (three finite, non-negative floats, not
+    /// all zero) as written for `--weights`.
+    pub fn parse(s: &str) -> Result<Weights> {
+        let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "weights must be three comma-separated numbers dense,sparse,bm25 (got {:?})",
+                s
+            );
+        }
+        let mut vals = [0.0f64; 3];
+        for (v, (part, name)) in vals
+            .iter_mut()
+            .zip(parts.iter().zip(["dense", "sparse", "bm25"]))
+        {
+            let x: f64 = part
+                .parse()
+                .with_context(|| format!("{} weight {:?} is not a number", name, part))?;
+            if !x.is_finite() || x < 0.0 {
+                anyhow::bail!(
+                    "{} weight must be a finite number >= 0 (got {})",
+                    name,
+                    part
+                );
+            }
+            *v = x;
+        }
+        if vals.iter().all(|&v| v == 0.0) {
+            anyhow::bail!("at least one weight must be > 0");
+        }
+        Ok(Weights {
+            dense: vals[0],
+            sparse: vals[1],
+            bm25: vals[2],
+        })
+    }
+}
+
 /// One search request. Arms whose input is `None` are skipped and reported
 /// in [`Retrieval::degraded`]; they never cause an error.
 #[derive(Debug, Clone)]
@@ -92,6 +131,26 @@ pub struct Query<'a> {
     pub mode: Mode,
     pub top_k: usize,
     pub weights: Weights,
+    /// Candidates fetched per arm; `None` means [`fetch_k`]`(top_k)`.
+    pub fetch_k: Option<usize>,
+    /// RRF constant; `None` means [`RRF_K`].
+    pub rrf_k: Option<f64>,
+}
+
+impl Default for Query<'_> {
+    /// Hybrid, top 8, default weights, no arm inputs, no overrides.
+    fn default() -> Self {
+        Self {
+            text: "",
+            dense: None,
+            sparse: None,
+            mode: Mode::Hybrid,
+            top_k: 8,
+            weights: Weights::default(),
+            fetch_k: None,
+            rrf_k: None,
+        }
+    }
 }
 
 /// A fused chunk. Ranks are 1-based positions within each arm's fetch list.
@@ -150,7 +209,14 @@ pub fn fetch_k(top_k: usize) -> usize {
 /// zeros) or a sparse query with no terms, since running those arms would
 /// hand RRF credit to arbitrary chunks.
 pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
-    let fetch = fetch_k(q.top_k);
+    let fetch = q
+        .fetch_k
+        .filter(|&f| f > 0)
+        .unwrap_or_else(|| fetch_k(q.top_k));
+    let rrf_k = q
+        .rrf_k
+        .filter(|k| k.is_finite() && *k >= 0.0)
+        .unwrap_or(RRF_K);
     let mut arms = Arms::default();
     let mut degraded = Vec::new();
 
@@ -258,17 +324,17 @@ pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
     }
     for (i, &chunk) in dense_hits.iter().enumerate() {
         let e = entry(&mut fused, chunk);
-        e.score += q.weights.dense / (RRF_K + (i + 1) as f64);
+        e.score += q.weights.dense / (rrf_k + (i + 1) as f64);
         e.dense_rank = Some(i + 1);
     }
     for (i, &chunk) in sparse_hits.iter().enumerate() {
         let e = entry(&mut fused, chunk);
-        e.score += q.weights.sparse / (RRF_K + (i + 1) as f64);
+        e.score += q.weights.sparse / (rrf_k + (i + 1) as f64);
         e.sparse_rank = Some(i + 1);
     }
     for (i, &chunk) in bm25_hits.iter().enumerate() {
         let e = entry(&mut fused, chunk);
-        e.score += bm25_weight / (RRF_K + (i + 1) as f64);
+        e.score += bm25_weight / (rrf_k + (i + 1) as f64);
         e.bm25_rank = Some(i + 1);
     }
 
@@ -586,6 +652,192 @@ pub fn sparse_query_terms_local(
     Ok(crate::sparse::sparse_query_terms(tokenizer, idf, query))
 }
 
+// ---------------------------------------------------------------------------
+// QA ranking
+// ---------------------------------------------------------------------------
+
+/// Share of the QA score that comes from the dense cosine.
+pub const QA_DENSE_WEIGHT: f64 = 0.6;
+/// Share of the QA score that comes from the lexical signal (overlap + BM25).
+pub const QA_LEXICAL_WEIGHT: f64 = 0.4;
+/// A hit is `confident` when `score >= QA_CONFIDENT_SCORE` and either
+/// `overlap >= QA_CONFIDENT_OVERLAP` or `dense >= QA_CONFIDENT_DENSE`.
+pub const QA_CONFIDENT_SCORE: f64 = 0.55;
+pub const QA_CONFIDENT_OVERLAP: f64 = 0.34;
+pub const QA_CONFIDENT_DENSE: f64 = 0.80;
+
+/// One QA entry ranked by [`rank_qa`].
+///
+/// ```text
+/// lexical = 0.5 · overlap + 0.5 · bm25_norm
+/// score   = 0.6 · dense + 0.4 · lexical
+/// ```
+///
+/// * `dense`: cosine from the qa dense lane (0 when the entry was not among
+///   the dense candidates handed in).
+/// * `overlap`: matched query terms / query terms, over [`qa_overlap_terms`]
+///   (BM25 tokens minus stop words and auxiliaries), matched against the
+///   entry's question and answer.
+/// * `bm25_norm`: the entry's BM25 score over `question + " " + answer`
+///   divided by the best BM25 score for the query (0 when the entry is not
+///   in the BM25 candidate list); `bm25_rank` is its 1-based rank there.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QaHit {
+    pub id: usize,
+    pub score: f64,
+    pub dense: f64,
+    pub overlap: f64,
+    pub bm25_rank: Option<usize>,
+    pub confident: bool,
+}
+
+/// How many dense candidates to fetch from the qa lane before calling
+/// [`rank_qa`] for `k` results: enough that lexical evidence can promote an
+/// entry the dense arm ranked a few places down.
+pub fn qa_fetch_k(k: usize) -> usize {
+    k.saturating_mul(4).max(20)
+}
+
+/// Rank the QA entries of `index` for `query_text`.
+///
+/// `dense_hits` are `(entry id, cosine)` pairs from the qa dense lane
+/// (see [`qa_fetch_k`]); pass an empty slice when no query vector exists and
+/// the ranking is lexical only (such hits are never `confident`). Candidates
+/// are the union of `dense_hits` and the BM25 top list; the result holds at
+/// most `k` hits, best first, ties broken by entry id. See [`QaHit`] for the
+/// formula.
+pub fn rank_qa(
+    index: &SearchIndex,
+    query_text: &str,
+    dense_hits: &[(usize, f32)],
+    k: usize,
+) -> Vec<QaHit> {
+    if k == 0 || index.qa.is_empty() {
+        return Vec::new();
+    }
+    let terms = qa_overlap_terms(query_text);
+    let bm25_hits = index.qa_bm25().search(query_text, qa_fetch_k(k));
+    let bm25_top = bm25_hits.first().map(|h| h.1).unwrap_or(0.0);
+
+    let mut candidates: HashMap<usize, QaHit> = HashMap::new();
+    for &(id, cos) in dense_hits {
+        if id >= index.qa.len() {
+            continue;
+        }
+        let e = candidates.entry(id).or_insert_with(|| blank_hit(id));
+        e.dense = e.dense.max(cos.clamp(-1.0, 1.0) as f64);
+    }
+    let mut bm25_norm: HashMap<usize, f64> = HashMap::new();
+    for (rank, &(id, score)) in bm25_hits.iter().enumerate() {
+        let e = candidates.entry(id).or_insert_with(|| blank_hit(id));
+        e.bm25_rank = Some(rank + 1);
+        bm25_norm.insert(
+            id,
+            if bm25_top > 0.0 {
+                score / bm25_top
+            } else {
+                0.0
+            },
+        );
+    }
+
+    let mut hits: Vec<QaHit> = candidates
+        .into_values()
+        .map(|mut h| {
+            let entry = &index.qa[h.id];
+            h.overlap = overlap_ratio(&terms, &format!("{} {}", entry.question, entry.answer));
+            let bm25 = bm25_norm.get(&h.id).copied().unwrap_or(0.0);
+            let lexical = 0.5 * h.overlap + 0.5 * bm25;
+            h.score = QA_DENSE_WEIGHT * h.dense.max(0.0) + QA_LEXICAL_WEIGHT * lexical;
+            h.confident = h.score >= QA_CONFIDENT_SCORE
+                && (h.overlap >= QA_CONFIDENT_OVERLAP || h.dense >= QA_CONFIDENT_DENSE);
+            h
+        })
+        .collect();
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.id.cmp(&b.id)));
+    hits.truncate(k);
+    hits
+}
+
+fn blank_hit(id: usize) -> QaHit {
+    QaHit {
+        id,
+        score: 0.0,
+        dense: 0.0,
+        overlap: 0.0,
+        bm25_rank: None,
+        confident: false,
+    }
+}
+
+/// Query terms for QA overlap: [`query_terms`] minus auxiliaries and other
+/// function words that every question shares (`has`, `been`, `many`, ...),
+/// unless nothing else remains.
+pub fn qa_overlap_terms(text: &str) -> Vec<String> {
+    let base = query_terms(text);
+    let content: Vec<String> = base
+        .iter()
+        .filter(|t| !is_qa_function_word(t))
+        .cloned()
+        .collect();
+    if content.is_empty() { base } else { content }
+}
+
+fn is_qa_function_word(t: &str) -> bool {
+    matches!(
+        t,
+        "about"
+            | "any"
+            | "been"
+            | "did"
+            | "had"
+            | "has"
+            | "have"
+            | "he"
+            | "her"
+            | "him"
+            | "his"
+            | "if"
+            | "into"
+            | "its"
+            | "many"
+            | "me"
+            | "much"
+            | "my"
+            | "not"
+            | "our"
+            | "she"
+            | "should"
+            | "so"
+            | "some"
+            | "than"
+            | "their"
+            | "them"
+            | "there"
+            | "these"
+            | "they"
+            | "those"
+            | "was"
+            | "we"
+            | "were"
+            | "will"
+            | "would"
+    )
+}
+
+/// `|terms ∩ tokens(text)| / |terms|`, 0 when `terms` is empty.
+fn overlap_ratio(terms: &[String], text: &str) -> f64 {
+    if terms.is_empty() {
+        return 0.0;
+    }
+    let present: HashSet<String> = tokenize(text).into_iter().collect();
+    let matched = terms
+        .iter()
+        .filter(|t| present.contains(t.as_str()))
+        .count();
+    matched as f64 / terms.len() as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,7 +871,7 @@ mod tests {
             sparse: Some(sparse),
             mode,
             top_k,
-            weights: Weights::default(),
+            ..Query::default()
         }
     }
 
@@ -965,6 +1217,159 @@ mod tests {
         assert!(query_terms("??").is_empty());
     }
 
+    fn qa_entry(question: &str, answer: &str) -> crate::qa::QaEntry {
+        crate::qa::QaEntry {
+            question: question.into(),
+            answer: answer.into(),
+            source_title: "Programming Languages".into(),
+            source_url: "/skills/programming-languages/".into(),
+            source_section: None,
+            tags: vec![],
+            confidence: 0.9,
+        }
+    }
+
+    fn qa_index(entries: Vec<crate::qa::QaEntry>) -> SearchIndex {
+        let corpus = synthetic_corpus(4, 4, 5);
+        let mut b = IndexBuilder::new();
+        b.add_chunks(corpus.metadata.clone(), corpus.texts.clone(), vec![0; 4])
+            .unwrap();
+        b.add_qa(entries);
+        b.finish().unwrap()
+    }
+
+    #[test]
+    fn rank_qa_prefers_lexical_agreement_over_a_slightly_higher_cosine() {
+        // The motivating case: synthesis wrote the exact answer, but the
+        // dense score alone put an unrelated "years of experience" entry first.
+        let index = qa_index(vec![
+            qa_entry(
+                "How many years of experience does Jason Grey have in AI/ML?",
+                "Over ten years.",
+            ),
+            qa_entry("How long has Jason Grey been coding?", "Nearly 40 years."),
+            qa_entry("Where does Jason Grey live?", "Minnesota."),
+        ]);
+        let query = "how long has jason been programming?";
+        assert_eq!(
+            qa_overlap_terms(query),
+            vec!["long", "jason", "programming"]
+        );
+        let hits = rank_qa(&index, query, &[(0, 0.66), (1, 0.62), (2, 0.40)], 3);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].id, 1, "{:?}", hits);
+        assert_eq!(hits[1].id, 0);
+        let best = &hits[0];
+        assert!((best.dense - 0.62).abs() < 1e-6);
+        assert!((best.overlap - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(best.bm25_rank, Some(1));
+        // 0.6·0.62 + 0.4·(0.5·0.667 + 0.5·1.0)
+        let expected =
+            QA_DENSE_WEIGHT * best.dense + QA_LEXICAL_WEIGHT * (0.5 * best.overlap + 0.5);
+        assert!((best.score - expected).abs() < 1e-9);
+        assert!((best.score - 0.7053).abs() < 1e-3);
+        assert!(best.confident);
+        assert!(!hits[1].confident, "{:?}", hits[1]);
+        assert!(hits[1].overlap < QA_CONFIDENT_OVERLAP);
+        assert!(hits[1].score < best.score);
+        // Serialised shape carries every component.
+        let json = serde_json::to_string(best).unwrap();
+        for key in [
+            "\"score\"",
+            "\"dense\"",
+            "\"overlap\"",
+            "\"bm25_rank\"",
+            "\"confident\"",
+        ] {
+            assert!(json.contains(key), "{}", json);
+        }
+    }
+
+    #[test]
+    fn rank_qa_without_dense_is_lexical_only_and_never_confident() {
+        let index = qa_index(vec![
+            qa_entry("How long has Jason Grey been coding?", "Nearly 40 years."),
+            qa_entry("Where does Jason Grey live?", "Minnesota."),
+        ]);
+        let hits = rank_qa(&index, "how long has jason been programming?", &[], 5);
+        assert_eq!(hits[0].id, 0);
+        assert!(hits.iter().all(|h| !h.confident && h.dense == 0.0));
+        assert!(hits[0].score <= QA_LEXICAL_WEIGHT + 1e-12);
+        // A very high cosine alone is enough for confidence.
+        let hits = rank_qa(&index, "zzz qqq", &[(1, 0.95)], 5);
+        assert_eq!(hits[0].id, 1);
+        assert_eq!(hits[0].overlap, 0.0);
+        assert!(hits[0].confident);
+        // Out-of-range ids are ignored; k = 0 and empty qa give nothing.
+        assert!(rank_qa(&index, "x", &[(99, 0.9)], 5).is_empty());
+        assert!(rank_qa(&index, "x", &[(0, 0.9)], 0).is_empty());
+        let (no_qa, _) = build_synthetic_index(8, 4, Quant::F32, false);
+        assert!(rank_qa(&no_qa, "topic1", &[(0, 0.9)], 3).is_empty());
+        // Ties break by id; the list is capped at k.
+        let hits = rank_qa(&index, "??", &[(1, 0.5), (0, 0.5)], 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 0);
+        assert_eq!(qa_fetch_k(3), 20);
+        assert_eq!(qa_fetch_k(8), 32);
+    }
+
+    #[test]
+    fn qa_overlap_terms_drops_auxiliaries_unless_nothing_remains() {
+        assert_eq!(
+            qa_overlap_terms("Has he been there?"),
+            vec!["has", "he", "been", "there"]
+        );
+        assert_eq!(
+            qa_overlap_terms("What has Jason been building?"),
+            vec!["jason", "building"]
+        );
+    }
+
+    #[test]
+    fn weights_parse_validates_three_numbers() {
+        let w = Weights::parse("1,0.8, 0.6").unwrap();
+        assert_eq!(
+            w,
+            Weights {
+                dense: 1.0,
+                sparse: 0.8,
+                bm25: 0.6
+            }
+        );
+        assert!(Weights::parse("1,2").is_err());
+        assert!(Weights::parse("1,2,3,4").is_err());
+        assert!(Weights::parse("a,1,1").is_err());
+        assert!(Weights::parse("-1,1,1").is_err());
+        assert!(Weights::parse("0,0,0").is_err());
+        assert!(Weights::parse("nan,1,1").is_err());
+    }
+
+    #[test]
+    fn fetch_k_and_rrf_k_overrides_change_the_fusion() {
+        let (index, corpus) = index_2k();
+        let base = query_for(&corpus, "topic3 facts", 3, Mode::Hybrid, 8);
+        let r = retrieve(&index, &base).unwrap();
+        let mut narrow = base.clone();
+        narrow.fetch_k = Some(5);
+        let n = retrieve(&index, &narrow).unwrap();
+        assert!(n.ranked.len() <= 15 && n.ranked.len() < r.ranked.len());
+        assert!(n.ranked.iter().all(|c| {
+            c.dense_rank.is_none_or(|x| x <= 5)
+                && c.sparse_rank.is_none_or(|x| x <= 5)
+                && c.bm25_rank.is_none_or(|x| x <= 5)
+        }));
+        let mut sharp = base.clone();
+        sharp.rrf_k = Some(0.0);
+        let s = retrieve(&index, &sharp).unwrap();
+        let top = s.ranked.iter().find(|c| c.chunk == 3).unwrap();
+        assert!((top.score - (1.0 + 1.0 + 0.8)).abs() < 1e-9 || top.score >= 1.0);
+        // Zero fetch_k and a non-finite rrf_k fall back to the defaults.
+        let mut bad = base.clone();
+        bad.fetch_k = Some(0);
+        bad.rrf_k = Some(f64::NAN);
+        assert_eq!(retrieve(&index, &bad).unwrap().ranked, r.ranked);
+    }
+
     #[test]
     fn mode_parsing() {
         assert_eq!(Mode::parse("hybrid"), Some(Mode::Hybrid));
@@ -1003,22 +1408,18 @@ mod tests {
         let index = b.finish().unwrap();
         assert_eq!(index.dense_lane("b"), Some(1));
         let q = Query {
-            text: "",
             dense: Some((1, vec![0.0, 0.0, 0.0, 1.0])),
-            sparse: None,
             mode: Mode::Dense,
             top_k: 3,
-            weights: Weights::default(),
+            ..Query::default()
         };
         let r = retrieve(&index, &q).unwrap();
         assert_eq!(r.ranked.len(), 30);
         let q = Query {
-            text: "",
             dense: Some((0, vec![0.0, 0.0, 0.0, 1.0])),
-            sparse: None,
             mode: Mode::Dense,
             top_k: 3,
-            weights: Weights::default(),
+            ..Query::default()
         };
         assert!(retrieve(&index, &q).is_err());
     }
