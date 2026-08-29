@@ -7,6 +7,16 @@
 
 set -euo pipefail
 
+# `--js-only` skips the WASM build and only re-assembles the JS bundles from
+# an existing widget/pkg/ (fast iteration on the widget and workers).
+JS_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --js-only) JS_ONLY=1 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NPM_SCOPE="${NPM_SCOPE:-jt55401}"
@@ -21,6 +31,9 @@ fi
 # (panic=abort was measured on 2026-08-28: +0 bytes after brotli, so it stays off.)
 export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-s}"
 
+if (( JS_ONLY )); then
+  [[ -f "$SCRIPT_DIR/pkg/eddie_bg.wasm" ]] || { echo "--js-only needs an earlier full build (widget/pkg/ is missing)" >&2; exit 1; }
+else
 echo "==> Building WASM module (opt-level=$CARGO_PROFILE_RELEASE_OPT_LEVEL)..."
 wasm-pack build "$PROJECT_ROOT" \
   "${WASM_PACK_SCOPE_ARGS[@]}" \
@@ -60,6 +73,7 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
   echo "==> wasm-opt not found; skipping optional WASM optimization pass."
 fi
+fi # JS_ONLY
 
 echo "==> Assembling dist/..."
 mkdir -p "$PROJECT_ROOT/dist"
