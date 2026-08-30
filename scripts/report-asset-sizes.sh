@@ -84,7 +84,7 @@ mkdir -p "$DIST_DIR"
 cat "$REPORT_MD"
 
 # Budgets (bytes). Measured 2026-08-30, opt-level=s, no wasm-opt:
-#   boot 3.2 KB br, widget 29.1 KB br, worker 14.3 KB br, lite wasm 200 KB br,
+#   boot 3.2 KB br, widget 29.2 KB br, worker 14.5 KB br, lite wasm 200 KB br,
 #   dense wasm 3.60 MB raw / 1.05 MB gzip / 725 KB br.
 BOOT_BROTLI_BUDGET_BYTES="${BOOT_BROTLI_BUDGET_BYTES:-4096}"
 WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-33500}"
