@@ -363,6 +363,7 @@ pub fn bert_spec_skeleton(model: &str) -> DenseSpec {
                 .map(|s| s.to_string())
                 .collect(),
             base_url: None,
+            bytes: None,
         },
     }
 }

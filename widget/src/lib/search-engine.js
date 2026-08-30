@@ -423,11 +423,17 @@
     }
 
     /**
-     * Download size of a lane: the table estimate for HuggingFace repos; for
-     * a site-bundled wasm lane the Content-Length of its files (one HEAD per
-     * file, same origin), or null when the server does not say.
+     * Download size of a lane: the byte count the manifest declares
+     * (`runtime.bytes` on a bundled lane) or the table estimate; for a
+     * site-bundled wasm lane whose manifest predates `runtime.bytes`, the
+     * Content-Length of its files (one HEAD per file, same origin), or null
+     * when the server does not say.
      */
     async function laneDownloadBytes(lane) {
+      const declared = lib.laneDeclaredBytes(lane);
+      if (declared != null) return declared;
+      // The table estimates describe the HuggingFace originals; a bundled
+      // f16 copy is half that, so measure it rather than estimate.
       if (lib.laneOrigin(lane) !== "site" || !lib.isWasmLane(lane)) return lib.laneDownloadBytes(lane);
       if (state.siteSizes[lane.id] !== undefined) return state.siteSizes[lane.id];
       const doFetch = env.fetch || globalThis.fetch;

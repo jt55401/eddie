@@ -71,6 +71,11 @@ pub enum RuntimeSpec {
         /// HuggingFace.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_url: Option<String>,
+        /// Total size of `files` in bytes, when bundled (the f16 copy is
+        /// half the HuggingFace download, so the runtime cannot estimate
+        /// it); the consent card shows this exact count.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes: Option<u64>,
     },
     /// transformers.js ONNX model on WebGPU. `dtype_f16` is used when the
     /// adapter exposes `shader-f16`, otherwise `dtype`.
@@ -344,6 +349,7 @@ mod tests {
                     "model.safetensors".into(),
                 ],
                 base_url: Some("models/minilm/".into()),
+                bytes: Some(91_000_000),
             },
         });
         m.dense.push(DenseSpec {
@@ -388,6 +394,7 @@ mod tests {
         assert!(json.contains("\"kind\":\"webgpu-onnx\""));
         assert!(json.contains("\"pooling\":\"last\""));
         assert!(json.contains("\"base_url\":\"models/minilm/\""));
+        assert!(json.contains("\"bytes\":91000000"));
         assert!(json.contains("\"vocab\":\"embedded\""));
         assert!(json.contains("\"sidecars\":[{\"file\":\"index.qwen3e.ed\""));
         assert!(!json.contains("sidecar_lane"));
@@ -410,6 +417,10 @@ mod tests {
         let legacy_runtime: RuntimeSpec =
             serde_json::from_str(r#"{"kind":"wasm-candle","files":["config.json"]}"#).unwrap();
         assert_eq!(legacy_runtime.base_url(), None);
+        assert!(matches!(
+            legacy_runtime,
+            RuntimeSpec::WasmCandle { bytes: None, .. }
+        ));
         let legacy_sparse: SparseSpec =
             serde_json::from_str(r#"{"model":"m","tokenizer":"t","vocab_hash":"00","terms":1}"#)
                 .unwrap();
@@ -433,6 +444,7 @@ mod tests {
             runtime: RuntimeSpec::WasmCandle {
                 files: vec![],
                 base_url: None,
+                bytes: None,
             },
         };
         assert_eq!(spec.prefixed(TextKind::Query, "hi"), "Q: hi");

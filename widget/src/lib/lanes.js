@@ -170,8 +170,23 @@
     return runtime.dtype || "fp32";
   }
 
-  /** Approximate bytes a lane downloads on first use, or null when unknown. */
+  /** The exact byte count the manifest declares for a bundled model (`runtime.bytes`), or null. */
+  function laneDeclaredBytes(lane) {
+    const declared = lane && lane.runtime ? Number(lane.runtime.bytes) : NaN;
+    return Number.isFinite(declared) && declared > 0 ? declared : null;
+  }
+
+  /**
+   * Bytes a lane downloads on first use, or null when unknown: the exact
+   * count the manifest carries for a bundled model (`runtime.bytes`, written
+   * by `eddie index --bundle-model`), else the table estimate for known
+   * HuggingFace repos. The table describes the f32 originals; a bundled f16
+   * copy without `runtime.bytes` should be measured instead (the engine
+   * HEADs the files), never estimated from the table.
+   */
   function laneDownloadBytes(lane) {
+    const declared = laneDeclaredBytes(lane);
+    if (declared != null) return declared;
     const repo = (laneRepo(lane) || "").toLowerCase();
     return Object.prototype.hasOwnProperty.call(DOWNLOAD_SIZES, repo) ? DOWNLOAD_SIZES[repo] : null;
   }
@@ -251,6 +266,7 @@
     wasmLaneProblem,
     chooseDenseLanes,
     pickDtype,
+    laneDeclaredBytes,
     laneDownloadBytes,
     formatBytes,
     consentCopy,

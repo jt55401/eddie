@@ -369,6 +369,73 @@ test("site-bundled wasm lane: consent names the site and the measured size; file
   assert.equal(fetched.filter((u) => /index\.bge\.ed/.test(u)).length, 1, "attached once");
 });
 
+test("a manifest that declares the bundle size skips the HEAD probes", async () => {
+  const manifest = JSON.parse(JSON.stringify(SIDECAR_MANIFEST));
+  manifest.dense[0].runtime.bytes = 67458275;
+  const heads = [];
+  const fetch = async (url, init) => {
+    if (init && init.method === "HEAD") heads.push(url);
+    return fakeFetch(siteFiles())(url, init);
+  };
+  const { engine, posted } = makeVariantEngine(manifest, { sparseEmbedded: true, fetch });
+  await engine.handle(INIT);
+  const consent = posted.find((m) => m.state === "consent_required");
+  assert.equal(consent.sizeBytes, 67458275);
+  assert.deepEqual(heads, []);
+});
+
+test("evictStaleFiles keeps @site keys of the index's lanes and drops other repos", async () => {
+  const store = new Map([
+    ["BAAI/bge-small-en-v1.5@abc/@site/model.safetensors", 1],
+    ["BAAI/bge-small-en-v1.5@abc/config.json", 1],
+    ["some/old-model@main/model.safetensors", 1],
+    ["url:https://site/eddie/models/x/onnx/model.onnx", 1],
+  ]);
+  const req = (result) => {
+    const r = { result };
+    setImmediate(() => r.onsuccess && r.onsuccess());
+    return r;
+  };
+  const fakeIdb = {
+    open: () => {
+      const r = {
+        result: {
+          objectStoreNames: { contains: () => true },
+          transaction: () => ({
+            objectStore: () => ({
+              get: (k) => req(store.get(k)),
+              getKey: (k) => req(store.has(k) ? k : undefined),
+              put: (v, k) => req(store.set(k, v)),
+              delete: (k) => req(store.delete(k)),
+              getAllKeys: () => req(Array.from(store.keys())),
+            }),
+          }),
+        },
+      };
+      setImmediate(() => r.onsuccess && r.onsuccess());
+      return r;
+    },
+  };
+  const posted = [];
+  const v = fakeVariants({ format: 5, chunks: 1, pages: 1, sections: [], dense: [SIDECAR_MANIFEST.dense[0]], sparse: Object.assign({}, SPARSE, { vocab: "embedded" }) }, { sparseEmbedded: true });
+  const engine = SE.createSearchEngine({
+    lib,
+    post: (m) => posted.push(m),
+    loadWasm: async () => v.lite,
+    loadTransformers: async () => { throw new Error("no transformers in tests"); },
+    navigator: {},
+    indexedDB: fakeIdb,
+    fetch: fakeFetch(siteFiles()),
+  });
+  await engine.handle(INIT);
+  await engine.handle(Object.assign({}, INIT, { consent: true }));
+  assert.equal(posted.some((m) => m.type === "ready"), true);
+  await new Promise((r) => setTimeout(r, 20)); // evictStaleFiles runs after ready
+  assert.ok(store.has("BAAI/bge-small-en-v1.5@abc/@site/model.safetensors"), "site bundle key kept");
+  assert.ok(store.has("url:https://site/eddie/models/x/onnx/model.onnx"), "url: keys kept");
+  assert.equal(store.has("some/old-model@main/model.safetensors"), false, "stale repo evicted");
+});
+
 test("a host without the dense module degrades the CPU lane instead of failing init", async () => {
   const { engine, posted, loads } = makeVariantEngine(SIDECAR_MANIFEST, { sparseEmbedded: true, files: siteFiles(), noDense: true });
   await engine.handle(INIT);

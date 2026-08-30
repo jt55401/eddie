@@ -1480,6 +1480,7 @@ fn bundle_models(
         let runtime = RuntimeSpec::WasmCandle {
             files: bundled.files,
             base_url: Some(base_url),
+            bytes: Some(bundled.bytes),
         };
         index.manifest.dense[pos].runtime = runtime.clone();
         for lane in index

@@ -22,6 +22,7 @@ fn spec() -> DenseSpec {
                 "model.safetensors".into(),
             ],
             base_url: None,
+            bytes: None,
         },
     }
 }
