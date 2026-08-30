@@ -73,5 +73,26 @@ that already reports `ready` for the same index URL is adopted.
 
 ## Measurements
 
-See the final report of the implementing session for page 1 vs page 2
-numbers in each mode (persist auto vs off, warm auto).
+Reference machine (RTX 4090, Chromium 151/Vulkan, no `shader-f16`), local
+static server, jason-grey.com index (qwen3e webgpu-onnx lane, Qwen3.5-2B
+agent), Playwright harness driving the real widget. "Ready" is
+`data-state=ready` measured from the page's time origin with the modal
+closed (warm=auto, prior consent); "ask" is Shift+Enter to `done`.
+
+| Scenario | Page 1 ready | Page 1 ask | Page 2 ready | Page 2 ask |
+|---|---|---|---|---|
+| persist=off, cached (baseline) | 3.66 s (page worker warm-up) | 7.5 s | 3.75 s | 7.7 s |
+| persist=auto, cached | 3.54 s (service worker warm-up) | 7.3 s | 0.105 s (engine adopted) | 2.1 s (model reused) |
+| persist=auto, cold profile | 40 s after consent (download) | 26.8 s (download) | 0.106 s | 3.2 s |
+
+Token generation itself is unchanged (TTFT 0.5 to 0.9 s, 82 to 97 tok/s):
+the page-2 gain is the skipped model load. A stopped service worker (CDP
+`ServiceWorker.stopWorker`, equivalent to Chrome's idle stop) is detected
+on the next modal open in 2 s and re-initialised transparently: results
+2.2 s after opening. Stop shows "Stopped." within 10 ms and a following
+Ask works (the generation lock is released).
+
+Site owners who want the agent to survive longer reading pauses (Chrome
+stops the worker ~30 s after the last message once the modal is closed)
+could ping while the page is visible; that is a one-line policy change in
+`keepaliveWanted` and was left at the specified behaviour.

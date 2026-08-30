@@ -127,10 +127,10 @@ section says how that is decided.
 
 ## Persistent engines
 
-Dedicated workers die with the document, so before 0.5 every navigation
-re-fetched the index, re-created the dense model session (about 3.5 s for
-the Qwen3-Embedding ONNX lane on an RTX 4090) and reloaded the WebLLM
-engine (14 to 16 s). The widget now keeps both engines in one module
+Dedicated workers die with the document, so every navigation used to
+re-fetch the index, re-create the dense model session (about 3.5 s for
+the Qwen3-Embedding ONNX lane on an RTX 4090) and reload the WebLLM
+engine (5 to 16 s depending on the GPU shader cache). The widget now keeps both engines in one module
 service worker, `eddie-sw.js`, registered with scope = the asset directory
 (`/eddie/` by default). Pages outside that scope are not controlled by it
 and never will be: the worker has no `fetch` handler, so the browser does
