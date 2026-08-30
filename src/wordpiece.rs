@@ -34,20 +34,40 @@ const DEFAULT_MAX_INPUT_CHARS: usize = 100;
 /// Fallback when `model.continuing_subword_prefix` is absent (HF default).
 const DEFAULT_PREFIX: &str = "##";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Normalizer {
-    clean_text: bool,
-    handle_chinese_chars: bool,
-    strip_accents: bool,
-    lowercase: bool,
+/// The basic-tokenizer flags of a `BertNormalizer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Normalizer {
+    pub clean_text: bool,
+    pub handle_chinese_chars: bool,
+    pub strip_accents: bool,
+    pub lowercase: bool,
 }
 
 /// One entry of `added_tokens`: matched literally in the raw text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AddedToken {
-    content: String,
-    id: u32,
-    special: bool,
+pub struct AddedToken {
+    pub content: String,
+    pub id: u32,
+    pub special: bool,
+}
+
+/// Everything but the vocabulary: what an index stores next to the token
+/// list in its `sparse/vocab` section so the runtime can rebuild the
+/// tokenizer without `tokenizer.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordPieceConfig {
+    pub normalizer: Normalizer,
+    pub unk_id: u32,
+    /// `[CLS]` / `[SEP]` the post-processor adds (informational: the query
+    /// side never emits them).
+    pub cls_id: Option<u32>,
+    pub sep_id: Option<u32>,
+    pub max_input_chars: usize,
+    /// Continuation prefix (`##`).
+    pub prefix: String,
+    pub added: Vec<AddedToken>,
+    /// Content tokens kept per text.
+    pub max_tokens: usize,
 }
 
 /// BERT WordPiece tokenizer (see the module docs).
@@ -57,7 +77,10 @@ pub struct WordPiece {
     /// Continuing tokens keyed without their prefix (`##ing` → `ing`).
     continuing: HashMap<String, u32>,
     unk_id: u32,
+    cls_id: Option<u32>,
+    sep_id: Option<u32>,
     max_input_chars: usize,
+    prefix: String,
     normalizer: Normalizer,
     /// `added_tokens`, longest content first so overlapping matches prefer
     /// the longer token.
@@ -93,18 +116,11 @@ impl WordPiece {
             .and_then(Value::as_str)
             .unwrap_or(DEFAULT_PREFIX);
         let mut vocab = HashMap::with_capacity(vocab_json.len());
-        let mut continuing = HashMap::new();
         for (token, id) in vocab_json {
             let id = id
                 .as_u64()
                 .and_then(|v| u32::try_from(v).ok())
                 .with_context(|| format!("vocab entry {:?} has no u32 id", token))?;
-            if !prefix.is_empty()
-                && let Some(rest) = token.strip_prefix(prefix)
-                && !rest.is_empty()
-            {
-                continuing.insert(rest.to_string(), id);
-            }
             vocab.insert(token.clone(), id);
         }
         let unk_token = model
@@ -123,8 +139,9 @@ impl WordPiece {
         let normalizer = parse_normalizer(root.get("normalizer"))?;
         check_pre_tokenizer(root.get("pre_tokenizer"))?;
         let specials_added = post_processor_special_count(root.get("post_processor"));
+        let (cls_id, sep_id) = post_processor_cls_sep(root.get("post_processor"), &vocab);
 
-        let mut added: Vec<AddedToken> = root
+        let added: Vec<AddedToken> = root
             .get("added_tokens")
             .and_then(Value::as_array)
             .map(|list| {
@@ -142,16 +159,95 @@ impl WordPiece {
                     .collect()
             })
             .unwrap_or_default();
-        added.sort_by_key(|t| std::cmp::Reverse(t.content.len()));
 
+        Self::assemble(
+            vocab,
+            WordPieceConfig {
+                normalizer,
+                unk_id,
+                cls_id,
+                sep_id,
+                max_input_chars,
+                prefix: prefix.to_string(),
+                added,
+                max_tokens: max_seq_len.max(1).saturating_sub(specials_added).max(1),
+            },
+        )
+    }
+
+    /// Rebuild a tokenizer from its vocabulary in id order (an empty string
+    /// marks an unused id) and its config, as stored in an index's
+    /// `sparse/vocab` section.
+    pub fn from_vocab(tokens: Vec<String>, config: WordPieceConfig) -> Result<Self> {
+        let mut vocab = HashMap::with_capacity(tokens.len());
+        for (id, token) in tokens.into_iter().enumerate() {
+            if token.is_empty() {
+                continue;
+            }
+            let id = u32::try_from(id).context("vocab has more than u32::MAX entries")?;
+            vocab.insert(token, id);
+        }
+        Self::assemble(vocab, config)
+    }
+
+    /// The vocabulary in id order (gaps as empty strings) and the config:
+    /// the inverse of [`WordPiece::from_vocab`].
+    pub fn to_vocab(&self) -> (Vec<String>, WordPieceConfig) {
+        let max_id = self
+            .vocab
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |m| m as usize + 1);
+        let mut tokens = vec![String::new(); max_id];
+        for (token, &id) in &self.vocab {
+            tokens[id as usize] = token.clone();
+        }
+        let mut added = self.added.clone();
+        added.sort_by_key(|t| t.id);
+        (
+            tokens,
+            WordPieceConfig {
+                normalizer: self.normalizer,
+                unk_id: self.unk_id,
+                cls_id: self.cls_id,
+                sep_id: self.sep_id,
+                max_input_chars: self.max_input_chars,
+                prefix: self.prefix.clone(),
+                added,
+                max_tokens: self.max_tokens,
+            },
+        )
+    }
+
+    fn assemble(vocab: HashMap<String, u32>, config: WordPieceConfig) -> Result<Self> {
+        let mut continuing = HashMap::new();
+        if !config.prefix.is_empty() {
+            for (token, &id) in &vocab {
+                if let Some(rest) = token.strip_prefix(config.prefix.as_str())
+                    && !rest.is_empty()
+                {
+                    continuing.insert(rest.to_string(), id);
+                }
+            }
+        }
+        if !vocab.values().any(|&id| id == config.unk_id) {
+            bail!("unk id {} is not in the vocab", config.unk_id);
+        }
+        let mut added = config.added;
+        added.retain(|t| !t.content.is_empty());
+        added.sort_by_key(|t| std::cmp::Reverse(t.content.len()));
         Ok(Self {
             vocab,
             continuing,
-            unk_id,
-            max_input_chars,
-            normalizer,
+            unk_id: config.unk_id,
+            cls_id: config.cls_id,
+            sep_id: config.sep_id,
+            max_input_chars: config.max_input_chars,
+            prefix: config.prefix,
+            normalizer: config.normalizer,
             added,
-            max_tokens: max_seq_len.max(1).saturating_sub(specials_added).max(1),
+            max_tokens: config.max_tokens.max(1),
         })
     }
 
@@ -377,6 +473,38 @@ fn check_pre_tokenizer(value: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
+/// The `[CLS]` / `[SEP]` ids a post-processor wraps around a sequence.
+fn post_processor_cls_sep(
+    value: Option<&Value>,
+    vocab: &HashMap<String, u32>,
+) -> (Option<u32>, Option<u32>) {
+    let Some(v) = value else { return (None, None) };
+    let pair_id = |key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .and_then(|pair| pair.get(1))
+            .and_then(Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok())
+    };
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "BertProcessing" | "RobertaProcessing" => (pair_id("cls"), pair_id("sep")),
+        "TemplateProcessing" => {
+            let special_id = |name: &str| {
+                v.get("special_tokens")
+                    .and_then(|s| s.get(name))
+                    .and_then(|s| s.get("ids"))
+                    .and_then(Value::as_array)
+                    .and_then(|ids| ids.first())
+                    .and_then(Value::as_u64)
+                    .and_then(|id| u32::try_from(id).ok())
+                    .or_else(|| vocab.get(name).copied())
+            };
+            (special_id("[CLS]"), special_id("[SEP]"))
+        }
+        _ => (None, None),
+    }
+}
+
 /// Special tokens the post-processor adds around a single sequence: they
 /// count against the sequence cap the way HF truncation does.
 fn post_processor_special_count(value: Option<&Value>) -> usize {
@@ -588,6 +716,49 @@ mod tests {
     }
 
     #[test]
+    fn vocab_parts_round_trip() {
+        let t = tiny();
+        let (tokens, config) = t.to_vocab();
+        assert_eq!(tokens.len(), 22);
+        assert_eq!(tokens[4], "new");
+        assert_eq!(config.unk_id, 3);
+        assert_eq!((config.cls_id, config.sep_id), (Some(1), Some(2)));
+        assert_eq!(config.prefix, "##");
+        assert_eq!(config.max_input_chars, 100);
+        assert_eq!(config.max_tokens, 510);
+        assert!(config.normalizer.lowercase && config.normalizer.strip_accents);
+        assert_eq!(config.added.len(), 4);
+        let back = WordPiece::from_vocab(tokens, config).unwrap();
+        for text in [
+            "New York weather, new york!",
+            "unbelievable Cafés 中文weather 30",
+            "new[SEP]york ‘new’",
+        ] {
+            assert_eq!(back.encode(text), t.encode(text), "{:?}", text);
+        }
+        // A gap in the id space is an unused id, not a token.
+        let mut tokens = vec![String::new(); 6];
+        tokens[1] = "[UNK]".into();
+        tokens[5] = "hi".into();
+        let sparse_ids = WordPiece::from_vocab(
+            tokens,
+            WordPieceConfig {
+                normalizer: Normalizer::default(),
+                unk_id: 1,
+                cls_id: None,
+                sep_id: None,
+                max_input_chars: 100,
+                prefix: "##".into(),
+                added: vec![],
+                max_tokens: 510,
+            },
+        )
+        .unwrap();
+        assert_eq!(sparse_ids.encode("hi ho"), vec![5, 1]);
+        assert_eq!(sparse_ids.vocab_size(), 2);
+    }
+
+    #[test]
     fn hangul_syllables_decompose_to_jamo() {
         let mut s = String::new();
         push_base_chars('한', &mut s);
@@ -741,12 +912,20 @@ mod tests {
             queries.push(format!("«{}»? Ça va… {}!", seed, seed.len()));
         }
         assert!(queries.len() >= 200, "{} queries", queries.len());
+        let (vocab_tokens, config) = ours.to_vocab();
+        let rebuilt = WordPiece::from_vocab(vocab_tokens, config).unwrap();
         let mut tokens = 0usize;
         for q in &queries {
             let expected = hf_content_ids(&hf, q);
             let got = ours.encode(q);
             tokens += expected.len();
             assert_eq!(got, expected, "query {:?}", q);
+            assert_eq!(
+                rebuilt.encode(q),
+                expected,
+                "rebuilt tokenizer, query {:?}",
+                q
+            );
         }
         eprintln!(
             "wordpiece parity: {} queries, {} tokens, all ids identical",

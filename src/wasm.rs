@@ -9,9 +9,9 @@
 //! ```text
 //! capabilities() -> JSON {dense_wasm, sparse, version}         // what this build can do
 //! manifest(index_bytes) -> JSON Manifest                       // header only
-//! init_index(index_bytes)                                      // parse + validate
+//! init_index(index_bytes)                                      // parse + validate; an embedded sparse vocab enables the sparse arm at once
 //! init_dense_wasm(lane_id, config, tokenizer, weights)         // bert lanes only; `dense-wasm` builds only
-//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm; sha256 must match manifest.sparse.vocab_hash
+//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm for `sparse.vocab == "fetch"` indexes; sha256 must match manifest.sparse.vocab_hash
 //! attach_sidecar(bytes) -> JSON {lane, scopes}                 // loads an index.<lane>.ed sidecar's dense sections
 //! search(query, top_k, mode, dense_lane_id|null, dense_query_vec|null)
 //!     -> JSON {results:[PageResult], arms:{dense,sparse,bm25}, degraded:[string], mode, dense_lane}
@@ -153,20 +153,31 @@ pub fn manifest(index_bytes: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Parse and validate the index. Replaces any previously loaded index and
-/// forgets its dense embedder / sparse tokenizer.
+/// forgets its dense embedder. When the index embeds its sparse vocabulary
+/// (`manifest.sparse.vocab == "embedded"`) the sparse arm is ready without
+/// `init_sparse_tokenizer`.
 #[wasm_bindgen]
 pub fn init_index(index_bytes: &[u8]) -> Result<(), JsValue> {
     install_panic_hook();
     let index = SearchIndex::from_bytes(index_bytes).map_err(|e| js_err("index load failed", e))?;
+    let sparse_tokenizer = index.sparse_vocab.clone();
     ENGINE.with(|cell| {
         *cell.borrow_mut() = Some(Engine {
             index,
             #[cfg(feature = "dense-wasm")]
             dense: None,
-            sparse_tokenizer: None,
+            sparse_tokenizer,
         });
     });
     Ok(())
+}
+
+/// Whether the sparse arm can run queries right now (an embedded vocab or
+/// a tokenizer loaded with `init_sparse_tokenizer`).
+#[wasm_bindgen]
+pub fn sparse_ready() -> Result<bool, JsValue> {
+    install_panic_hook();
+    with_engine(|engine| Ok(engine.index.sparse.is_some() && engine.sparse_tokenizer.is_some()))
 }
 
 /// Load the BERT-family model for a `wasm-candle` lane of the loaded index.

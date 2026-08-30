@@ -451,6 +451,7 @@ mod native {
                 revision: self.revision.clone(),
                 vocab_hash: self.tokenizer_sha256.clone(),
                 terms,
+                vocab: crate::manifest::SparseVocab::Fetch,
             }
         }
     }

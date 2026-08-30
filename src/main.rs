@@ -242,6 +242,12 @@ enum Command {
         /// `all`: bundle every wasm-candle lane (see --bundle-model).
         #[arg(long = "bundle-models", value_name = "all")]
         bundle_models: Option<String>,
+
+        /// Where the browser gets the sparse query tokenizer's vocabulary:
+        /// `embed` stores it in the index (a `sparse/vocab` section, no
+        /// tokenizer.json download), `fetch` keeps the 0.4.1 behaviour.
+        #[arg(long, default_value = "embed", value_parser = ["embed", "fetch"])]
+        sparse_vocab: String,
     },
 
     /// Search an existing index.
@@ -614,6 +620,7 @@ fn main() -> Result<()> {
             no_sidecar_lanes,
             bundle_model,
             bundle_models,
+            sparse_vocab,
         } => cmd_index(
             content_dir,
             cms,
@@ -655,6 +662,7 @@ fn main() -> Result<()> {
             OutputLayout {
                 sidecar_lanes: sidecar_lanes || !no_sidecar_lanes,
                 bundle: resolve_bundle_request(bundle_model, bundle_models.as_deref())?,
+                embed_sparse_vocab: sparse_vocab == "embed",
             },
         ),
         Command::Search {
@@ -1199,6 +1207,15 @@ fn cmd_index(
     }
     if let (Some(enc), Some((sparse_docs, sparse_spec))) = (&sparse_encoder, sparse_section) {
         builder.add_sparse(&sparse_docs, enc.idf(), sparse_spec)?;
+        if layout.embed_sparse_vocab {
+            builder.sparse_vocab(enc.query_tokenizer().clone());
+            eprintln!(
+                "  Sparse vocab: embedded ({} tokens; --sparse-vocab fetch keeps it out)",
+                enc.query_tokenizer().vocab_size()
+            );
+        } else {
+            eprintln!("  Sparse vocab: fetched from HuggingFace at query time");
+        }
     }
 
     if !qa_entries.is_empty() {
@@ -1324,6 +1341,8 @@ struct OutputLayout {
     /// Sidecar files for webgpu chunk lanes and every qa/claims lane.
     sidecar_lanes: bool,
     bundle: BundleRequest,
+    /// Store the sparse query vocabulary in the index (`sparse/vocab`).
+    embed_sparse_vocab: bool,
 }
 
 /// Which wasm-candle lanes get their model files written next to the index.
@@ -1369,7 +1388,9 @@ fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// Delete `<stem>.<lane>.ed` files from an earlier build whose lane is gone,
-/// so a stale sidecar never sits next to a core that does not list it.
+/// so a stale sidecar never sits next to a core that does not list it. Only
+/// files whose header says they are sidecars are touched; anything else
+/// that happens to match the name pattern is left alone.
 fn remove_stale_sidecars(
     dir: &std::path::Path,
     stem: &str,
@@ -1379,11 +1400,18 @@ fn remove_stale_sidecars(
     for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
-        let is_sidecar = name.starts_with(&prefix)
+        let looks_like_sidecar = name.starts_with(&prefix)
             && name.ends_with(".ed")
             && name.len() > prefix.len() + 3
             && !name[prefix.len()..name.len() - 3].contains('.');
-        if is_sidecar && !split.sidecars.iter().any(|s| s.file == name) {
+        if !looks_like_sidecar || split.sidecars.iter().any(|s| s.file == name) {
+            continue;
+        }
+        let is_sidecar = fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| SearchIndex::manifest_from_bytes(&bytes).ok())
+            .is_some_and(|m| m.sidecar_lane.is_some());
+        if is_sidecar {
             eprintln!("  removing stale sidecar {}", name);
             fs::remove_file(entry.path())
                 .with_context(|| format!("removing {}", entry.path().display()))?;
@@ -1577,6 +1605,9 @@ fn lane_list(index: &SearchIndex) -> String {
 /// wrong vocabulary.
 fn load_sparse_tokenizer(index: &SearchIndex) -> Option<WordPiece> {
     let spec = index.manifest.sparse.as_ref()?;
+    if let Some(vocab) = &index.sparse_vocab {
+        return Some(vocab.clone());
+    }
     let fetch = || -> Result<WordPiece> {
         let repo = eddie::embed::hub::ModelRepo::open(&spec.tokenizer, spec.revision.as_deref())
             .with_context(|| format!("opening HuggingFace repo {}", spec.tokenizer))?;
@@ -2100,8 +2131,14 @@ fn cmd_stats(index_path: PathBuf, json: bool) -> Result<()> {
     }
     match &info.manifest.sparse {
         Some(s) => println!(
-            "sparse: {} terms, tokenizer {} (vocab {})",
-            s.terms, s.tokenizer, s.vocab_hash
+            "sparse: {} terms, tokenizer {} (vocab {}, {})",
+            s.terms,
+            s.tokenizer,
+            s.vocab_hash,
+            match s.vocab {
+                eddie::manifest::SparseVocab::Embedded => "embedded in the index",
+                eddie::manifest::SparseVocab::Fetch => "fetched at query time",
+            }
         ),
         None => println!("sparse: none"),
     }

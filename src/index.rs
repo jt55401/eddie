@@ -22,6 +22,7 @@
 //! | `texts` | `u32 n`, then `n × (u32 len, UTF-8, u16 overlap_words)`; texts are stored **without** their overlap prefix |
 //! | `bm25` | `u32 num_docs, f32 avg_len, u32 doc_lengths[n], u32 terms`, per term `u16 len, bytes, u32 postings, (varint doc_delta, varint tf)*` (see [`crate::bm25`]) |
 //! | `sparse` | `u32 terms`, per term `u32 token_id, f32 idf, u32 postings, (varint doc_delta, u16 weight×1000)*` |
+//! | `sparse/vocab` | `u8 version=1, u8 flags (1 clean_text, 2 chinese chars, 4 strip accents, 8 lowercase), u32 unk_id, u32 cls_id, u32 sep_id (u32::MAX = none), u32 max_input_chars, u16 prefix_len, prefix, u16 added_count, per added `u32 id, u8 special, u16 len, bytes`, u32 vocab_count, per id `u16 len, bytes`` (empty = unused id); lets the runtime WordPiece queries without `tokenizer.json` |
 //! | `dense/<scope>/<lane_id>` | `u8 quant (0=f32, 1=int8), u32 dim, u32 rows`, rows×dim values, then for int8 `rows × f32 scale`; scope ∈ `chunks`, `qa`, `claims` |
 //! | `qa` | JSON `Vec<QaEntry>` |
 //! | `claims` | JSON `Vec<ClaimEntry>` |
@@ -58,6 +59,7 @@ use crate::manifest::{
     SparseTerm,
 };
 use crate::records::{ChunkMeta, ClaimEntry, QaEntry};
+use crate::wordpiece::{AddedToken, Normalizer, WordPiece, WordPieceConfig};
 
 const ED_MAGIC: &[u8; 4] = b"SAED";
 const ED_VERSION: u32 = 2;
@@ -68,6 +70,9 @@ const SECTION_META: &str = "meta";
 const SECTION_TEXTS: &str = "texts";
 const SECTION_BM25: &str = "bm25";
 const SECTION_SPARSE: &str = "sparse";
+const SECTION_SPARSE_VOCAB: &str = "sparse/vocab";
+const SPARSE_VOCAB_VERSION: u8 = 1;
+const NO_ID: u32 = u32::MAX;
 const SECTION_QA: &str = "qa";
 const SECTION_CLAIMS: &str = "claims";
 
@@ -581,6 +586,9 @@ pub struct SearchIndex {
     pub overlap_words: Vec<u16>,
     pub bm25: Bm25Index,
     pub sparse: Option<SparseIndex>,
+    /// The sparse query tokenizer, when the index embeds its vocabulary
+    /// (`manifest.sparse.vocab == Embedded`).
+    pub sparse_vocab: Option<WordPiece>,
     /// Chunk-scope dense lanes, in manifest order.
     pub dense: Vec<DenseLane>,
     pub qa: Vec<QaEntry>,
@@ -906,6 +914,13 @@ impl SearchIndex {
         write_section(&mut out, SECTION_BM25, &self.bm25.to_bytes()?)?;
         if let Some(sparse) = &self.sparse {
             write_section(&mut out, SECTION_SPARSE, &sparse.to_bytes()?)?;
+            if let Some(vocab) = &self.sparse_vocab {
+                write_section(
+                    &mut out,
+                    SECTION_SPARSE_VOCAB,
+                    &sparse_vocab_to_bytes(vocab)?,
+                )?;
+            }
         }
         for lane in &self.dense {
             if keep(SCOPE_CHUNKS, &lane.spec.id) {
@@ -1026,6 +1041,7 @@ impl SearchIndex {
         let mut texts: Option<(Vec<String>, Vec<u16>)> = None;
         let mut bm25: Option<Bm25Index> = None;
         let mut sparse: Option<SparseIndex> = None;
+        let mut sparse_vocab: Option<WordPiece> = None;
         let mut qa: Vec<QaEntry> = Vec::new();
         let mut claims: Vec<ClaimEntry> = Vec::new();
         let mut lanes: Vec<(String, DenseLane)> = Vec::new();
@@ -1074,6 +1090,10 @@ impl SearchIndex {
                 }
                 SECTION_SPARSE => {
                     sparse = Some(SparseIndex::from_bytes(body, chunks)?);
+                }
+                SECTION_SPARSE_VOCAB => {
+                    sparse_vocab =
+                        Some(sparse_vocab_from_bytes(body).context("reading sparse/vocab")?);
                 }
                 SECTION_QA => {
                     qa = serde_json::from_slice(body).context("parsing qa section JSON")?;
@@ -1139,6 +1159,15 @@ impl SearchIndex {
             (None, Some(_)) => bail!("payload has a sparse section the manifest does not declare"),
             (None, None) => {}
         }
+        match (&manifest.sparse, &sparse_vocab) {
+            (Some(spec), None) if spec.vocab == crate::manifest::SparseVocab::Embedded => {
+                bail!(
+                    "manifest says the sparse vocab is embedded but the payload has no sparse/vocab section"
+                )
+            }
+            (None, Some(_)) => bail!("payload has a sparse/vocab section but no sparse arm"),
+            _ => {}
+        }
 
         let mut dense = Vec::new();
         let mut qa_dense = Vec::new();
@@ -1188,6 +1217,7 @@ impl SearchIndex {
             overlap_words,
             bm25,
             sparse,
+            sparse_vocab,
             dense,
             qa,
             qa_dense,
@@ -1304,6 +1334,7 @@ pub struct IndexBuilder {
     overlap_words: Vec<u16>,
     bm25_params: Bm25Params,
     sparse: Option<(SparseIndex, SparseSpec)>,
+    sparse_vocab: Option<WordPiece>,
     dense: Vec<DenseLane>,
     qa: Vec<QaEntry>,
     qa_dense: Vec<DenseLane>,
@@ -1415,6 +1446,14 @@ impl IndexBuilder {
         Ok(self)
     }
 
+    /// Embed the sparse query tokenizer's vocabulary (`sparse/vocab`
+    /// section) so the runtime needs no `tokenizer.json`; sets the manifest's
+    /// `sparse.vocab` to `embedded`. Needs [`IndexBuilder::add_sparse`].
+    pub fn sparse_vocab(&mut self, tokenizer: WordPiece) -> &mut Self {
+        self.sparse_vocab = Some(tokenizer);
+        self
+    }
+
     /// Add a dense lane for `scope` (`chunks`, `qa`, or `claims`). Row counts
     /// are checked against the scope's entries in [`IndexBuilder::finish`], so
     /// lanes and entries may be added in any order. Lanes for `qa`/`claims`
@@ -1495,9 +1534,21 @@ impl IndexBuilder {
         manifest.built_at = self.built_at;
         manifest.title_context = self.title_context;
         manifest.fusion = self.fusion;
-        let (sparse, sparse_spec) = match self.sparse {
+        let (sparse, mut sparse_spec) = match self.sparse {
             Some((idx, spec)) => (Some(idx), Some(spec)),
             None => (None, None),
+        };
+        let sparse_vocab = match (&mut sparse_spec, self.sparse_vocab) {
+            (Some(spec), Some(vocab)) => {
+                spec.vocab = crate::manifest::SparseVocab::Embedded;
+                Some(vocab)
+            }
+            (None, Some(_)) => bail!("sparse_vocab needs a sparse arm (call add_sparse first)"),
+            (Some(spec), None) => {
+                spec.vocab = crate::manifest::SparseVocab::Fetch;
+                None
+            }
+            (None, None) => None,
         };
         manifest.sparse = sparse_spec;
         if !self.qa.is_empty() {
@@ -1514,6 +1565,7 @@ impl IndexBuilder {
             overlap_words: self.overlap_words,
             bm25,
             sparse,
+            sparse_vocab,
             dense: self.dense,
             qa: self.qa,
             qa_dense: self.qa_dense,
@@ -1718,6 +1770,110 @@ fn write_section(out: &mut Vec<u8>, name: &str, body: &[u8]) -> Result<()> {
     out.extend_from_slice(&len_u32(body.len(), name)?.to_le_bytes());
     out.extend_from_slice(body);
     Ok(())
+}
+
+/// `sparse/vocab` section body (see the module docs).
+fn sparse_vocab_to_bytes(tokenizer: &WordPiece) -> Result<Vec<u8>> {
+    let (tokens, config) = tokenizer.to_vocab();
+    let n = &config.normalizer;
+    let flags = (n.clean_text as u8)
+        | ((n.handle_chinese_chars as u8) << 1)
+        | ((n.strip_accents as u8) << 2)
+        | ((n.lowercase as u8) << 3);
+    let mut out = Vec::with_capacity(tokens.len() * 8);
+    out.push(SPARSE_VOCAB_VERSION);
+    out.push(flags);
+    out.extend_from_slice(&config.unk_id.to_le_bytes());
+    out.extend_from_slice(&config.cls_id.unwrap_or(NO_ID).to_le_bytes());
+    out.extend_from_slice(&config.sep_id.unwrap_or(NO_ID).to_le_bytes());
+    out.extend_from_slice(&len_u32(config.max_input_chars, "max_input_chars")?.to_le_bytes());
+    out.extend_from_slice(&len_u16(config.prefix.len(), "vocab prefix")?.to_le_bytes());
+    out.extend_from_slice(config.prefix.as_bytes());
+    out.extend_from_slice(&len_u16(config.added.len(), "added tokens")?.to_le_bytes());
+    for tok in &config.added {
+        out.extend_from_slice(&tok.id.to_le_bytes());
+        out.push(tok.special as u8);
+        out.extend_from_slice(&len_u16(tok.content.len(), "added token")?.to_le_bytes());
+        out.extend_from_slice(tok.content.as_bytes());
+    }
+    out.extend_from_slice(&len_u32(tokens.len(), "vocab")?.to_le_bytes());
+    for token in &tokens {
+        out.extend_from_slice(&len_u16(token.len(), "vocab token")?.to_le_bytes());
+        out.extend_from_slice(token.as_bytes());
+    }
+    Ok(out)
+}
+
+fn sparse_vocab_from_bytes(body: &[u8]) -> Result<WordPiece> {
+    let mut c = ByteCursor::new(body);
+    let version = c.u8().context("vocab version")?;
+    if version != SPARSE_VOCAB_VERSION {
+        bail!("unsupported sparse/vocab version {}", version);
+    }
+    let flags = c.u8().context("vocab flags")?;
+    let normalizer = Normalizer {
+        clean_text: flags & 1 != 0,
+        handle_chinese_chars: flags & 2 != 0,
+        strip_accents: flags & 4 != 0,
+        lowercase: flags & 8 != 0,
+    };
+    let unk_id = c.u32().context("unk id")?;
+    let opt = |v: u32| (v != NO_ID).then_some(v);
+    let cls_id = opt(c.u32().context("cls id")?);
+    let sep_id = opt(c.u32().context("sep id")?);
+    let max_input_chars = c.u32().context("max_input_chars")? as usize;
+    let prefix_len = c.u16().context("prefix length")? as usize;
+    let prefix = std::str::from_utf8(c.bytes(prefix_len).context("prefix")?)
+        .context("prefix is not UTF-8")?
+        .to_string();
+    let added_count = c.u16().context("added token count")? as usize;
+    let mut added = Vec::with_capacity(added_count);
+    for i in 0..added_count {
+        let id = c.u32().with_context(|| format!("added token {} id", i))?;
+        let special = c.u8().with_context(|| format!("added token {} flag", i))? != 0;
+        let len = c
+            .u16()
+            .with_context(|| format!("added token {} length", i))? as usize;
+        let content = std::str::from_utf8(c.bytes(len).context("added token")?)
+            .with_context(|| format!("added token {} is not UTF-8", i))?
+            .to_string();
+        added.push(AddedToken {
+            content,
+            id,
+            special,
+        });
+    }
+    let count = c.u32().context("vocab count")? as usize;
+    // Every entry costs at least its 2-byte length.
+    let mut tokens = Vec::with_capacity(count.min(c.remaining() / 2));
+    for i in 0..count {
+        let len = c
+            .u16()
+            .with_context(|| format!("vocab token {} length", i))? as usize;
+        let token = std::str::from_utf8(c.bytes(len).context("vocab token")?)
+            .with_context(|| format!("vocab token {} is not UTF-8", i))?;
+        tokens.push(token.to_string());
+    }
+    if c.remaining() != 0 {
+        bail!("sparse/vocab section has {} trailing bytes", c.remaining());
+    }
+    WordPiece::from_vocab(
+        tokens,
+        WordPieceConfig {
+            normalizer,
+            unk_id,
+            cls_id,
+            sep_id,
+            max_input_chars,
+            prefix,
+            added,
+            max_tokens: crate::sparse::DEFAULT_MAX_SEQ_LEN.saturating_sub(2),
+        },
+    )
+}
+
+fn len_u16(len: usize, what: &str) -> Result<u16> {
+    u16::try_from(len).with_context(|| format!("{} exceeds 64 KiB", what))
 }
 
 fn lane_section_name(scope: &str, lane_id: &str) -> String {
@@ -2029,6 +2185,7 @@ pub(crate) mod testutil {
                         revision: None,
                         vocab_hash: "00".into(),
                         terms: 0,
+                        vocab: crate::manifest::SparseVocab::Fetch,
                     },
                 )
                 .unwrap();
@@ -2107,6 +2264,7 @@ mod tests {
                 revision: Some("abc".into()),
                 vocab_hash: "ff".into(),
                 terms: 0,
+                vocab: crate::manifest::SparseVocab::Fetch,
             },
         )
         .unwrap();
@@ -3000,6 +3158,87 @@ mod tests {
         assert_eq!(
             SearchIndex::from_bytes(&none.core).unwrap().dense,
             index.dense
+        );
+    }
+
+    #[test]
+    fn embedded_sparse_vocab_round_trips_and_tokenizes() {
+        const JSON: &str = r###"{
+          "added_tokens": [
+            {"id": 0, "content": "[PAD]", "special": true},
+            {"id": 1, "content": "[CLS]", "special": true},
+            {"id": 2, "content": "[SEP]", "special": true},
+            {"id": 3, "content": "[UNK]", "special": true}
+          ],
+          "normalizer": {"type": "BertNormalizer", "clean_text": true, "handle_chinese_chars": true, "strip_accents": null, "lowercase": true},
+          "pre_tokenizer": {"type": "BertPreTokenizer"},
+          "post_processor": {"type": "BertProcessing", "sep": ["[SEP]", 2], "cls": ["[CLS]", 1]},
+          "model": {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##", "max_input_chars_per_word": 100,
+            "vocab": {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[UNK]": 3, "rust": 4, "##y": 5, "python": 7, "é": 9}}
+        }"###;
+        let tokenizer = WordPiece::from_tokenizer_json(JSON.as_bytes(), 512).unwrap();
+        let base = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(base.metadata.clone(), base.texts.clone(), vec![0, 0, 0])
+            .unwrap();
+        for lane in &base.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        let mut idf = HashMap::new();
+        idf.insert(4u32, 1.5f32);
+        b.add_sparse(
+            &[
+                vec![SparseTerm {
+                    token_id: 4,
+                    weight: 1.0,
+                }],
+                vec![],
+                vec![],
+            ],
+            &idf,
+            base.manifest.sparse.clone().unwrap(),
+        )
+        .unwrap();
+        b.sparse_vocab(tokenizer.clone());
+        let index = b.finish().unwrap();
+        assert_eq!(
+            index.manifest.sparse.as_ref().unwrap().vocab,
+            crate::manifest::SparseVocab::Embedded
+        );
+        let bytes = ed_bytes(&index);
+        let back = SearchIndex::from_bytes(&bytes).unwrap();
+        let vocab = back.sparse_vocab.as_ref().expect("vocab section");
+        for text in ["Rusty Python café", "[SEP] rust", "中文"] {
+            assert_eq!(vocab.encode(text), tokenizer.encode(text), "{:?}", text);
+        }
+        let terms = crate::sparse::sparse_query_terms(
+            vocab,
+            &|id| back.sparse.as_ref().unwrap().idf_of(id),
+            "Rust!",
+        );
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].token_id, 4);
+        // The section survives the sidecar split (it belongs to the core).
+        let split = index.to_ed_split("s", &|_, _| true).unwrap();
+        assert!(
+            SearchIndex::from_bytes(&split.core)
+                .unwrap()
+                .sparse_vocab
+                .is_some()
+        );
+        // A manifest that promises an embedded vocab without the section is rejected.
+        let info = SearchIndex::inspect(&bytes, None).unwrap();
+        assert!(info.sections.iter().any(|s| s.name == "sparse/vocab"));
+        // Without the vocab the manifest says fetch (0.4.1 behaviour).
+        assert_eq!(
+            base.manifest.sparse.as_ref().unwrap().vocab,
+            crate::manifest::SparseVocab::Fetch
+        );
+        assert!(
+            SearchIndex::from_bytes(&ed_bytes(&base))
+                .unwrap()
+                .sparse_vocab
+                .is_none()
         );
     }
 

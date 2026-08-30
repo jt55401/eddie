@@ -149,8 +149,20 @@ impl DenseSpec {
     }
 }
 
+/// Where the runtime gets the sparse query tokenizer's vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SparseVocab {
+    /// The index carries a `sparse/vocab` section; nothing to fetch.
+    Embedded,
+    /// Fetch `tokenizer.json` from `SparseSpec::tokenizer` (0.4.1 layout).
+    #[default]
+    Fetch,
+}
+
 /// Learned-sparse arm description. The query side needs only the tokenizer
-/// (validated by `vocab_hash`) and the IDF table stored in the index.
+/// (validated by `vocab_hash`, or embedded in the index) and the IDF table
+/// stored in the index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SparseSpec {
     /// Document encoder model id (informational; not needed at query time).
@@ -163,6 +175,10 @@ pub struct SparseSpec {
     pub vocab_hash: String,
     /// Number of distinct terms in the sparse postings.
     pub terms: usize,
+    /// Whether the vocabulary is embedded in the index (`sparse/vocab`
+    /// section) or fetched as `tokenizer.json`.
+    #[serde(default)]
+    pub vocab: SparseVocab,
 }
 
 /// BM25 parameters used at index time.
@@ -363,6 +379,7 @@ mod tests {
             revision: None,
             vocab_hash: "00".into(),
             terms: 5,
+            vocab: SparseVocab::Embedded,
         });
         m.title_context = true;
         let json = serde_json::to_string(&m).unwrap();
@@ -371,6 +388,7 @@ mod tests {
         assert!(json.contains("\"kind\":\"webgpu-onnx\""));
         assert!(json.contains("\"pooling\":\"last\""));
         assert!(json.contains("\"base_url\":\"models/minilm/\""));
+        assert!(json.contains("\"vocab\":\"embedded\""));
         assert!(json.contains("\"sidecars\":[{\"file\":\"index.qwen3e.ed\""));
         assert!(!json.contains("sidecar_lane"));
         let back: Manifest = serde_json::from_str(&json).unwrap();
@@ -392,6 +410,10 @@ mod tests {
         let legacy_runtime: RuntimeSpec =
             serde_json::from_str(r#"{"kind":"wasm-candle","files":["config.json"]}"#).unwrap();
         assert_eq!(legacy_runtime.base_url(), None);
+        let legacy_sparse: SparseSpec =
+            serde_json::from_str(r#"{"model":"m","tokenizer":"t","vocab_hash":"00","terms":1}"#)
+                .unwrap();
+        assert_eq!(legacy_sparse.vocab, SparseVocab::Fetch);
     }
 
     #[test]
