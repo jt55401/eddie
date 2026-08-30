@@ -49,12 +49,16 @@ For npm targets, `build` is optional and runs before validation/publish. Use it 
 
 The CMS installer packages (`integrations/{hugo,astro,docusaurus,eleventy}/npm`,
 `integrations/jekyll/gem`, `integrations/mkdocs/pypi`) each ship a copy of the
-built widget runtime (`eddie.wasm`, `eddie-wasm.js`, `eddie-worker.js`,
-`eddie-agent-worker.js` (loaded only when a visitor clicks Ask),
-`eddie-widget.js`) so their install scripts can drop it straight into a site.
-These files are **generated, never committed**. `ci.yml`'s
-`packaging-check` job fails the build if one is checked in, and `.gitignore`
-excludes them. This was a real problem before: five of six npm packages plus
+built widget runtime -- every file named in `widget/assets.list` (the boot
+loader, the full widget, the page-worker fallbacks, the lite/dense WASM
+modules and their glue, and the tiered service workers), plus a copy of
+`assets.list` itself so each package's install script can read the list
+back instead of hardcoding it -- so their install scripts can drop it
+straight into a site. These files are **generated, never committed**.
+`ci.yml`'s `packaging-check` job fails the build if one is checked in
+(matched by directory, so it doesn't need updating when the asset list
+does), and `.gitignore` excludes the whole `assets/` directory under each
+package. This was a real problem before: five of six npm packages plus
 the mkdocs/jekyll packages shipped pre-committed binaries with no build step
 and no drift check, so a widget fix could ship stale bits to every package
 except `widget/pkg`.
@@ -63,12 +67,13 @@ Every publish workflow (`publish-npm.yml`, `publish-pypi.yml`,
 `publish-rubygems.yml`) now has a `build-widget-dist` job that runs
 `widget/build.sh` exactly once and uploads `dist/` as a workflow artifact.
 Each matrix target with an `assets_dir` entry downloads that artifact and
-copies the five files in before validating/building/publishing, so every
-package in one publish run ships identical bits.
+copies the files named in `widget/assets.list` (plus the manifest itself)
+in before validating/building/publishing, so every package in one publish
+run ships identical bits.
 
 For local testing, `scripts/sync-integration-assets.sh` does the same thing
-outside CI: it builds the widget once and copies `dist/` into every
-`assets_dir` from `.github/publish-packages.json`. Run it (or
+outside CI: it builds the widget once and copies `dist/` (and the manifest)
+into every `assets_dir` from `.github/publish-packages.json`. Run it (or
 `--no-build` if `dist/` is already current) before manually testing an
 installer script.
 
