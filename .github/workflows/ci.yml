@@ -149,19 +149,27 @@ jobs:
         run: bash widget/build.sh
 
       - name: Report artifact sizes and enforce budgets
+        # Default-path budgets (brotli) plus the opt-in dense module; the
+        # numbers are the script's defaults, repeated here so a change is a
+        # visible diff in the workflow (docs/plans/2026-08-30-efficient-defaults.md).
         env:
-          WASM_RAW_BUDGET_BYTES: "3600000"
-          WASM_GZIP_BUDGET_BYTES: "1100000"
-          WASM_BROTLI_BUDGET_BYTES: "800000"
+          BOOT_BROTLI_BUDGET_BYTES: "4096"
+          WIDGET_BROTLI_BUDGET_BYTES: "33500"
+          WORKER_BROTLI_BUDGET_BYTES: "16500"
+          LITE_WASM_BROTLI_BUDGET_BYTES: "230000"
+          WASM_RAW_BUDGET_BYTES: "3700000"
+          WASM_GZIP_BUDGET_BYTES: "1150000"
+          WASM_BROTLI_BUDGET_BYTES: "820000"
         run: bash scripts/report-asset-sizes.sh
 
       - name: Verify widget artifacts
         run: |
-          test -f dist/eddie.wasm
-          test -f dist/eddie-wasm.js
-          test -f dist/eddie-worker.js
-          test -f dist/eddie-agent-worker.js
-          test -f dist/eddie-widget.js
+          for f in eddie-boot.js eddie-widget.js eddie-worker.js eddie-agent-worker.js \
+                   eddie-lite.wasm eddie-lite.js eddie-lite-esm.js \
+                   eddie-dense.wasm eddie-dense.js eddie-dense-esm.js \
+                   eddie-sw-lite.js eddie-sw-dense.js eddie-sw-gpu.js eddie-transformers-sw.js; do
+            test -f "dist/$f" || { echo "missing dist/$f" >&2; exit 1; }
+          done
 
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

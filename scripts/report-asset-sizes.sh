@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Report Eddie artifact sizes and enforce optional budgets.
+# Report Eddie runtime asset sizes (dist/ASSET_SIZES.md, dist/asset-sizes.csv)
+# and enforce the default-path budgets. Each budget is an environment
+# variable (bytes); the defaults are the 2026-08-30 measurements plus about
+# 15 % headroom (see docs/plans/2026-08-30-efficient-defaults.md).
+#
+# Default path (what a visitor pays without opting into anything):
+#   eddie-boot.js     every page view                       brotli
+#   eddie-widget.js   first interaction                     brotli
+#   eddie-worker.js   first open (page-worker host)         brotli
+#   eddie-lite.wasm   first open                            brotli
+# Opt-in (after consent):
+#   eddie-dense.wasm  CPU dense lane                        raw, gzip, brotli
 
 set -euo pipefail
 
@@ -11,11 +22,20 @@ REPORT_MD="$DIST_DIR/ASSET_SIZES.md"
 REPORT_CSV="$DIST_DIR/asset-sizes.csv"
 
 FILES=(
+  "eddie-boot.js"
   "eddie-widget.js"
   "eddie-worker.js"
   "eddie-agent-worker.js"
-  "eddie-wasm.js"
-  "eddie.wasm"
+  "eddie-lite.js"
+  "eddie-lite-esm.js"
+  "eddie-lite.wasm"
+  "eddie-dense.js"
+  "eddie-dense-esm.js"
+  "eddie-dense.wasm"
+  "eddie-sw-lite.js"
+  "eddie-sw-dense.js"
+  "eddie-sw-gpu.js"
+  "eddie-transformers-sw.js"
 )
 
 has_brotli=0
@@ -63,27 +83,45 @@ mkdir -p "$DIST_DIR"
 
 cat "$REPORT_MD"
 
-WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3600000}"
-WASM_GZIP_BUDGET_BYTES="${WASM_GZIP_BUDGET_BYTES:-1100000}"
-WASM_BROTLI_BUDGET_BYTES="${WASM_BROTLI_BUDGET_BYTES:-800000}"
+# Budgets (bytes). Measured 2026-08-30, opt-level=s, no wasm-opt:
+#   boot 3.2 KB br, widget 29.1 KB br, worker 14.3 KB br, lite wasm 200 KB br,
+#   dense wasm 3.60 MB raw / 1.05 MB gzip / 725 KB br.
+BOOT_BROTLI_BUDGET_BYTES="${BOOT_BROTLI_BUDGET_BYTES:-4096}"
+WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-33500}"
+WORKER_BROTLI_BUDGET_BYTES="${WORKER_BROTLI_BUDGET_BYTES:-16500}"
+LITE_WASM_BROTLI_BUDGET_BYTES="${LITE_WASM_BROTLI_BUDGET_BYTES:-230000}"
+WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3700000}"
+WASM_GZIP_BUDGET_BYTES="${WASM_GZIP_BUDGET_BYTES:-1150000}"
+WASM_BROTLI_BUDGET_BYTES="${WASM_BROTLI_BUDGET_BYTES:-820000}"
 
-wasm_row="$(grep '^eddie.wasm,' "$REPORT_CSV")"
-wasm_raw="$(echo "$wasm_row" | cut -d, -f2)"
-wasm_gzip="$(echo "$wasm_row" | cut -d, -f3)"
-wasm_br="$(echo "$wasm_row" | cut -d, -f4)"
+col() { grep "^$1," "$REPORT_CSV" | cut -d, -f"$2"; }
 
-if (( wasm_raw > WASM_RAW_BUDGET_BYTES )); then
-  echo "WASM raw size budget exceeded: $wasm_raw > $WASM_RAW_BUDGET_BYTES" >&2
-  exit 1
-fi
-if (( wasm_gzip > WASM_GZIP_BUDGET_BYTES )); then
-  echo "WASM gzip size budget exceeded: $wasm_gzip > $WASM_GZIP_BUDGET_BYTES" >&2
-  exit 1
-fi
-if [[ "$has_brotli" -eq 1 ]] && (( wasm_br > WASM_BROTLI_BUDGET_BYTES )); then
-  echo "WASM brotli size budget exceeded: $wasm_br > $WASM_BROTLI_BUDGET_BYTES" >&2
-  exit 1
-fi
+failed=0
+check() {
+  local label="$1" actual="$2" budget="$3"
+  if (( actual > budget )); then
+    echo "budget exceeded: $label $actual > $budget bytes" >&2
+    failed=1
+  else
+    echo "budget ok: $label $actual <= $budget bytes"
+  fi
+}
 
 echo
+check "eddie-dense.wasm raw" "$(col eddie-dense.wasm 2)" "$WASM_RAW_BUDGET_BYTES"
+check "eddie-dense.wasm gzip" "$(col eddie-dense.wasm 3)" "$WASM_GZIP_BUDGET_BYTES"
+if [[ "$has_brotli" -eq 1 ]]; then
+  check "eddie-boot.js brotli" "$(col eddie-boot.js 4)" "$BOOT_BROTLI_BUDGET_BYTES"
+  check "eddie-widget.js brotli" "$(col eddie-widget.js 4)" "$WIDGET_BROTLI_BUDGET_BYTES"
+  check "eddie-worker.js brotli" "$(col eddie-worker.js 4)" "$WORKER_BROTLI_BUDGET_BYTES"
+  check "eddie-lite.wasm brotli" "$(col eddie-lite.wasm 4)" "$LITE_WASM_BROTLI_BUDGET_BYTES"
+  check "eddie-dense.wasm brotli" "$(col eddie-dense.wasm 4)" "$WASM_BROTLI_BUDGET_BYTES"
+else
+  echo "brotli CLI not available; the brotli budgets were not checked." >&2
+fi
+
+if (( failed )); then
+  echo "Size budgets failed." >&2
+  exit 1
+fi
 echo "Size budgets passed."
