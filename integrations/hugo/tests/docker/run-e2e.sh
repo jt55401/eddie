@@ -106,10 +106,10 @@ for _ in $(seq 1 60); do
 done
 
 curl -fsS http://127.0.0.1:1313 >/tmp/hugo-home.html
-grep -q "eddie-widget.js" /tmp/hugo-home.html
+grep -q "eddie-boot.js" /tmp/hugo-home.html
 curl -fsS http://127.0.0.1:1313/eddie/eddie-worker.js >/tmp/hugo-worker.js
 curl -fsS http://127.0.0.1:1313/eddie/eddie-agent-worker.js >/tmp/hugo-agent-worker.js
-curl -fsS http://127.0.0.1:1313/eddie/eddie-wasm.js >/tmp/hugo-wasm.js
-curl -fsS http://127.0.0.1:1313/eddie/eddie.wasm >/tmp/hugo-engine.wasm
+curl -fsS http://127.0.0.1:1313/eddie/eddie-lite.js >/tmp/hugo-lite.js
+curl -fsS http://127.0.0.1:1313/eddie/eddie-lite.wasm >/tmp/hugo-lite-engine.wasm
 
 echo "Hugo E2E passed"

@@ -107,7 +107,7 @@ if ! curl -fsS http://127.0.0.1:8080 >/tmp/eleventy-home.html; then
   exit 1
 fi
 
-if ! grep -q "eddie-widget.js" /tmp/eleventy-home.html; then
+if ! grep -q "eddie-boot.js" /tmp/eleventy-home.html; then
   echo "Eddie widget tag not found in Eleventy home page." >&2
   echo "Recent home page excerpt:" >&2
   head -n 120 /tmp/eleventy-home.html >&2 || true
@@ -117,7 +117,7 @@ if ! grep -q "eddie-widget.js" /tmp/eleventy-home.html; then
 fi
 curl -fsS http://127.0.0.1:8080/eddie/eddie-worker.js >/tmp/eleventy-worker.js
 curl -fsS http://127.0.0.1:8080/eddie/eddie-agent-worker.js >/tmp/eleventy-agent-worker.js
-curl -fsS http://127.0.0.1:8080/eddie/eddie-wasm.js >/tmp/eleventy-wasm.js
-curl -fsS http://127.0.0.1:8080/eddie/eddie.wasm >/tmp/eleventy-engine.wasm
+curl -fsS http://127.0.0.1:8080/eddie/eddie-lite.js >/tmp/eleventy-lite.js
+curl -fsS http://127.0.0.1:8080/eddie/eddie-lite.wasm >/tmp/eleventy-lite-engine.wasm
 
 echo "Eleventy E2E passed"

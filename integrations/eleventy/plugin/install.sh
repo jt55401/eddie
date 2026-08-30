@@ -4,6 +4,16 @@ set -euo pipefail
 SITE_DIR="${1:?usage: install.sh <eleventy-site-dir>}"
 ASSET_ROOT="${2:-/repo/dist}"
 
+# widget/assets.list (copied into every asset root by widget/build.sh or
+# scripts/sync-integration-assets.sh) is the single source of truth for
+# which files ship; read it instead of hardcoding names here.
+ASSET_LIST="$ASSET_ROOT/assets.list"
+if [[ ! -f "$ASSET_LIST" ]]; then
+  echo "Missing asset manifest: $ASSET_LIST (run widget/build.sh first)" >&2
+  exit 1
+fi
+mapfile -t ASSETS < <(grep -v '^#' "$ASSET_LIST" | grep -v '^?' | grep -v '^$')
+
 require_asset() {
   local asset_name="$1"
   local asset_path="$ASSET_ROOT/$asset_name"
@@ -13,22 +23,20 @@ require_asset() {
   fi
 }
 
-for asset in eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm; do
+for asset in "${ASSETS[@]}"; do
   require_asset "$asset"
 done
 
 mkdir -p "$SITE_DIR/public/eddie"
-cp "$ASSET_ROOT/eddie-widget.js" "$SITE_DIR/public/eddie/eddie-widget.js"
-cp "$ASSET_ROOT/eddie-worker.js" "$SITE_DIR/public/eddie/eddie-worker.js"
-cp "$ASSET_ROOT/eddie-agent-worker.js" "$SITE_DIR/public/eddie/eddie-agent-worker.js"
-cp "$ASSET_ROOT/eddie-wasm.js" "$SITE_DIR/public/eddie/eddie-wasm.js"
-cp "$ASSET_ROOT/eddie.wasm" "$SITE_DIR/public/eddie/eddie.wasm"
+for asset in "${ASSETS[@]}"; do
+  cp "$ASSET_ROOT/$asset" "$SITE_DIR/public/eddie/$asset"
+done
 
 TARGET_LAYOUT="$SITE_DIR/_includes/layouts/base.njk"
 if [[ ! -f "$TARGET_LAYOUT" ]]; then
   TARGET_LAYOUT="$(grep -R -l "</head>" "$SITE_DIR" | head -n1 || true)"
 fi
 
-if [[ -n "$TARGET_LAYOUT" ]] && ! grep -q "eddie-widget.js" "$TARGET_LAYOUT"; then
-  perl -0777 -i -pe 's#</head>#  <script defer src="/eddie/eddie-widget.js"></script>\n</head>#s' "$TARGET_LAYOUT"
+if [[ -n "$TARGET_LAYOUT" ]] && ! grep -q "eddie-boot.js" "$TARGET_LAYOUT"; then
+  perl -0777 -i -pe 's#</head>#  <script defer src="/eddie/eddie-boot.js"></script>\n</head>#s' "$TARGET_LAYOUT"
 fi

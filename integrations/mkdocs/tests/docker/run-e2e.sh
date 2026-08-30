@@ -111,10 +111,10 @@ if ! curl -fsS http://127.0.0.1:8000 >/tmp/mkdocs-home.html; then
   tail -n 120 /tmp/mkdocs-server.log >&2 || true
   exit 1
 fi
-grep -q "eddie-widget.js" /tmp/mkdocs-home.html
+grep -q "eddie-boot.js" /tmp/mkdocs-home.html
 curl -fsS http://127.0.0.1:8000/eddie/eddie-worker.js >/tmp/mkdocs-worker.js
 curl -fsS http://127.0.0.1:8000/eddie/eddie-agent-worker.js >/tmp/mkdocs-agent-worker.js
-curl -fsS http://127.0.0.1:8000/eddie/eddie-wasm.js >/tmp/mkdocs-wasm.js
-curl -fsS http://127.0.0.1:8000/eddie/eddie.wasm >/tmp/mkdocs-engine.wasm
+curl -fsS http://127.0.0.1:8000/eddie/eddie-lite.js >/tmp/mkdocs-lite.js
+curl -fsS http://127.0.0.1:8000/eddie/eddie-lite.wasm >/tmp/mkdocs-lite-engine.wasm
 
 echo "MkDocs E2E passed"
