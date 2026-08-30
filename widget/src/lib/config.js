@@ -57,6 +57,8 @@
       agentModel: agentModelRaw === "" ? "auto" : agentModelRaw,
       denseRuntime: oneOf(get("data-dense-runtime"), ["auto", "wasm", "webgpu"], "auto"),
       consentText: (get("data-consent-text") || "").trim(),
+      persist: oneOf(get("data-persist"), ["auto", "off"], "auto"),
+      warm: oneOf(get("data-warm"), ["auto", "off", "always"], "auto"),
     };
   }
 

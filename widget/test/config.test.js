@@ -70,3 +70,15 @@ test("invalid values fall back", () => {
   assert.equal(c.denseRuntime, "auto");
   assert.equal(c.offsetX, 0);
 });
+
+test("persist and warm attributes", () => {
+  const C = require("../src/lib/config.js");
+  const parse = (attrs) => C.parseWidgetConfig((n) => (n in attrs ? attrs[n] : null));
+  assert.equal(parse({}).persist, "auto");
+  assert.equal(parse({}).warm, "auto");
+  assert.equal(parse({ "data-persist": "off" }).persist, "off");
+  assert.equal(parse({ "data-persist": "yes" }).persist, "auto");
+  assert.equal(parse({ "data-warm": "always" }).warm, "always");
+  assert.equal(parse({ "data-warm": "OFF" }).warm, "off");
+  assert.equal(parse({ "data-warm": "eager" }).warm, "auto");
+});
