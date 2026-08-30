@@ -77,7 +77,7 @@
     let caps = null; // wasmCapabilities(wasm)
 
     const state = {
-      phase: "idle", // idle | loading | awaiting_consent | ready | error | dead
+      phase: "idle", // idle | loading | awaiting_consent | awaiting_tier | ready | error | dead
       initRunning: false,
       rerun: false,
       baseUrl: "",
@@ -183,6 +183,10 @@
         const outcome = await ensureDense();
         if (outcome === "consent") {
           state.phase = "awaiting_consent";
+          return;
+        }
+        if (outcome === "tier") {
+          state.phase = "awaiting_tier";
           return;
         }
         releaseHandoverBytes();
@@ -389,6 +393,12 @@
           return "ok";
         } catch (err) {
           if (isFatal(err)) throw err;
+          if (err && err.eddieTier) {
+            // This host lacks the runtime, another tier has it: let the
+            // widget move the search there and init again.
+            postStatus("tier_required", { tier: String(err.eddieTier), lane: laneSummary(lane), message: describe(err) });
+            return "tier";
+          }
           console.warn(`eddie: dense lane ${lane.id} failed`, err);
           state.degraded.push(`dense: lane ${lane.id} failed: ${describe(err)}`);
         }

@@ -40,6 +40,13 @@ const startedAt = Date.now();
 const hasGpu = !!(self.navigator && navigator.gpu && typeof navigator.gpu.requestAdapter === "function");
 const canRunOnnx = EDDIE_SW_TIER === "gpu" && hasGpu;
 
+/** A rejection that names the tier able to host what this one cannot; the widget moves the search there. */
+function tierError(tier, what) {
+  const e = new Error(`the ${EDDIE_SW_TIER} service worker has no ${what}; the ${tier} tier hosts it`);
+  e.eddieTier = tier;
+  return e;
+}
+
 const connections = new Set(); // { port, kind, reply }
 
 function broadcast(kind, message) {
@@ -68,7 +75,7 @@ function loadWasm(baseUrl, version, variant) {
     return wasmInits.lite;
   }
   if (v === "dense") {
-    if (!initDenseWasm) return Promise.reject(new Error(`the ${EDDIE_SW_TIER} service worker has no CPU embedder; the dense tier hosts wasm-candle lanes`));
+    if (!initDenseWasm) return Promise.reject(tierError("dense", "CPU embedder"));
     if (!wasmInits.dense) wasmInits.dense = initDenseWasm({ module_or_path: lib.assetUrl(baseUrl, EDDIE_DENSE_WASM, version) }).then(() => denseWasmApi);
     return wasmInits.dense;
   }
@@ -79,11 +86,14 @@ const searchEngine = lib.createSearchEngine({
   post: (message) => broadcast("search", message),
   loadWasm,
   loadTransformers: async () => {
-    if (!transformers) throw new Error(`the ${EDDIE_SW_TIER} service worker has no transformers.js; the gpu tier hosts webgpu-onnx lanes`);
+    if (!transformers) throw tierError("gpu", "transformers.js");
     return transformers;
   },
   configureTransformers,
-  canRunWebGpuLane: canRunOnnx,
+  // Lane *choice* follows the adapter, whatever the tier: a lite worker asks
+  // consent for the webgpu lane, and the widget moves the search to the gpu
+  // tier on accept (or on a tier_required status if the lane is cached).
+  canRunWebGpuLane: hasGpu,
 });
 
 // Only the gpu tier bundles the agent (widget/src/lib/agent*.js) at all.

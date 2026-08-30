@@ -433,3 +433,32 @@ test("webgpu lane without base_url keeps transformers.js on huggingface.co", asy
   assert.equal(tfEnv.remoteHost, "https://huggingface.co/");
   assert.equal(tfEnv.remotePathTemplate, "{model}/resolve/{revision}/");
 });
+
+test("a host that names another tier for the lane's runtime gets a tier_required status instead of a degraded lane", async () => {
+  const posted = [];
+  const v = fakeVariants(SIDECAR_MANIFEST, { sparseEmbedded: true });
+  const navigator = { gpu: { requestAdapter: async () => ({ features: new Set(), limits: { maxBufferSize: 1 } }) } };
+  const engine = SE.createSearchEngine({
+    lib,
+    post: (m) => posted.push(m),
+    loadWasm: async () => v.lite,
+    loadTransformers: async () => {
+      const e = new Error("the lite service worker has no transformers.js; the gpu tier hosts it");
+      e.eddieTier = "gpu";
+      throw e;
+    },
+    canRunWebGpuLane: true,
+    navigator,
+    indexedDB: null,
+    fetch: fakeFetch(siteFiles()),
+  });
+  await engine.handle(INIT);
+  assert.equal(posted.find((m) => m.state === "consent_required").lane.id, "qwen3e", "the lite host still chooses the webgpu lane");
+  await engine.handle(Object.assign({}, INIT, { consent: true }));
+  const tier = posted.find((m) => m.state === "tier_required");
+  assert.ok(tier, "tier_required posted");
+  assert.equal(tier.tier, "gpu");
+  assert.equal(tier.lane.id, "qwen3e");
+  assert.equal(engine.phase, "awaiting_tier");
+  assert.equal(posted.some((m) => m.type === "ready"), false, "no keyword-only ready: the widget re-inits on the gpu tier");
+});

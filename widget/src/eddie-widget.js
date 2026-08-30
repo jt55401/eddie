@@ -1095,6 +1095,19 @@
         resolveInitWaiters();
         rerunQuery();
         break;
+      case "tier_required":
+        // The engine's host cannot run the lane it chose (lite worker, cached
+        // webgpu lane): move the search to the tier that can and init again.
+        console.info(`eddie: ${msg.message || "tier change"}; moving search to the ${msg.tier} tier`);
+        if (search && search.kind === "sw" && lib.SW_TIERS.includes(msg.tier)) {
+          switchSearchTier(msg.tier).then(() => {
+            if (search && !initSent) postInit(false);
+          });
+        } else {
+          setWorkerState("error");
+          showInitError(msg.message || "This host cannot run the search model", true);
+        }
+        break;
       case "consent_required":
         setWorkerState("awaiting_consent");
         showStatus(false);
