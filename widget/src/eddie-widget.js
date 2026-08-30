@@ -889,8 +889,10 @@
       }
       // With the modal closed nothing pinged the service worker, so Chrome
       // may have stopped it: a failed ping reconnects and emits reset,
-      // which re-sends init while the modal is open.
-      if (search.kind === "sw" && initSent) await search.ensureAlive();
+      // which re-sends init while the modal is open. A worker that is
+      // streaming load status is alive by definition (and may be too busy
+      // to answer a ping in time).
+      if (search.kind === "sw" && initSent && workerState !== "loading") await search.ensureAlive();
       if (search && !initSent) postInit(false);
       return;
     }

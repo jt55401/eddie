@@ -30,7 +30,10 @@
   "use strict";
 
   const HELLO_TIMEOUT_MS = 3000;
-  const PING_TIMEOUT_MS = 5000;
+  // Liveness checks must tolerate a busy worker: model loading blocks its
+  // thread for seconds at a time (ONNX session creation, safetensors parsing).
+  const PING_TIMEOUT_MS = 10000;
+  const RECONNECT_HELLO_TIMEOUT_MS = 10000;
   const KEEPALIVE_MS = 15000;
   const REGISTER_TIMEOUT_MS = 20000;
 
@@ -238,7 +241,14 @@
       if (this.reconnecting) return this.reconnecting;
       this.reconnecting = (async () => {
         this.failAllPending(new Error("service worker restarted"));
-        const hello = await this.connect();
+        const saved = this.helloTimeoutMs;
+        this.helloTimeoutMs = Math.max(saved, RECONNECT_HELLO_TIMEOUT_MS);
+        let hello;
+        try {
+          hello = await this.connect();
+        } finally {
+          this.helloTimeoutMs = saved;
+        }
         this.emit("reset", { type: "reset", hello });
         return hello;
       })().finally(() => {
@@ -263,12 +273,23 @@
         }
       }
     }
+    /**
+     * Keepalive pings are fire-and-forget: their only job is to keep Chrome
+     * from stopping the worker as idle. Liveness is checked explicitly
+     * (ensureAlive) at the points where a dead worker would otherwise hang
+     * the widget, so a worker that is merely busy is never mistaken for a
+     * stopped one.
+     */
     setKeepalive(wanted) {
       const si = this.env.setInterval || setInterval;
       const ci = this.env.clearInterval || clearInterval;
       if (wanted && !this.keepaliveTimer) {
         this.keepaliveTimer = si(() => {
-          this.ensureAlive();
+          try {
+            this.postRaw({ type: "ping", requestId: this.nextId() });
+          } catch (_) {
+            // not connected; ensureAlive will deal with it
+          }
         }, this.keepaliveMs);
       } else if (!wanted && this.keepaliveTimer) {
         ci(this.keepaliveTimer);
