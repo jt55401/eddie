@@ -3,8 +3,12 @@
 // Eddie search widget
 //
 // Self-contained vanilla JS widget in a closed Shadow DOM. Talks to the
-// search worker (eddie-worker.js) for retrieval and, on demand, to the agent
-// worker (eddie-agent-worker.js) for a streamed, cited answer.
+// search engine for retrieval and, on demand, to the agent for a streamed,
+// cited answer. Both engines live either in the Eddie service worker
+// (eddie-sw.js, persistent across navigations; see "Persistent engines" in
+// widget/README.md) or, as the fallback, in page-side workers
+// (eddie-worker.js, eddie-agent-worker.js). The transports in lib/transport.js
+// hide the difference.
 //
 // widget/build.sh concatenates widget/src/lib/*.js ahead of this file inside
 // one IIFE, so the pure helpers are available as `EddieLib` without leaking a
@@ -37,27 +41,39 @@
   const HEART_PALETTE = { 1: "#f2c94c", 2: "#e0b63f", 3: "#f8dda1", 4: "#b78e28" };
   const HIDDEN_SECTIONS = /^(summary|summary lane|semantic segment)$/i;
   const AGENT_CONSENT_KEY = "eddie.agent.consent";
+  const SEARCH_CONSENT_KEY = lib.SEARCH_CONSENT_KEY;
+  // How long a modal open waits for the transport decision (service worker
+  // registration + hello) before starting a page-side worker instead.
+  const TRANSPORT_WAIT_MS = 3000;
 
   // -- State --
-  let worker = null;
+  let search = null; // search transport (lib/transport.js), null until needed
   let workerState = "idle"; // idle | loading | index_ready | awaiting_consent | ready | error | dead
   let searchable = false;
+  let initSent = false; // an init went to the current search transport
   let requestSeq = 0;
-  const pending = new Map(); // requestId -> { resolve, reject }
   let activeSearchId = 0;
   let isOpen = false;
   let selectedIndex = -1;
   let currentResults = [];
   let lastHeartIndex = -1;
   let consentDeclined = false;
+  let pendingConsentLane = null; // lane id of the consent card being shown
   let lastDegradedNotice = null;
   let lastAnnouncedQuarter = -1;
   let manifestInfo = null;
   let searchTimer = null;
   let lastSearchedQuery = "";
+  let initWaiters = []; // resolve() once the index is loaded (index_ready or ready)
+  let transportPlan = null; // Promise<{kind, registration?, hello?, swSearch?}>
+  let searchCreating = null; // Promise while ensureSearchTransport runs
+  let forcePageWorkers = false; // after a dead service-worker engine: this page uses page workers
+  let pageGpu = null; // null (unknown) | false | { maxBufferSize, hasF16 }
+  let pageGpuProbe = null;
 
   let agentInfo = null; // null (unknown) | false | { maxBufferSize, hasF16 }
-  let agentWorker = null;
+  let agent = null; // agent transport, null until the first Ask
+  let agentCreating = null;
   let agentModel = null; // { id, base, sizeBytes }
   let agentLoaded = false;
   let agentLoading = null; // Promise while a load is in flight
@@ -692,50 +708,214 @@
     return true;
   }
 
-  // -- Search worker --
-  function ensureWorker() {
-    if (worker) {
-      if (workerState === "error") retryInit();
-      return;
-    }
+  // -- Transports --
+  // The decision (service worker or page workers) starts after `load`, from
+  // an idle callback, so registration never delays the page. Modal opens
+  // wait for it at most TRANSPORT_WAIT_MS; warm-up waits as long as it takes.
+  function onIdle(fn) {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => fn(), { timeout: 2000 });
+    else setTimeout(fn, 200);
+  }
+
+  function afterLoad(fn) {
+    if (document.readyState === "complete") fn();
+    else window.addEventListener("load", () => fn(), { once: true });
+  }
+
+  function ensureTransportPlan() {
+    if (!transportPlan) transportPlan = setupTransport();
+    return transportPlan;
+  }
+
+  async function setupTransport() {
+    const kind = lib.chooseTransportKind({
+      persist: config.persist,
+      hasServiceWorker: !!navigator.serviceWorker,
+      secureContext: window.isSecureContext,
+    });
+    if (kind !== "sw" || forcePageWorkers) return { kind: "worker" };
+    let registration = null;
+    let swSearch = null;
     try {
-      worker = new Worker(lib.assetUrl(baseUrl, "eddie-worker.js", version));
+      registration = await lib.registerServiceWorker({
+        container: navigator.serviceWorker,
+        url: lib.assetUrl(baseUrl, "eddie-sw.js", version),
+        scope: baseUrl,
+      });
+      swSearch = new lib.ServiceWorkerTransport(registration, { kind: "search", version });
+      const hello = await swSearch.connect();
+      // The service worker cannot run a webgpu-onnx lane (no WebGPU in its
+      // scope) while this page could: search stays page-side for quality,
+      // the agent still goes wherever the service worker can host it.
+      if (lib.searchStaysOnPage({ swOnnx: hello.onnx, pageHasGpu: !!(await probePageGpu()), denseRuntime: config.denseRuntime })) {
+        swSearch.terminate();
+        swSearch = null;
+      }
+      return { kind: "sw", registration, hello, swSearch };
     } catch (err) {
-      showInitError("Couldn't start the search worker: " + (err && err.message ? err.message : err), false);
-      return;
+      console.info("eddie: service worker unavailable, using page workers:", err && err.message ? err.message : err);
+      if (swSearch) swSearch.terminate();
+      return { kind: "worker" };
     }
-    worker.onmessage = (e) => onWorkerMessage(e.data || {});
-    worker.onerror = (e) => {
+  }
+
+  function withDeadline(promise, ms) {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), ms);
+      promise.then(
+        (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(null);
+        }
+      );
+    });
+  }
+
+  function probePageGpu() {
+    if (pageGpu !== null) return Promise.resolve(pageGpu);
+    if (pageGpuProbe) return pageGpuProbe;
+    pageGpuProbe = (async () => {
+      pageGpu = false;
+      if (!navigator.gpu || typeof navigator.gpu.requestAdapter !== "function") return pageGpu;
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (adapter) {
+          pageGpu = {
+            maxBufferSize: adapter.limits ? adapter.limits.maxBufferSize : 0,
+            hasF16: !!(adapter.features && adapter.features.has("shader-f16")),
+          };
+        }
+      } catch (err) {
+        console.warn("eddie: WebGPU adapter probe failed", err);
+      }
+      return pageGpu;
+    })();
+    return pageGpuProbe;
+  }
+
+  // -- Search transport --
+  /** Create and wire the search transport (no init yet). `wait` bounds the transport decision. */
+  function ensureSearchTransport(waitMs) {
+    if (search) return Promise.resolve(search);
+    if (searchCreating) return searchCreating;
+    searchCreating = (async () => {
+      const planPromise = ensureTransportPlan();
+      const plan = waitMs == null ? await planPromise.catch(() => null) : await withDeadline(planPromise, waitMs);
+      if (search) return search;
+      let t = plan && plan.kind === "sw" && plan.swSearch && !forcePageWorkers ? plan.swSearch : null;
+      if (!t) {
+        try {
+          t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-worker.js", version));
+        } catch (err) {
+          showInitError("Couldn't start the search worker: " + (err && err.message ? err.message : err), false);
+          return null;
+        }
+      }
+      attachSearch(t, plan);
+      return t;
+    })().finally(() => {
+      searchCreating = null;
+    });
+    return searchCreating;
+  }
+
+  function attachSearch(t, plan) {
+    search = t;
+    initSent = false;
+    host.dataset.transport = t.kind;
+    t.on("status", handleStatus);
+    t.on("ready", handleReady);
+    t.on("error", (msg) => {
+      if (msg.requestId != null) return; // request errors reject their promise
+      if (msg.fatal) onFatal(msg.message);
+      else showInitError(msg.message || "Search failed", false);
+    });
+    t.on("crash", (msg) => {
       // An uncaught error in the worker script (a 404, a syntax error, an
-      // exception outside a handler): start a fresh worker on Retry.
-      const message = e && e.message ? e.message : "search worker failed to load";
+      // exception outside a handler) or a service worker that could not be
+      // reconnected: start afresh on Retry.
       setWorkerState("dead");
       searchable = false;
       showStatus(false);
-      showInitError(message, true);
-      failAllPending(new Error(message));
-    };
-    postInit(false);
+      showInitError(msg.message || "search worker failed to load", true);
+      failInitWaiters(new Error(msg.message || "search worker failed"));
+    });
+    t.on("reset", () => {
+      // The service worker was stopped while idle and reconnected: its engine
+      // is empty again. Re-run init transparently when the modal is open;
+      // otherwise the next open does it.
+      console.info("eddie: search engine restarted");
+      searchable = false;
+      initSent = false;
+      setWorkerState("idle");
+      host.dataset.arms = "";
+      host.dataset.lane = "";
+      host.dataset.runtime = "";
+      if (isOpen) postInit(false);
+    });
+    if (t.kind === "sw" && plan && plan.hello && lib.canReuseSearch(plan.hello.search, indexUrl)) {
+      adoptReadyState(plan.hello.search);
+    }
+  }
+
+  /** The service worker already holds a ready engine for this index: mirror it. */
+  function adoptReadyState(st) {
+    initSent = true;
+    handleReady({
+      type: "ready",
+      lanes: st.lanes || [],
+      lane: st.lane,
+      runtime: st.runtime,
+      arms: st.arms || { dense: false, sparse: false, bm25: true },
+      degraded: st.degraded || [],
+      manifest: st.manifest,
+      reused: true,
+    });
+  }
+
+  /** Modal-open path: make sure a transport exists and an init is under way. */
+  async function ensureWorker() {
+    if (search) {
+      if (workerState === "error") retryInit();
+      else if (!initSent) postInit(false);
+      return;
+    }
+    const t = await ensureSearchTransport(TRANSPORT_WAIT_MS);
+    if (!t) return;
+    if (!initSent) postInit(false);
   }
 
   function postInit(consent) {
+    if (!search) return;
+    initSent = true;
     setWorkerState("loading");
     hide(errorEl);
-    worker.postMessage({
+    search.postRaw({
       type: "init",
       indexUrl,
       baseUrl,
       version,
       denseRuntime: config.denseRuntime,
       consent: !!consent,
+      consentLane: consent ? pendingConsentLane : undefined,
     });
+    updateKeepalive();
   }
 
   function retryInit() {
     hide(errorEl);
-    if (!worker || workerState === "dead") {
-      if (worker) worker.terminate();
-      worker = null;
+    if (!search || workerState === "dead") {
+      if (search) {
+        // A dead engine inside the service worker stays dead until Chrome
+        // restarts it; this page continues with page-side workers.
+        if (search.kind === "sw") forcePageWorkers = true;
+        search.terminate();
+      }
+      search = null;
       searchable = false;
       setWorkerState("idle");
       ensureWorker();
@@ -744,51 +924,53 @@
     postInit(false);
   }
 
-  function callWorker(type, payload) {
+  /** Resolves once the index is loaded in the current transport. */
+  function whenIndexLoaded() {
+    if (searchable) return Promise.resolve();
     return new Promise((resolve, reject) => {
-      if (!worker) {
-        reject(new Error("search worker not running"));
-        return;
-      }
-      const requestId = ++requestSeq;
-      pending.set(requestId, { resolve, reject });
-      worker.postMessage(Object.assign({ type, requestId }, payload || {}));
+      initWaiters.push({ resolve, reject });
     });
   }
 
-  function failAllPending(err) {
-    pending.forEach((p) => p.reject(err));
-    pending.clear();
+  function resolveInitWaiters() {
+    const waiters = initWaiters;
+    initWaiters = [];
+    waiters.forEach((w) => w.resolve());
   }
 
-  function onWorkerMessage(msg) {
-    if (msg.requestId != null && pending.has(msg.requestId)) {
-      const p = pending.get(msg.requestId);
-      pending.delete(msg.requestId);
-      if (msg.type === "error") {
-        const err = new Error(msg.message || "request failed");
-        err.fatal = !!msg.fatal;
-        p.reject(err);
-        if (msg.fatal) onFatal(msg.message);
-      } else {
-        p.resolve(msg);
-      }
-      return;
+  function failInitWaiters(err) {
+    const waiters = initWaiters;
+    initWaiters = [];
+    waiters.forEach((w) => w.reject(err));
+  }
+
+  /**
+   * A request to the search engine. A "not initialised" reply (the service
+   * worker restarted, or a page-side worker that never got init) re-runs the
+   * init flow once and retries.
+   */
+  async function callWorker(type, payload) {
+    if (!search) throw new Error("search worker not running");
+    const requestId = ++requestSeq;
+    try {
+      return await search.call(type, payload, { requestId });
+    } catch (err) {
+      if (!err || err.fatal || !lib.isNotLoadedMessage(err.message)) throw err;
+      if (!search) throw err;
+      if (!initSent || workerState === "idle") postInit(false);
+      await whenIndexLoaded();
+      return search.call(type, payload, { requestId: ++requestSeq });
     }
-    switch (msg.type) {
-      case "status":
-        handleStatus(msg);
-        break;
-      case "ready":
-        handleReady(msg);
-        break;
-      case "error":
-        if (msg.fatal) onFatal(msg.message);
-        else showInitError(msg.message || "Search failed", false);
-        break;
-      default:
-        break;
-    }
+  }
+
+  function updateKeepalive() {
+    const wanted = lib.keepaliveWanted({
+      open: isOpen,
+      streaming: !!(agentRun && !agentRun.done),
+      pending: !!(search && search.pending && search.pending.size > 0),
+    });
+    if (search) search.setKeepalive(wanted);
+    if (agent) agent.setKeepalive(wanted);
   }
 
   function onFatal(message) {
@@ -796,6 +978,7 @@
     searchable = false;
     showStatus(false);
     showInitError(message || "The search engine crashed.", true);
+    failInitWaiters(new Error(message || "search engine crashed"));
   }
 
   function handleStatus(msg) {
@@ -812,12 +995,14 @@
         manifestInfo = msg.manifest || null;
         setWorkerState("index_ready");
         searchable = true;
-        setStatus("Loading search model…", null);
+        if (initSent) setStatus("Loading search model…", null);
+        resolveInitWaiters();
         rerunQuery();
         break;
       case "consent_required":
         setWorkerState("awaiting_consent");
         showStatus(false);
+        pendingConsentLane = msg.lane && msg.lane.id ? msg.lane.id : null;
         if (consentDeclined) break;
         showConsent(msg);
         break;
@@ -841,6 +1026,7 @@
         setWorkerState(msg.fatal ? "dead" : "error");
         showStatus(false);
         showInitError(msg.message || "Failed to initialise search", !msg.unsupported);
+        failInitWaiters(new Error(msg.message || "search failed to initialise"));
         break;
       default:
         break;
@@ -855,11 +1041,74 @@
     host.dataset.arms = Object.keys(arms).filter((k) => arms[k]).join(",");
     host.dataset.lane = msg.lane || "";
     host.dataset.runtime = msg.runtime || "";
+    host.dataset.readyMs = String(Math.round(performance.now()));
+    host.dataset.reused = msg.reused ? "true" : "false";
+    if (msg.lane) rememberSearchConsent(msg.lane);
     showStatus(false);
     hide(consentCard);
     lastDegradedNotice = lib.degradedNotice(msg.arms, msg.degraded);
     announce(lastDegradedNotice ? "Search ready. " + lastDegradedNotice : "Search ready");
+    resolveInitWaiters();
     rerunQuery();
+    updateKeepalive();
+  }
+
+  // -- Warm at load (data-warm) --
+  // Runs after `load` and an idle callback, once the transport is decided.
+  // Never downloads a model without a prior consent on this browser (auto);
+  // `always` is the site owner's choice to warm uncached lanes too.
+  async function warmUp() {
+    if (config.warm === "off") return;
+    const plan = await ensureTransportPlan().catch(() => null);
+    if (!plan || search) return; // the modal opened first: the normal flow owns init
+    const engineReady = plan.kind === "sw" && !!plan.swSearch && lib.canReuseSearch(plan.hello.search, indexUrl);
+    let decision = lib.decideWarm({ mode: config.warm, saveData, engineReady, checked: false });
+    console.debug("eddie warm:", decision.action, decision.reason);
+    if (decision.action === "none") return;
+    const t = await ensureSearchTransport(null);
+    if (!t) return;
+    if (decision.action === "adopt") return; // attachSearch adopted the ready state
+    if (initSent) return;
+    let cr;
+    try {
+      cr = await search.call("cache_check", { indexUrl, baseUrl, version, denseRuntime: config.denseRuntime }, { requestId: ++requestSeq, timeoutMs: 240000 });
+    } catch (err) {
+      console.info("eddie warm: cache check failed:", err && err.message ? err.message : err);
+      return;
+    }
+    if (initSent || !search) return;
+    decision = lib.decideWarm({
+      mode: config.warm,
+      saveData,
+      engineReady: cr.phase === "ready",
+      checked: true,
+      lane: cr.lane,
+      cached: cr.cached,
+      consentedLane: readSearchConsent(),
+    });
+    console.debug("eddie warm:", decision.action, decision.reason);
+    if (decision.action === "init") {
+      if (decision.consent && cr.lane) pendingConsentLane = cr.lane.id;
+      postInit(decision.consent);
+    } else if (decision.action === "adopt") {
+      postInit(false); // the engine answers with ready at once
+    }
+  }
+
+  function readSearchConsent() {
+    try {
+      return localStorage.getItem(SEARCH_CONSENT_KEY) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function rememberSearchConsent(laneId) {
+    try {
+      localStorage.setItem(SEARCH_CONSENT_KEY, String(laneId));
+    } catch (_) {
+      // storage unavailable: no warm-up next visit
+    }
   }
 
   function rerunQuery() {
@@ -885,9 +1134,9 @@
 
   function acceptConsent() {
     hide(consentCard);
-    if (!worker) return;
-    setWorkerState("loading");
-    worker.postMessage({ type: "init", indexUrl, baseUrl, version, denseRuntime: config.denseRuntime, consent: true });
+    if (!search) return;
+    if (pendingConsentLane) rememberSearchConsent(pendingConsentLane);
+    postInit(true);
     input.focus();
   }
 
@@ -916,32 +1165,27 @@
   }
 
   async function doSearch(query, explicit) {
-    if (!searchable || !worker) return;
+    if (!searchable || !search) return;
     // A different query cancels a running answer; re-searching the question
     // being answered (a late debounce, a re-run after init) does not.
     if (agentRun && !agentRun.done && query !== agentRun.question) abortAgent("new search");
     lastSearchedQuery = query;
-    const requestId = ++requestSeq;
-    activeSearchId = requestId;
-    pending.set(requestId, {
-      resolve: (msg) => {
-        if (requestId !== activeSearchId) return;
-        renderSearchResult(msg, query);
-      },
-      reject: (err) => {
-        if (requestId !== activeSearchId) return;
-        showSearchError(err.message || "Search failed");
-      },
-    });
-    worker.postMessage({
-      type: "search",
-      requestId,
-      query,
-      topK: config.topK,
-      mode: "hybrid",
-      qa: wantQa(query) ? Math.max(1, Math.min(config.answerTopK, 3)) : 0,
-      explicit: !!explicit,
-    });
+    const token = ++requestSeq;
+    activeSearchId = token;
+    try {
+      const msg = await callWorker("search", {
+        query,
+        topK: config.topK,
+        mode: "hybrid",
+        qa: wantQa(query) ? Math.max(1, Math.min(config.answerTopK, 3)) : 0,
+        explicit: !!explicit,
+      });
+      if (token !== activeSearchId) return;
+      renderSearchResult(msg, query);
+    } catch (err) {
+      if (token !== activeSearchId) return;
+      showSearchError((err && err.message) || "Search failed");
+    }
   }
 
   function renderSearchResult(msg, query) {
@@ -1098,21 +1342,13 @@
   // -- Agent --
   async function detectAgent() {
     if (agentInfo !== null) return agentInfo;
-    agentInfo = false;
-    if (config.agentMode === "off" || !navigator.gpu || typeof navigator.gpu.requestAdapter !== "function") {
+    if (config.agentMode === "off") {
+      agentInfo = false;
       return agentInfo;
     }
-    try {
-      const adapter = await navigator.gpu.requestAdapter();
-      if (adapter) {
-        agentInfo = {
-          maxBufferSize: adapter.limits ? adapter.limits.maxBufferSize : 0,
-          hasF16: !!(adapter.features && adapter.features.has("shader-f16")),
-        };
-      }
-    } catch (err) {
-      console.warn("eddie: WebGPU adapter probe failed", err);
-    }
+    const gpu = await probePageGpu();
+    if (agentInfo !== null) return agentInfo;
+    agentInfo = gpu ? { maxBufferSize: gpu.maxBufferSize, hasF16: gpu.hasF16 } : false;
     if (agentInfo) {
       agentModel = lib.selectAgentModel({
         mode: config.agentModel,
@@ -1263,12 +1499,41 @@
     });
   }
 
-  function ensureAgentWorker() {
-    if (agentWorker) return;
-    agentWorker = new Worker(lib.assetUrl(baseUrl, "eddie-agent-worker.js", version), { type: "module" });
-    agentWorker.onmessage = (e) => onAgentMessage(e.data || {});
-    agentWorker.onerror = (e) => {
-      const message = e && e.message ? e.message : "agent worker failed to load";
+  /** The agent transport: the service worker when it has WebGPU, else a page-side module worker. */
+  function ensureAgentTransport() {
+    if (agent) return Promise.resolve(agent);
+    if (agentCreating) return agentCreating;
+    agentCreating = (async () => {
+      const plan = await withDeadline(ensureTransportPlan(), TRANSPORT_WAIT_MS);
+      if (agent) return agent;
+      let t = null;
+      if (plan && plan.kind === "sw" && plan.hello && plan.hello.gpu && !forcePageWorkers) {
+        const sw = new lib.ServiceWorkerTransport(plan.registration, { kind: "agent", version });
+        try {
+          await sw.connect();
+          t = sw;
+        } catch (err) {
+          console.info("eddie: agent falls back to a page worker:", err && err.message ? err.message : err);
+          sw.terminate();
+        }
+      }
+      if (!t) t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-agent-worker.js", version), { type: "module" });
+      attachAgent(t);
+      return t;
+    })().finally(() => {
+      agentCreating = null;
+    });
+    return agentCreating;
+  }
+
+  function attachAgent(t) {
+    agent = t;
+    host.dataset.agentTransport = t.kind;
+    for (const type of ["progress", "loaded", "plan_result", "token", "done", "aborted", "error"]) {
+      t.on(type, onAgentMessage);
+    }
+    t.on("crash", (msg) => {
+      const message = msg.message || "agent worker failed to load";
       if (agentPendingLoad) {
         agentPendingLoad.reject(new Error(message));
         agentPendingLoad = null;
@@ -1277,30 +1542,65 @@
         agentRun.done = true;
         showAnswerError(message, agentRun.question);
       }
-    };
+    });
+    t.on("reset", () => {
+      // The service worker restarted: its model is gone; the next Ask loads again.
+      console.info("eddie: agent engine restarted");
+      agentLoaded = false;
+      if (agentPendingLoad) {
+        agentPendingLoad.reject(new Error("the answer engine restarted"));
+        agentPendingLoad = null;
+      }
+      if (agentRun && !agentRun.done) {
+        agentRun.done = true;
+        if (agentRun.rejectStream) agentRun.rejectStream(new Error("the answer engine restarted"));
+      }
+    });
   }
 
   function loadAgent(run) {
     if (agentLoaded) return Promise.resolve();
     if (agentLoading) return agentLoading;
-    ensureAgentWorker();
-    agentLoading = new Promise((resolve, reject) => {
-      agentPendingLoad = { resolve, reject };
-      answerProgress.textContent = `Loading ${agentModel.base}…`;
-      announce(`Loading the answer model, ${agentModel.base}`);
-      agentWorker.postMessage({ type: "load", model: agentModel.id });
-    }).finally(() => {
+    agentLoading = (async () => {
+      const t = await ensureAgentTransport();
+      if (run.aborted) return;
+      if (t.kind === "sw") {
+        // The service worker may still hold the model from an earlier page.
+        try {
+          const st = await t.state();
+          if (lib.canReuseAgent(st.agent, agentModel.id)) {
+            agentLoaded = true;
+            host.dataset.agentReused = "true";
+            console.info("eddie agent: reusing " + agentModel.id + " from the service worker");
+            return;
+          }
+        } catch (err) {
+          console.warn("eddie agent: state query failed", err);
+        }
+      }
+      host.dataset.agentReused = "false";
+      await new Promise((resolve, reject) => {
+        agentPendingLoad = { resolve, reject };
+        answerProgress.textContent = `Loading ${agentModel.base}…`;
+        announce(`Loading the answer model, ${agentModel.base}`);
+        t.postRaw({ type: "load", model: agentModel.id });
+      });
+    })().finally(() => {
       agentLoading = null;
     });
     return agentLoading;
   }
 
-  const agentPending = new Map();
-  function agentCall(type, payload) {
-    return new Promise((resolve, reject) => {
-      agentPending.set(payload.requestId, { resolve, reject });
-      agentWorker.postMessage(Object.assign({ type }, payload));
-    });
+  /** A plan request; a "model not loaded" reply (service worker restarted) reloads once and retries. */
+  async function agentCall(type, payload) {
+    try {
+      return await agent.call(type, payload, { requestId: payload.requestId });
+    } catch (err) {
+      if (!err || !lib.isModelNotLoadedMessage(err.message)) throw err;
+      agentLoaded = false;
+      await loadAgent({ aborted: false });
+      return agent.call(type, payload, { requestId: ++requestSeq });
+    }
   }
 
   function streamAnswer(run) {
@@ -1315,7 +1615,8 @@
       caret.setAttribute("aria-hidden", "true");
       run.caret = caret;
       answerText.appendChild(caret);
-      agentWorker.postMessage({ type: "ask", requestId: run.requestId, question: run.question, site: siteName, evidence: run.evidence });
+      updateKeepalive();
+      agent.postRaw({ type: "ask", requestId: run.requestId, question: run.question, site: siteName, evidence: run.evidence });
     });
   }
 
@@ -1347,8 +1648,7 @@
         }
         break;
       case "plan_result":
-        resolveAgent(msg);
-        break;
+        break; // settled by the transport's call()
       case "token":
         if (agentRun && msg.requestId === agentRun.requestId && !agentRun.done) {
           agentRun.text += msg.text;
@@ -1365,11 +1665,7 @@
         }
         break;
       case "error":
-        if (msg.requestId != null && agentPending.has(msg.requestId)) {
-          const p = agentPending.get(msg.requestId);
-          agentPending.delete(msg.requestId);
-          p.reject(new Error(msg.message || "agent request failed"));
-        } else if (agentPendingLoad) {
+        if (agentPendingLoad && msg.requestId == null) {
           agentPendingLoad.reject(new Error(msg.message || "model load failed"));
           agentPendingLoad = null;
         } else if (agentRun && !agentRun.done && (msg.requestId == null || msg.requestId === agentRun.requestId)) {
@@ -1380,13 +1676,6 @@
       default:
         break;
     }
-  }
-
-  function resolveAgent(msg) {
-    const p = agentPending.get(msg.requestId);
-    if (!p) return;
-    agentPending.delete(msg.requestId);
-    p.resolve(msg);
   }
 
   function finishAnswer(run, msg) {
@@ -1421,6 +1710,7 @@
     run.usage = usage;
     announce(msg.nohit ? "No answer: the site doesn't cover that." : "Answer ready. " + msg.answer);
     if (run.resolveStream) run.resolveStream();
+    updateKeepalive();
     console.info("eddie agent " + JSON.stringify({
       question: run.question,
       model: agentModel ? agentModel.id : null,
@@ -1431,7 +1721,10 @@
       totalMs: usage.totalMs,
       tps: usage.tps,
       sinceAskMs: Math.round(performance.now() - run.started),
+      agentReused: host.dataset.agentReused === "true",
+      transport: agent ? agent.kind : null,
     }));
+    host.dataset.agentDoneMs = String(Math.round(performance.now()));
   }
 
   function renderAnswerText(text, citations) {
@@ -1461,10 +1754,9 @@
     console.debug("eddie agent abort " + reason + " " + run.requestId);
     run.aborted = true;
     run.done = true;
-    if (agentWorker) agentWorker.postMessage({ type: "abort", requestId: run.requestId });
-    agentPending.forEach((p) => p.reject(new Error("aborted")));
-    agentPending.clear();
+    if (agent) agent.postRaw({ type: "abort", requestId: run.requestId });
     if (run.resolveStream) run.resolveStream();
+    updateKeepalive();
     if (reason === "stopped") {
       paintStream(run, true);
       clearAnswerActions();
@@ -1506,6 +1798,7 @@
     hide(answerCard);
     ensureWorker();
     detectAgent();
+    updateKeepalive();
     requestAnimationFrame(() => input.focus());
   }
 
@@ -1517,6 +1810,7 @@
     backdrop.classList.remove("sa-open");
     trigger.style.display = "";
     trigger.focus();
+    updateKeepalive();
   }
 
   function applyTriggerOffsets() {
@@ -1630,6 +1924,27 @@
     openModal();
   });
 
+  // A page going away tells the service worker to drop its ports and stop
+  // any answer it is still generating for us.
+  window.addEventListener("pagehide", () => {
+    if (agentRun && !agentRun.done && agent) agent.postRaw({ type: "abort", requestId: agentRun.requestId });
+    for (const t of [search, agent]) {
+      if (!t || t.kind !== "sw") continue;
+      try {
+        t.postRaw({ type: "disconnect" });
+      } catch (_) {
+        // port already gone
+      }
+    }
+  });
+
   // -- Mount --
   document.body.appendChild(host);
+  host.dataset.persist = config.persist;
+  host.dataset.warm = config.warm;
+  afterLoad(() =>
+    onIdle(() => {
+      ensureTransportPlan().then(() => warmUp()).catch((err) => console.warn("eddie warm-up failed", err));
+    })
+  );
 })();
