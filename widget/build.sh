@@ -266,14 +266,14 @@ bundle() {
 }
 
 bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "" boot.js
-bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js lanes.js agent.js transport.js warm.js
-bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js download.js search-engine.js
-bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-engine.js
+bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js copy.js agent.js transport.js warm.js
+bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js copy.js download.js search-engine.js
+bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-llm.js agent-engine.js
 
-# The agent (agent.js, agent-engine.js) is bundled into the agent tier only;
-# the gpu tier hosts WebGPU search and never imports WebLLM.
-SW_LIBS=(urls.js lanes.js download.js search-engine.js)
-SW_AGENT_LIBS=(agent.js agent-engine.js)
+# The agent (agent.js, agent-llm.js, agent-engine.js) is bundled into the
+# agent tier only; the gpu tier hosts WebGPU search and never imports WebLLM.
+SW_LIBS=(urls.js lanes.js copy.js download.js search-engine.js)
+SW_AGENT_LIBS=(agent.js agent-llm.js agent-engine.js)
 SW_LITE_IMPORTS="import initLiteWasm, * as liteWasmApi from \"./eddie-lite-esm.js\";
 const EDDIE_LITE_WASM = \"$LITE_WASM_FILE\";"
 bundle "$DIST/eddie-sw-lite.js" eddie-sw.js module "$SW_LITE_IMPORTS

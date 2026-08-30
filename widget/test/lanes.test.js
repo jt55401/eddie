@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const L = require("../src/lib/lanes.js");
+const L = Object.assign({}, require("../src/lib/lanes.js"), require("../src/lib/copy.js"));
 
 const minilm = {
   id: "minilm", model: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1", family: "bert", dim: 384,

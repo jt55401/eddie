@@ -500,7 +500,8 @@
       postStatus("loading_model", { lane: laneSummary(lane) });
       const config = loaded["config.json"];
       const tokenizer = loaded["tokenizer.json"];
-      const weights = files.map((f) => loaded[f]).find((b, i) => lib.isWeightsFile(files[i]));
+      const weightsName = files.find((f) => lib.isWeightsFile(f));
+      const weights = weightsName ? loaded[weightsName] : undefined;
       if (!config || !tokenizer || !weights) {
         throw new Error(`lane ${lane.id}: runtime.files must include config.json, tokenizer.json and a weights file`);
       }

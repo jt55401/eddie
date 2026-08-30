@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 // The engine reads its helpers from a lexical EddieLib (the bundles) or env.lib.
-const lib = Object.assign({}, require("../src/lib/urls.js"), require("../src/lib/lanes.js"), require("../src/lib/download.js"));
+const lib = Object.assign({}, require("../src/lib/urls.js"), require("../src/lib/lanes.js"), require("../src/lib/copy.js"), require("../src/lib/download.js"));
 const SE = require("../src/lib/search-engine.js");
 
 const MANIFEST = {

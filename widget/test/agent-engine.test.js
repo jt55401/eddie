@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const lib = require("../src/lib/agent.js");
+const lib = Object.assign({}, require("../src/lib/agent.js"), require("../src/lib/agent-llm.js"));
 const AE = require("../src/lib/agent-engine.js");
 
 /** Fake WebLLM: a scripted engine whose stream honours interruptGenerate the way WebLLM does. */
