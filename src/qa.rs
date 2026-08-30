@@ -60,18 +60,7 @@ static HAS_BEEN_RE: LazyLock<Regex> = LazyLock::new(|| {
 static SENTENCE_SPLITTER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\n.!?]+\s*").unwrap());
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QaEntry {
-    pub question: String,
-    pub answer: String,
-    pub source_title: String,
-    pub source_url: String,
-    pub source_section: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    #[serde(default)]
-    pub confidence: f32,
-}
+pub use crate::records::QaEntry;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaCorpus {

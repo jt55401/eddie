@@ -7,10 +7,12 @@
 //! needs no object-mapping layer.
 //!
 //! ```text
+//! capabilities() -> JSON {dense_wasm, sparse, version}         // what this build can do
 //! manifest(index_bytes) -> JSON Manifest                       // header only
-//! init_index(index_bytes)                                      // parse + validate
-//! init_dense_wasm(lane_id, config, tokenizer, weights)         // bert lanes only
-//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm; sha256 must match manifest.sparse.vocab_hash
+//! init_index(index_bytes)                                      // parse + validate; an embedded sparse vocab enables the sparse arm at once
+//! init_dense_wasm(lane_id, config, tokenizer, weights)         // bert lanes only; `dense-wasm` builds only
+//! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm for `sparse.vocab == "fetch"` indexes; sha256 must match manifest.sparse.vocab_hash
+//! attach_sidecar(bytes) -> JSON {lane, scopes}                 // loads an index.<lane>.ed sidecar's dense sections
 //! search(query, top_k, mode, dense_lane_id|null, dense_query_vec|null)
 //!     -> JSON {results:[PageResult], arms:{dense,sparse,bm25}, degraded:[string], mode, dense_lane}
 //! page(url)   -> JSON {title, url, date, chunks:[{id, section, granularity, text}]}   // finest granularity only, document order
@@ -23,23 +25,35 @@
 //! ```
 //!
 //! All ranking logic lives in [`crate::search`] so it is tested natively.
+//!
+//! Two builds share this file: the full one (`dense-wasm` feature, the
+//! default) embeds queries with candle, the lite one (`--no-default-features`)
+//! has no model code at all and relies on the worker to supply query vectors
+//! (or to skip the dense arm). `capabilities()` tells the worker which one it
+//! loaded.
 
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::sync::Once;
 
-use anyhow::{Context, Result, anyhow};
+#[cfg(feature = "dense-wasm")]
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use serde::Serialize;
-use tokenizers::Tokenizer;
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "dense-wasm")]
 use crate::embed::{DenseEncoder, bert_from_bytes};
 use crate::index::{SearchIndex, query_vector_problem};
+#[cfg(feature = "dense-wasm")]
 use crate::manifest::{DenseSpec, Family, RuntimeSpec, TextKind};
 use crate::search as rank;
 use crate::search::{Mode, PageResult, Query, Weights};
-use crate::sparse::{DEFAULT_MAX_SEQ_LEN, sparse_tokenizer_from_bytes, tokenizer_json_sha256};
+use crate::sparse::{
+    DEFAULT_MAX_SEQ_LEN, WordPiece, sparse_tokenizer_from_bytes, tokenizer_json_sha256,
+};
 
+#[cfg(feature = "dense-wasm")]
 struct DenseRuntime {
     lane: usize,
     spec: DenseSpec,
@@ -48,8 +62,9 @@ struct DenseRuntime {
 
 struct Engine {
     index: SearchIndex,
+    #[cfg(feature = "dense-wasm")]
     dense: Option<DenseRuntime>,
-    sparse_tokenizer: Option<Tokenizer>,
+    sparse_tokenizer: Option<WordPiece>,
 }
 
 thread_local! {
@@ -97,9 +112,35 @@ fn to_json<T: Serialize>(value: &T) -> Result<String, JsValue> {
 /// Embed one query with the lane's WASM embedder; the encoder applies the
 /// lane's query prefix and truncation itself. This is the only place the
 /// WASM module runs a model.
+#[cfg(feature = "dense-wasm")]
 fn embed_query(rt: &DenseRuntime, text: &str) -> Result<Vec<f32>> {
     let mut vecs = rt.embedder.embed(&[text], TextKind::Query)?;
     vecs.pop().context("embedder returned no vector")
+}
+
+#[derive(Serialize)]
+struct Capabilities {
+    /// `init_dense_wasm` exists: this build can embed queries on the CPU.
+    dense_wasm: bool,
+    /// `init_sparse_tokenizer` exists (always; the WordPiece tokenizer is
+    /// built in).
+    sparse: bool,
+    /// Crate version the module was built from.
+    version: &'static str,
+}
+
+/// What this WASM build can do, so the worker can branch between the lite
+/// module (`{dense_wasm: false}`; load `eddie-dense.wasm` for a CPU lane)
+/// and the full one.
+#[wasm_bindgen]
+pub fn capabilities() -> String {
+    install_panic_hook();
+    serde_json::to_string(&Capabilities {
+        dense_wasm: cfg!(feature = "dense-wasm"),
+        sparse: true,
+        version: env!("CARGO_PKG_VERSION"),
+    })
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Read the uncompressed manifest at the head of an `.ed` file.
@@ -112,22 +153,36 @@ pub fn manifest(index_bytes: &[u8]) -> Result<String, JsValue> {
 }
 
 /// Parse and validate the index. Replaces any previously loaded index and
-/// forgets its dense embedder / sparse tokenizer.
+/// forgets its dense embedder. When the index embeds its sparse vocabulary
+/// (`manifest.sparse.vocab == "embedded"`) the sparse arm is ready without
+/// `init_sparse_tokenizer`.
 #[wasm_bindgen]
 pub fn init_index(index_bytes: &[u8]) -> Result<(), JsValue> {
     install_panic_hook();
     let index = SearchIndex::from_bytes(index_bytes).map_err(|e| js_err("index load failed", e))?;
+    let sparse_tokenizer = index.sparse_vocab.clone();
     ENGINE.with(|cell| {
         *cell.borrow_mut() = Some(Engine {
             index,
+            #[cfg(feature = "dense-wasm")]
             dense: None,
-            sparse_tokenizer: None,
+            sparse_tokenizer,
         });
     });
     Ok(())
 }
 
+/// Whether the sparse arm can run queries right now (an embedded vocab or
+/// a tokenizer loaded with `init_sparse_tokenizer`).
+#[wasm_bindgen]
+pub fn sparse_ready() -> Result<bool, JsValue> {
+    install_panic_hook();
+    with_engine(|engine| Ok(engine.index.sparse.is_some() && engine.sparse_tokenizer.is_some()))
+}
+
 /// Load the BERT-family model for a `wasm-candle` lane of the loaded index.
+/// Absent from the lite build (see [`capabilities`]).
+#[cfg(feature = "dense-wasm")]
 #[wasm_bindgen]
 pub fn init_dense_wasm(
     lane_id: &str,
@@ -190,6 +245,23 @@ pub fn init_dense_wasm(
             embedder,
         });
         Ok(())
+    })
+}
+
+/// Attach a sidecar file (`manifest.sidecars[].file`, fetched relative to
+/// the index URL): its `dense/<scope>/<lane>` sections join the loaded
+/// index after the identity (`index_id`), chunk count and lane shape are
+/// checked. Until a lane's sidecar is attached, searches that ask for it
+/// report the dense arm as skipped instead of failing.
+#[wasm_bindgen]
+pub fn attach_sidecar(bytes: &[u8]) -> Result<String, JsValue> {
+    install_panic_hook();
+    with_engine_mut(|engine| {
+        let attached = engine
+            .index
+            .attach_sidecar(bytes)
+            .map_err(|e| js_err("attach_sidecar", format!("{:#}", e)))?;
+        to_json(&attached)
     })
 }
 
@@ -261,10 +333,25 @@ fn resolve_dense(
         let id = lane_id.ok_or_else(|| {
             JsValue::from_str("dense_lane_id is required when dense_query_vec is given")
         })?;
-        let lane = engine
-            .index
-            .dense_lane(id)
-            .ok_or_else(|| js_err("search", format!("unknown dense lane {:?}", id)))?;
+        let Some(lane) = engine.index.dense_lane(id) else {
+            // A lane the manifest lists but whose chunk vectors live in a
+            // sidecar that is not attached yet degrades; a lane the manifest
+            // never heard of is caller misuse.
+            return match engine
+                .index
+                .manifest
+                .sidecar_for(crate::index::SCOPE_CHUNKS, id)
+            {
+                Some(side) => Ok((
+                    None,
+                    Some(format!(
+                        "dense: lane {:?} is not attached (sidecar {} not loaded)",
+                        id, side.file
+                    )),
+                )),
+                None => Err(js_err("search", format!("unknown dense lane {:?}", id))),
+            };
+        };
         let dim = engine.index.dense[lane].dim;
         if v.len() != dim {
             return Err(js_err(
@@ -285,28 +372,38 @@ fn resolve_dense(
         }
         return Ok((Some((lane, id.to_string(), v)), None));
     }
-    match &engine.dense {
-        Some(rt) if lane_id.is_none() || lane_id == Some(rt.spec.id.as_str()) => {
-            match embed_query(rt, query) {
-                Ok(v) => Ok((Some((rt.lane, rt.spec.id.clone(), v)), None)),
-                Err(e) => Ok((
-                    None,
-                    Some(format!(
-                        "dense: embedding failed for lane {:?}: {:#}",
-                        rt.spec.id, e
+    #[cfg(feature = "dense-wasm")]
+    {
+        match &engine.dense {
+            Some(rt) if lane_id.is_none() || lane_id == Some(rt.spec.id.as_str()) => {
+                match embed_query(rt, query) {
+                    Ok(v) => Ok((Some((rt.lane, rt.spec.id.clone(), v)), None)),
+                    Err(e) => Ok((
+                        None,
+                        Some(format!(
+                            "dense: embedding failed for lane {:?}: {:#}",
+                            rt.spec.id, e
+                        )),
                     )),
-                )),
+                }
             }
-        }
-        Some(rt) => Ok((
-            None,
-            Some(format!(
-                "dense: lane {:?} requested but only {:?} is loaded in WASM",
-                lane_id.unwrap_or(""),
-                rt.spec.id
+            Some(rt) => Ok((
+                None,
+                Some(format!(
+                    "dense: lane {:?} requested but only {:?} is loaded in WASM",
+                    lane_id.unwrap_or(""),
+                    rt.spec.id
+                )),
             )),
-        )),
-        None => Ok((None, None)),
+            None => Ok((None, None)),
+        }
+    }
+    #[cfg(not(feature = "dense-wasm"))]
+    {
+        // The lite build never embeds: without a caller-supplied vector the
+        // dense arm is skipped and retrieve() reports it.
+        let _ = (engine, query, lane_id);
+        Ok((None, None))
     }
 }
 

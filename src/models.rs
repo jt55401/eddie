@@ -62,6 +62,7 @@ pub fn runtime_spec(kind: RuntimeKind) -> RuntimeSpec {
     match kind {
         RuntimeKind::WasmCandle => RuntimeSpec::WasmCandle {
             files: WASM_CANDLE_FILES.iter().map(|s| s.to_string()).collect(),
+            base_url: None,
         },
         RuntimeKind::WebgpuOnnx {
             repo,
@@ -73,6 +74,7 @@ pub fn runtime_spec(kind: RuntimeKind) -> RuntimeSpec {
             dtype: dtype.to_string(),
             dtype_f16: dtype_f16.map(|s| s.to_string()),
             pooling: pooling.to_string(),
+            base_url: None,
         },
     }
 }

@@ -660,7 +660,7 @@ fn trim_to_words(text: &str, terms: &HashSet<&str>, max_chars: usize) -> String 
 /// index stores for them (see `crate::sparse::sparse_query_terms`). Kept as a
 /// `Result` for callers that treat tokenizer failures as errors.
 pub fn sparse_query_terms_local(
-    tokenizer: &tokenizers::Tokenizer,
+    tokenizer: &crate::wordpiece::WordPiece,
     idf: &dyn Fn(u32) -> Option<f32>,
     query: &str,
 ) -> Result<Vec<SparseTerm>> {
@@ -1259,8 +1259,8 @@ mod tests {
         assert!(query_terms("??").is_empty());
     }
 
-    fn qa_entry(question: &str, answer: &str) -> crate::qa::QaEntry {
-        crate::qa::QaEntry {
+    fn qa_entry(question: &str, answer: &str) -> crate::records::QaEntry {
+        crate::records::QaEntry {
             question: question.into(),
             answer: answer.into(),
             source_title: "Programming Languages".into(),
@@ -1271,7 +1271,7 @@ mod tests {
         }
     }
 
-    fn qa_index(entries: Vec<crate::qa::QaEntry>) -> SearchIndex {
+    fn qa_index(entries: Vec<crate::records::QaEntry>) -> SearchIndex {
         let corpus = synthetic_corpus(4, 4, 5);
         let mut b = IndexBuilder::new();
         b.add_chunks(corpus.metadata.clone(), corpus.texts.clone(), vec![0; 4])
