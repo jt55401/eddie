@@ -33,6 +33,7 @@
   // Liveness checks must tolerate a busy worker: model loading blocks its
   // thread for seconds at a time (ONNX session creation, safetensors parsing).
   const PING_TIMEOUT_MS = 10000;
+  const IDLE_PING_TIMEOUT_MS = 2000;
   const RECONNECT_HELLO_TIMEOUT_MS = 10000;
   const KEEPALIVE_MS = 15000;
   const REGISTER_TIMEOUT_MS = 20000;
@@ -230,8 +231,8 @@
       if (!this.port) throw new Error("service worker transport not connected");
       this.port.postMessage(msg);
     }
-    ping() {
-      return this.call("ping", {}, { timeoutMs: this.pingTimeoutMs });
+    ping(timeoutMs) {
+      return this.call("ping", {}, { timeoutMs: timeoutMs || this.pingTimeoutMs });
     }
     state() {
       return this.call("state", {}, { timeoutMs: this.pingTimeoutMs });
@@ -256,10 +257,15 @@
       });
       return this.reconnecting;
     }
-    /** Ping; on silence reconnect. Resolves true when the channel is usable. */
-    async ensureAlive() {
+    /**
+     * Ping; on silence reconnect. Resolves true when the channel is usable.
+     * `timeoutMs` may be short when the worker is known to be idle (a live
+     * idle worker answers within milliseconds; a stopped one never does),
+     * and must be generous while it may be loading a model.
+     */
+    async ensureAlive(timeoutMs) {
       try {
-        await this.ping();
+        await this.ping(timeoutMs);
         return true;
       } catch (err) {
         if (this.closed) return false;
@@ -410,6 +416,7 @@
   return {
     HELLO_TIMEOUT_MS,
     PING_TIMEOUT_MS,
+    IDLE_PING_TIMEOUT_MS,
     KEEPALIVE_MS,
     Emitter,
     BaseTransport,

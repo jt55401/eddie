@@ -892,7 +892,7 @@
       // which re-sends init while the modal is open. A worker that is
       // streaming load status is alive by definition (and may be too busy
       // to answer a ping in time).
-      if (search.kind === "sw" && initSent && workerState !== "loading") await search.ensureAlive();
+      if (search.kind === "sw" && initSent && workerState !== "loading") await search.ensureAlive(lib.IDLE_PING_TIMEOUT_MS);
       if (search && !initSent) postInit(false);
       return;
     }
@@ -1588,7 +1588,7 @@
         // The service worker may still hold the model from an earlier page
         // (or may have been stopped meanwhile: reconnect first).
         try {
-          if (!(await t.ensureAlive())) throw new Error("the answer engine is unreachable");
+          if (!(await t.ensureAlive(lib.IDLE_PING_TIMEOUT_MS))) throw new Error("the answer engine is unreachable");
           const st = await t.state();
           if (lib.canReuseAgent(st.agent, agentModel.id)) {
             agentLoaded = true;
