@@ -100,3 +100,45 @@ test("wasm lanes the WASM loader cannot run are skipped with a reason", () => {
   assert.equal(none.candidates.length, 0);
   assert.match(none.reason, /WASM loader/);
 });
+
+test("site-bundled lanes: origin, file URLs next to the index, and a cache name that never collides with the repo copy", () => {
+  const site = { id: "bge", model: "BAAI/bge-small-en-v1.5", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "model.safetensors"], base_url: "models/bge/" } };
+  const hf = { id: "bge", model: "BAAI/bge-small-en-v1.5", runtime: { kind: "wasm-candle", files: ["config.json"] } };
+  assert.equal(L.laneOrigin(site), "site");
+  assert.equal(L.laneOrigin(hf), "huggingface");
+  assert.equal(L.laneBaseUrl(hf), null);
+  assert.equal(L.siteModelUrl(site, "model.safetensors", "https://x.test/eddie/index.ed?v=1"), "https://x.test/eddie/models/bge/model.safetensors");
+  assert.equal(L.siteModelUrl({ runtime: { base_url: "models/bge" } }, "/config.json", "https://x.test/eddie/index.ed"), "https://x.test/eddie/models/bge/config.json");
+  assert.equal(L.siteModelUrl(hf, "config.json", "https://x.test/eddie/index.ed"), null);
+  assert.equal(L.laneFileName(site, "model.safetensors"), "@site/model.safetensors");
+  assert.equal(L.laneFileName(hf, "model.safetensors"), "model.safetensors");
+});
+
+test("sidecar lookup follows manifest.sidecars per scope and lane", () => {
+  const manifest = {
+    sidecars: [
+      { file: "index.bge.ed", lane: "bge", scope: "qa", bytes: 43643 },
+      { file: "index.qwen3e.ed", lane: "qwen3e", scope: "chunks", bytes: 533650 },
+      { file: "index.qwen3e.ed", lane: "qwen3e", scope: "qa", bytes: 533650 },
+    ],
+  };
+  assert.equal(L.sidecarFor(manifest, "chunks", "qwen3e").file, "index.qwen3e.ed");
+  assert.equal(L.sidecarFor(manifest, "chunks", "bge"), null, "wasm-candle chunk vectors stay in the core file");
+  assert.equal(L.sidecarFor(manifest, "qa", "bge").file, "index.bge.ed");
+  assert.equal(L.laneSidecarBytes(manifest, "qwen3e"), 533650);
+  assert.equal(L.laneSidecarBytes(manifest, "bge"), 0);
+  assert.equal(L.laneSidecarBytes({}, "bge"), 0);
+});
+
+test("consent copy names the size, the origin and the sidecar bytes", () => {
+  assert.equal(
+    L.consentCopy({ sizeBytes: 67458275, model: "bge-small-en-v1.5", origin: "site" }),
+    "Semantic search runs bge-small-en-v1.5 in your browser. That needs a one-time 67 MB download from this site, kept in your browser's cache for next time."
+  );
+  assert.equal(
+    L.consentCopy({ sizeBytes: 900e6, model: "Qwen3-Embedding-0.6B-ONNX", origin: "huggingface", sidecarBytes: 533650 }),
+    "Semantic search runs Qwen3-Embedding-0.6B-ONNX in your browser. That needs a one-time 900 MB download from huggingface.co, plus 534 KB of index vectors from this site, kept in your browser's cache for next time."
+  );
+  assert.match(L.consentCopy({ sizeBytes: null, model: "m" }), /a one-time download \(size unknown\) from huggingface\.co/);
+  assert.equal(L.consentCopy({ sizeBytes: 1e6, model: "m", origin: "site", consentText: "{model}: {size} from {origin}" }), "m: 1 MB from this site");
+});

@@ -69,6 +69,45 @@
     return /\.(safetensors|bin|pt|gguf|onnx)$/i.test(String(file));
   }
 
+  /** Site-relative directory the lane's model files live in (`eddie index --bundle-model`), or null for HuggingFace. */
+  function laneBaseUrl(lane) {
+    const b = lane && lane.runtime && lane.runtime.base_url;
+    return typeof b === "string" && b.trim() ? b.trim() : null;
+  }
+
+  /** Where the lane's files are downloaded from: "site" (bundled next to the index) or "huggingface". */
+  function laneOrigin(lane) {
+    return laneBaseUrl(lane) ? "site" : "huggingface";
+  }
+
+  /** Absolute URL of a site-bundled model file, resolved against the index URL (no version parameter yet). */
+  function siteModelUrl(lane, file, indexUrl) {
+    const base = laneBaseUrl(lane);
+    if (!base) return null;
+    return new URL(base.replace(/\/?$/, "/") + String(file).replace(/^\//, ""), indexUrl).href;
+  }
+
+  /**
+   * Name a lane's file is cached under (see urls.js cacheKey): a bundled f16
+   * copy and the HuggingFace original differ, so site files get their own
+   * prefix and never collide with a repo download of the same name.
+   */
+  function laneFileName(lane, file) {
+    return laneBaseUrl(lane) ? "@site/" + file : String(file);
+  }
+
+  /** The sidecar entry that holds `scope`'s section of `laneId`, or null when the section is in the core file. */
+  function sidecarFor(manifest, scope, laneId) {
+    const list = manifest && Array.isArray(manifest.sidecars) ? manifest.sidecars : [];
+    return list.find((s) => s.scope === scope && s.lane === laneId) || null;
+  }
+
+  /** Bytes of the sidecar file(s) a lane's chunk vectors need, counted once per file. */
+  function laneSidecarBytes(manifest, laneId) {
+    const side = sidecarFor(manifest, "chunks", laneId);
+    return side && Number.isFinite(Number(side.bytes)) ? Number(side.bytes) : 0;
+  }
+
   /**
    * Why the WASM loader (init_dense_wasm) cannot run a wasm-candle lane, or
    * null when it can: it accepts BERT-family lanes with config.json,
@@ -150,16 +189,21 @@
 
   /**
    * Consent card copy for a model download. `consentText` (site override) may
-   * contain `{size}` and `{model}` placeholders.
+   * contain `{size}`, `{model}` and `{origin}` placeholders.
+   *   sizeBytes    model download (null when unknown)
+   *   origin       "site" | "huggingface" (where the model is fetched from)
+   *   sidecarBytes index vectors fetched from the site for this lane (0 when in the core index)
    */
   function consentCopy(opts) {
     const size = formatBytes(opts.sizeBytes);
     const model = opts.model || "the search model";
+    const origin = opts.origin === "site" ? "this site" : "huggingface.co";
     if (opts.consentText) {
-      return opts.consentText.replace(/\{size\}/g, size).replace(/\{model\}/g, model);
+      return opts.consentText.replace(/\{size\}/g, size).replace(/\{model\}/g, model).replace(/\{origin\}/g, origin);
     }
-    const sized = opts.sizeBytes == null ? "a one-time download (size unknown)" : `a one-time ${size} download`;
-    let text = `Semantic search runs a language model in your browser. That needs ${sized} of ${model}, kept in your browser's cache for next time.`;
+    const sized = opts.sizeBytes == null ? `a one-time download (size unknown) from ${origin}` : `a one-time ${size} download from ${origin}`;
+    const side = opts.sidecarBytes > 0 ? `, plus ${formatBytes(opts.sidecarBytes)} of index vectors from this site` : "";
+    let text = `Semantic search runs ${model} in your browser. That needs ${sized}${side}, kept in your browser's cache for next time.`;
     if (opts.saveData) {
       text = "Data saver is on. " + text;
     }
@@ -198,6 +242,12 @@
     laneRevision,
     laneFiles,
     isWeightsFile,
+    laneBaseUrl,
+    laneOrigin,
+    siteModelUrl,
+    laneFileName,
+    sidecarFor,
+    laneSidecarBytes,
     wasmLaneProblem,
     chooseDenseLanes,
     pickDtype,

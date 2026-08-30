@@ -3,17 +3,28 @@
 // Eddie search engine, host-independent.
 //
 // Everything the search worker does (manifest, lane choice, downloads with
-// timeouts and retry, IndexedDB cache, sparse tokenizer hash check, the
+// timeouts and retry, IndexedDB cache, sidecars, sparse tokenizer, the
 // transformers.js WebGPU lane, the WASM calls and the consent handshake)
 // lives here, behind an `env` the host supplies:
 //
 //   createSearchEngine({
 //     post(message)                 broadcast sink: status and ready events
-//     loadWasm(baseUrl, version)    -> Promise of the wasm-bindgen API object
+//     loadWasm(baseUrl, version, variant)
+//                                   -> Promise of the wasm-bindgen API object;
+//                                   variant is "lite" (always first) or
+//                                   "dense" (only when a wasm-candle lane is
+//                                   about to run); a host without the dense
+//                                   module rejects and the lane degrades
 //     loadTransformers()            -> Promise of the transformers.js module
 //     canRunWebGpuLane              false when this host cannot run webgpu-onnx lanes
 //     navigator, indexedDB          optional overrides (tests)
 //   })
+//
+// Lite first: the lite module (no model code, a quarter of the dense one
+// after brotli) answers keyword and sparse queries at once. When a visitor
+// accepts a CPU dense lane the dense module is loaded and the index, its
+// attached sidecars and the sparse tokenizer are handed over to it; the
+// bytes are kept only while that hand-over may still happen.
 //
 // `engine.handle(msg, reply)` dispatches one protocol message; `reply` is
 // the sink for that message's own answers (search_result, cache_result,
@@ -42,6 +53,19 @@
   const PROGRESS_INTERVAL_MS = 80;
   const NOT_LOADED = "index not loaded yet";
 
+  /** What a wasm-bindgen API object can do; older glue without capabilities() is the full build. */
+  function wasmCapabilities(api) {
+    if (api && typeof api.capabilities === "function") {
+      try {
+        const c = JSON.parse(api.capabilities());
+        return { dense_wasm: !!c.dense_wasm, sparse: c.sparse !== false, version: c.version || null };
+      } catch (_) {
+        // fall through to feature detection
+      }
+    }
+    return { dense_wasm: !!(api && typeof api.init_dense_wasm === "function"), sparse: true, version: null };
+  }
+
   function createSearchEngine(env) {
     const lib = typeof EddieLib === "object" && EddieLib ? EddieLib : env.lib;
     const post = env.post;
@@ -49,7 +73,8 @@
     const idb = env.indexedDB !== undefined ? env.indexedDB : globalThis.indexedDB;
     const canRunWebGpuLane = env.canRunWebGpuLane !== false;
 
-    let wasm = null; // wasm-bindgen API object once loaded
+    let wasm = null; // wasm-bindgen API object once loaded (lite, then dense after a hand-over)
+    let caps = null; // wasmCapabilities(wasm)
 
     const state = {
       phase: "idle", // idle | loading | awaiting_consent | ready | error | dead
@@ -64,6 +89,11 @@
       wasmReady: false,
       indexLoaded: false,
       manifest: null,
+      // Bytes kept for the lite -> dense hand-over (dropped once it is done or impossible).
+      indexBytes: null,
+      sparseBytes: null,
+      sidecarBytes: Object.create(null), // file -> Uint8Array
+      attachedSidecars: [], // file names attached to the current module
       candidates: [],
       candidateReason: null,
       hostSkipped: [], // webgpu-onnx lane ids this host cannot run
@@ -73,6 +103,7 @@
       degraded: [],
       gpu: null, // { adapter, hasF16, maxBufferSize } | false
       db: undefined, // IDBDatabase | null (unavailable)
+      siteSizes: Object.create(null), // lane id -> measured bundled download bytes
     };
 
     // -- dispatch ---------------------------------------------------------
@@ -113,6 +144,7 @@
         manifest: state.manifest ? manifestSummary() : null,
         lanes: laneList(),
         hostSkippedLanes: state.hostSkipped.slice(),
+        wasm: caps ? (caps.dense_wasm ? "dense" : "lite") : null,
       };
     }
 
@@ -153,6 +185,7 @@
           state.phase = "awaiting_consent";
           return;
         }
+        releaseHandoverBytes();
         state.phase = "ready";
         postReady();
         evictStaleFiles();
@@ -172,24 +205,65 @@
       }
     }
 
-    async function ensureWasm() {
-      if (state.wasmReady) return;
-      postStatus("loading_wasm");
+    async function loadWasmVariant(variant) {
       if (typeof WebAssembly !== "object") {
         throw unsupported("This browser can't run WebAssembly.");
       }
+      let api;
       try {
-        wasm = await env.loadWasm(state.baseUrl, state.version);
+        api = await env.loadWasm(state.baseUrl, state.version, variant);
       } catch (err) {
         if (typeof WebAssembly === "object" && (err instanceof WebAssembly.CompileError || err instanceof WebAssembly.LinkError)) {
           throw unsupported("This browser can't run the search engine (WebAssembly SIMD is required).");
         }
         throw err;
       }
-      if (!wasm || typeof wasm.search !== "function") {
-        throw new Error("loadWasm did not return the Eddie WASM API");
+      if (!api || typeof api.search !== "function") {
+        throw new Error(`loadWasm(${variant}) did not return the Eddie WASM API`);
       }
+      return api;
+    }
+
+    async function ensureWasm() {
+      if (state.wasmReady) return;
+      postStatus("loading_wasm", { variant: "lite" });
+      wasm = await loadWasmVariant("lite");
+      caps = wasmCapabilities(wasm);
       state.wasmReady = true;
+    }
+
+    /**
+     * Hand the loaded index over to the dense module (candle embedder) when
+     * the running one cannot embed. Everything the lite module was given is
+     * given again: index bytes, attached sidecars, a fetched sparse tokenizer.
+     */
+    async function ensureDenseWasm() {
+      if (caps && caps.dense_wasm) return;
+      if (!state.indexBytes) throw new Error("dense hand-over: index bytes were released");
+      postStatus("loading_wasm", { variant: "dense" });
+      const dense = await loadWasmVariant("dense");
+      const dcaps = wasmCapabilities(dense);
+      if (!dcaps.dense_wasm) throw new Error("eddie-dense.wasm has no CPU embedder (capabilities.dense_wasm is false)");
+      dense.init_index(state.indexBytes);
+      for (const file of state.attachedSidecars) {
+        if (state.sidecarBytes[file]) dense.attach_sidecar(state.sidecarBytes[file]);
+      }
+      if (state.sparse && state.sparseBytes) dense.init_sparse_tokenizer(state.sparseBytes);
+      wasm = dense;
+      caps = dcaps;
+    }
+
+    /** A wasm-candle lane could still ask for the dense module later. */
+    function handoverPossible() {
+      if (!caps || caps.dense_wasm || state.dense) return false;
+      return state.candidates.slice(state.laneIndex).some((lane) => lib.isWasmLane(lane));
+    }
+
+    function releaseHandoverBytes() {
+      if (handoverPossible()) return;
+      state.indexBytes = null;
+      state.sparseBytes = null;
+      state.sidecarBytes = Object.create(null);
     }
 
     async function ensureIndex() {
@@ -209,14 +283,19 @@
       });
       state.manifest = JSON.parse(wasm.manifest(bytes));
       wasm.init_index(bytes);
+      state.indexBytes = bytes;
       state.indexLoaded = true;
       state.loadedIndexUrl = state.indexUrl;
       state.dense = null;
       state.sparse = false;
+      state.sparseBytes = null;
+      state.sidecarBytes = Object.create(null);
+      state.attachedSidecars = [];
       state.degraded = [];
       state.hostSkipped = [];
       state.laneIndex = 0;
       state.gpu = null;
+      state.siteSizes = Object.create(null);
       postStatus("index_ready", { manifest: manifestSummary(), lanes: laneList() });
     }
 
@@ -253,12 +332,21 @@
       }
     }
 
+    /**
+     * The sparse arm: nothing to fetch when the index embeds its vocabulary
+     * (`sparse_ready()` after init_index); otherwise tokenizer.json from the
+     * repo the manifest names, checked against `vocab_hash`.
+     */
     async function ensureSparse() {
       if (state.sparse) return;
       const spec = state.manifest && state.manifest.sparse;
       if (!spec) return;
       if (state.degraded.some((d) => d.startsWith("sparse:"))) return;
       try {
+        if (typeof wasm.sparse_ready === "function" && wasm.sparse_ready()) {
+          state.sparse = true;
+          return;
+        }
         const repo = spec.tokenizer || spec.model;
         const rev = spec.revision || "main";
         let bytes = await getModelFile(repo, rev, "tokenizer.json", "sparse");
@@ -273,6 +361,7 @@
         }
         wasm.init_sparse_tokenizer(bytes);
         state.sparse = true;
+        state.sparseBytes = bytes;
       } catch (err) {
         if (isFatal(err)) throw err;
         console.warn("eddie: sparse arm unavailable", err);
@@ -288,13 +377,10 @@
         try {
           const cached = await laneCached(lane);
           if (!cached && !state.consent[lane.id]) {
-            postStatus("consent_required", {
-              lane: laneSummary(lane),
-              sizeBytes: lib.laneDownloadBytes(lane),
-              saveData: !!(nav && nav.connection && nav.connection.saveData),
-            });
+            postStatus("consent_required", await consentDetails(lane));
             return "consent";
           }
+          await ensureSidecar(lane, "chunks");
           if (lib.isWasmLane(lane)) {
             await loadWasmLane(lane);
           } else {
@@ -315,14 +401,86 @@
       return "none";
     }
 
+    /** What the consent card needs: the lane, the real download size and where it comes from. */
+    async function consentDetails(lane) {
+      return {
+        lane: laneSummary(lane),
+        sizeBytes: await laneDownloadBytes(lane),
+        origin: lib.laneOrigin(lane),
+        sidecarBytes: lib.laneSidecarBytes(state.manifest, lane.id),
+        saveData: !!(nav && nav.connection && nav.connection.saveData),
+      };
+    }
+
+    /**
+     * Download size of a lane: the table estimate for HuggingFace repos; for
+     * a site-bundled wasm lane the Content-Length of its files (one HEAD per
+     * file, same origin), or null when the server does not say.
+     */
+    async function laneDownloadBytes(lane) {
+      if (lib.laneOrigin(lane) !== "site" || !lib.isWasmLane(lane)) return lib.laneDownloadBytes(lane);
+      if (state.siteSizes[lane.id] !== undefined) return state.siteSizes[lane.id];
+      const doFetch = env.fetch || globalThis.fetch;
+      let total = 0;
+      try {
+        for (const file of lib.laneFiles(lane)) {
+          const res = await doFetch(laneFileUrl(lane, file), { method: "HEAD" });
+          const len = res && res.ok && res.headers && res.headers.get ? Number(res.headers.get("Content-Length")) : NaN;
+          if (!Number.isFinite(len) || len <= 0) {
+            total = null;
+            break;
+          }
+          total += len;
+        }
+      } catch (_) {
+        total = null;
+      }
+      state.siteSizes[lane.id] = total;
+      return total;
+    }
+
+    /** `manifest.sidecars` file for (`scope`, lane), fetched next to the index and attached once. */
+    async function ensureSidecar(lane, scope) {
+      const side = lib.sidecarFor(state.manifest, scope, lane.id);
+      if (!side) return false;
+      if (state.attachedSidecars.includes(side.file)) return true;
+      const url = lib.withVersion(new URL(side.file, state.indexUrl).href, state.version);
+      let last = 0;
+      postStatus("loading_sidecar", { lane: laneSummary(lane), file: side.file, progress: null, loaded: 0, total: side.bytes || null });
+      const bytes = await lib.fetchBytes(url, {
+        fetch: env.fetch,
+        timeoutMs: 180000,
+        onProgress: (loaded, total) => {
+          const now = Date.now();
+          if (total && now - last < PROGRESS_INTERVAL_MS && loaded !== total) return;
+          last = now;
+          postStatus("loading_sidecar", { lane: laneSummary(lane), file: side.file, progress: total ? loaded / total : null, loaded, total });
+        },
+      });
+      if (typeof wasm.attach_sidecar !== "function") {
+        throw new Error("this WASM build cannot attach sidecars (rebuild the widget)");
+      }
+      wasm.attach_sidecar(bytes);
+      state.attachedSidecars.push(side.file);
+      if (handoverPossible()) state.sidecarBytes[side.file] = bytes;
+      return true;
+    }
+
+    function laneFileUrl(lane, file) {
+      const site = lib.siteModelUrl(lane, file, state.indexUrl);
+      if (site) return lib.withVersion(site, state.version);
+      return lib.hfFileUrl(lib.laneRepo(lane), lib.laneRevision(lane), file);
+    }
+
     async function loadWasmLane(lane) {
       const repo = lib.laneRepo(lane);
       const rev = lib.laneRevision(lane);
       const files = lib.laneFiles(lane);
       const loaded = {};
       for (const file of files) {
-        loaded[file] = await getModelFile(repo, rev, file, lane.id);
+        loaded[file] = await getModelFile(repo, rev, file, lane.id, { url: laneFileUrl(lane, file), name: lib.laneFileName(lane, file) });
       }
+      await ensureDenseWasm();
       postStatus("loading_model", { lane: laneSummary(lane) });
       const config = loaded["config.json"];
       const tokenizer = loaded["tokenizer.json"];
@@ -345,6 +503,7 @@
         tf.env.useCustomCache = true;
         tf.env.customCache = transformersCache();
       }
+      if (tf.env) configureModelSource(tf.env, lane);
       if (env.configureTransformers) env.configureTransformers(tf);
       const dtype = lib.pickDtype(runtime, state.gpu && state.gpu.hasF16);
       let last = 0;
@@ -388,6 +547,28 @@
       await idbMetaPut(webGpuMarker(lane, dtype), Date.now());
     }
 
+    /**
+     * Point transformers.js at the site-hosted copy of a webgpu-onnx repo
+     * when the manifest gives one (`runtime.base_url`, relative to the index
+     * URL; the directory mirrors the repo's file layout: config.json,
+     * tokenizer.json, onnx/model_q4.onnx ...). transformers.js joins
+     * remoteHost, remotePathTemplate and the file name with "/"; "." as the
+     * template keeps the model id out of the path and the URL parser folds
+     * the "./" away. Without a base_url the defaults (huggingface.co) are
+     * restored, since these settings are global to the module.
+     */
+    function configureModelSource(tfEnv, lane) {
+      const base = lib.siteModelUrl(lane, "", state.indexUrl);
+      if (base) {
+        tfEnv.allowRemoteModels = true;
+        tfEnv.remoteHost = base;
+        tfEnv.remotePathTemplate = ".";
+      } else {
+        tfEnv.remoteHost = "https://huggingface.co/";
+        tfEnv.remotePathTemplate = "{model}/resolve/{revision}/";
+      }
+    }
+
     function readyMessage() {
       return {
         type: "ready",
@@ -398,6 +579,7 @@
         degraded: lib.filterDesignDegraded(unique(state.degraded)),
         manifest: manifestSummary(),
         hostSkippedLanes: state.hostSkipped.slice(),
+        wasm: caps && caps.dense_wasm ? "dense" : "lite",
       };
     }
 
@@ -425,7 +607,9 @@
           requestId: msg.requestId,
           cached,
           lane: lane ? laneSummary(lane) : null,
-          sizeBytes: lane ? lib.laneDownloadBytes(lane) : 0,
+          sizeBytes: lane ? await laneDownloadBytes(lane) : 0,
+          origin: lane ? lib.laneOrigin(lane) : null,
+          sidecarBytes: lane ? lib.laneSidecarBytes(state.manifest, lane.id) : 0,
           hostSkippedLanes: state.hostSkipped.slice(),
           phase: state.phase,
         });
@@ -441,7 +625,7 @@
         const repo = lib.laneRepo(lane);
         const rev = lib.laneRevision(lane);
         for (const file of lib.laneFiles(lane)) {
-          if (!(await idbHas(lib.cacheKey(repo, rev, file)))) return false;
+          if (!(await idbHas(lib.cacheKey(repo, rev, lib.laneFileName(lane, file))))) return false;
         }
         return true;
       }
@@ -472,6 +656,21 @@
       }
     }
 
+    /**
+     * The qa-scope vectors of the active lane live in a sidecar the first QA
+     * lookup fetches (never before: most searches never show the FAQ card).
+     * A failed fetch leaves the lexical ranking in place.
+     */
+    async function ensureQaVectors() {
+      if (!state.dense || !hasSection("qa")) return;
+      try {
+        await ensureSidecar(state.dense.lane, "qa");
+      } catch (err) {
+        if (isFatal(err)) throw err;
+        console.warn("eddie: qa sidecar unavailable; FAQ ranking is lexical", err);
+      }
+    }
+
     async function handleSearch(msg, reply) {
       const requestId = msg.requestId;
       try {
@@ -495,6 +694,7 @@
         }
         let qa = undefined;
         if (msg.qa && Number(msg.qa) > 0 && hasSection("qa") && (vec || !laneId)) {
+          await ensureQaVectors();
           qa = JSON.parse(wasm.qa_lookup(query, laneId, vec, Number(msg.qa)));
         }
         reply({
@@ -531,6 +731,7 @@
           reply({ type: "qa_result", requestId: msg.requestId, hits: [] });
           return;
         }
+        await ensureQaVectors();
         const { laneId, vec } = await queryVector(query, "dense");
         const hits = JSON.parse(wasm.qa_lookup(query, laneId, vec, k));
         reply({ type: "qa_result", requestId: msg.requestId, hits });
@@ -560,9 +761,15 @@
 
     // -- model files --------------------------------------------------------
 
+    /**
+     * A model file from the IndexedDB cache or the network. `opts.url` and
+     * `opts.name` override the HuggingFace URL and cache name (site-bundled
+     * files); `opts.noCache` skips the cache read.
+     */
     async function getModelFile(repo, rev, file, laneId, opts) {
-      const key = lib.cacheKey(repo, rev, file);
-      if (!(opts && opts.noCache)) {
+      const o = opts || {};
+      const key = lib.cacheKey(repo, rev, o.name || file);
+      if (!o.noCache) {
         const cached = await idbGet(key);
         if (cached) {
           const bytes = new Uint8Array(cached);
@@ -570,7 +777,7 @@
           return bytes;
         }
       }
-      const url = lib.hfFileUrl(repo, rev, file);
+      const url = o.url || lib.hfFileUrl(repo, rev, file);
       let last = 0;
       postStatus("downloading_model", { lane: laneId, file, progress: null, loaded: 0, total: null });
       const bytes = await lib.fetchBytes(url, {
@@ -696,6 +903,7 @@
         kind: lane.runtime ? lane.runtime.kind : null,
         repo: lib.laneRepo(lane),
         dim: lane.dim,
+        origin: lib.laneOrigin(lane),
       };
     }
 
@@ -712,6 +920,7 @@
         pages: m.pages,
         sections: m.sections || [],
         sparse: !!m.sparse,
+        sidecars: Array.isArray(m.sidecars) ? m.sidecars.length : 0,
       };
     }
 
@@ -772,5 +981,5 @@
     return typeof message === "string" && message.indexOf(NOT_LOADED) === 0;
   }
 
-  return { createSearchEngine, NOT_LOADED, isNotLoadedMessage };
+  return { createSearchEngine, wasmCapabilities, NOT_LOADED, isNotLoadedMessage };
 });

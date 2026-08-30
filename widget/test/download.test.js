@@ -151,3 +151,18 @@ test("sha256 verification of a fetched file rejects a tampered body", async () =
   await assert.rejects(downloadVerified("https://x/tokenizer.json", want, fetchImpl), /vocab_hash/);
   assert.equal(calls, 1, "a hash mismatch is not a network error and must not retry");
 });
+
+test("a Content-Encoding response is read to the end without trusting its Content-Length", async () => {
+  const chunks = [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5, 6, 7])];
+  let i = 0;
+  const response = {
+    ok: true,
+    status: 200,
+    headers: { get: (h) => (h === "Content-Length" ? "3" : h === "Content-Encoding" ? "br" : null) },
+    body: { getReader: () => ({ read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }) }) },
+  };
+  const progress = [];
+  const bytes = await D.fetchBytes("https://x/index.ed", { fetch: async () => response, onProgress: (l, t) => progress.push([l, t]) });
+  assert.deepEqual(Array.from(bytes), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(progress, [[0, null], [3, null], [7, null]], "no total: progress is indeterminate");
+});
