@@ -4,7 +4,7 @@
 // agent, so a navigation within the site does not throw away the loaded
 // index, the dense model or the WebLLM engine.
 //
-// One source, three builds (widget/build.sh), because a service worker may
+// One source, four builds (widget/build.sh), because a service worker may
 // not import() anything: every dependency is a static import that build.sh
 // prepends per tier, along with `EDDIE_SW_TIER`:
 //
@@ -12,13 +12,15 @@
 //   eddie-sw-dense.js  lite + initDenseWasm / denseWasmApi (eddie-dense-esm.js)
 //   eddie-sw-gpu.js    lite + `transformers` (eddie-transformers-sw.js, the
 //                      copy whose onnxruntime-web imports point at the ORT
-//                      bundle build) + `webllm` (jsDelivr; the esm.run alias
-//                      redirects, and service worker script fetches reject
-//                      redirects)
+//                      bundle build); search only, never WebLLM
+//   eddie-sw-agent.js  `webllm` (jsDelivr; the esm.run alias redirects, and
+//                      service worker script fetches reject redirects) and
+//                      the agent engine only; never a search host
 //
 // Each tier is registered by the widget as a *module* service worker in
 // its own scope under the asset directory (`/eddie/sw/<tier>/`), so a
-// visitor who never accepts a model never installs the gpu tier's imports.
+// visitor who never accepts a model never installs the gpu tier's imports
+// and one who never asks the agent a question never installs WebLLM.
 // The worker never handles `fetch`, so the browser does not start it for
 // navigations; pages reach it through
 // `registration.active.postMessage({type: "connect"}, [port])`, one
@@ -82,21 +84,24 @@ function loadWasm(baseUrl, version, variant) {
   return Promise.reject(new Error(`unknown wasm variant ${String(variant)}`));
 }
 
-const searchEngine = lib.createSearchEngine({
-  post: (message) => broadcast("search", message),
-  loadWasm,
-  loadTransformers: async () => {
-    if (!transformers) throw tierError("gpu", "transformers.js");
-    return transformers;
-  },
-  configureTransformers,
-  // Lane *choice* follows the adapter, whatever the tier: a lite worker asks
-  // consent for the webgpu lane, and the widget moves the search to the gpu
-  // tier on accept (or on a tier_required status if the lane is cached).
-  canRunWebGpuLane: hasGpu,
-});
+// The agent tier bundles no search engine (widget/src/lib/search-engine.js).
+const searchEngine = typeof lib.createSearchEngine === "function"
+  ? lib.createSearchEngine({
+      post: (message) => broadcast("search", message),
+      loadWasm,
+      loadTransformers: async () => {
+        if (!transformers) throw tierError("gpu", "transformers.js");
+        return transformers;
+      },
+      configureTransformers,
+      // Lane *choice* follows the adapter, whatever the tier: a lite worker asks
+      // consent for the webgpu lane, and the widget moves the search to the gpu
+      // tier on accept (or on a tier_required status if the lane is cached).
+      canRunWebGpuLane: hasGpu,
+    })
+  : null;
 
-// Only the gpu tier bundles the agent (widget/src/lib/agent*.js) at all.
+// Only the agent tier bundles the agent (widget/src/lib/agent*.js) at all.
 const agentEngine = webllm && typeof lib.createAgentEngine === "function"
   ? lib.createAgentEngine({
       post: (message) => broadcast("agent", message),
@@ -108,11 +113,12 @@ function capabilities() {
   return {
     ok: true,
     tier: EDDIE_SW_TIER,
-    gpu: EDDIE_SW_TIER === "gpu" && hasGpu,
+    // The WebGPU runtime this tier hosts (transformers.js or WebLLM) can run.
+    gpu: hasGpu && !!(transformers || webllm),
     onnx: canRunOnnx,
     denseWasm: !!initDenseWasm,
     startedAt,
-    search: searchEngine.state(),
+    search: searchEngine ? searchEngine.state() : null,
     agent: agentEngine ? agentEngine.state() : null,
   };
 }
@@ -165,10 +171,11 @@ function route(conn, msg) {
       break;
   }
   if (SEARCH_TYPES.has(msg.type)) {
-    searchEngine.handle(msg, conn.reply);
+    if (searchEngine) searchEngine.handle(msg, conn.reply);
+    else conn.reply({ type: "error", requestId: msg.requestId, message: `the ${EDDIE_SW_TIER} service worker has no search engine; the lite tier hosts it` });
   } else if (AGENT_TYPES.has(msg.type)) {
     if (agentEngine) agentEngine.handle(msg, conn.reply);
-    else conn.reply({ type: "error", requestId: msg.requestId, message: `the ${EDDIE_SW_TIER} service worker has no agent; the gpu tier hosts it` });
+    else conn.reply({ type: "error", requestId: msg.requestId, message: `the ${EDDIE_SW_TIER} service worker has no agent; the agent tier hosts it` });
   } else {
     conn.reply({ type: "error", requestId: msg.requestId, message: `unknown message type ${String(msg.type)}` });
   }

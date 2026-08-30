@@ -178,6 +178,8 @@ test("registerServiceWorker resolves once a worker is active, rejects on redunda
 test("service worker tiers: script names, scopes under the asset directory, tier per lane kind", () => {
   assert.deepEqual(T.SW_TIERS, ["lite", "dense", "gpu"]);
   assert.equal(T.swScriptName("gpu"), "eddie-sw-gpu.js");
+  assert.equal(T.swScriptName("agent"), "eddie-sw-agent.js");
+  assert.equal(T.swScope("https://x.test/eddie/", "agent"), "https://x.test/eddie/sw/agent/");
   assert.equal(T.swScope("https://x.test/eddie/", "lite"), "https://x.test/eddie/sw/lite/");
   assert.equal(T.swScope("https://x.test/eddie", "dense"), "https://x.test/eddie/sw/dense/");
   assert.equal(T.tierForLane("wasm-candle"), "dense");
@@ -187,6 +189,8 @@ test("service worker tiers: script names, scopes under the asset directory, tier
 
 test("search tier: the lane about to load wins, then the remembered consent, else lite", () => {
   assert.equal(T.searchTierFor({}), "lite");
+  // The agent tier is not a search tier: no lane and no remembered value maps to it.
+  assert.equal(T.searchTierFor({ rememberedTier: "agent" }), "lite");
   assert.equal(T.searchTierFor({ rememberedTier: "gpu" }), "gpu");
   assert.equal(T.searchTierFor({ rememberedTier: "bogus" }), "lite");
   assert.equal(T.searchTierFor({ rememberedTier: "gpu", laneKind: "wasm-candle" }), "dense");

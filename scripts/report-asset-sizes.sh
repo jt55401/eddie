@@ -35,6 +35,7 @@ FILES=(
   "eddie-sw-lite.js"
   "eddie-sw-dense.js"
   "eddie-sw-gpu.js"
+  "eddie-sw-agent.js"
   "eddie-transformers-sw.js"
 )
 

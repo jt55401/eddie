@@ -167,7 +167,7 @@ jobs:
           for f in eddie-boot.js eddie-widget.js eddie-worker.js eddie-agent-worker.js \
                    eddie-lite.wasm eddie-lite.js eddie-lite-esm.js \
                    eddie-dense.wasm eddie-dense.js eddie-dense-esm.js \
-                   eddie-sw-lite.js eddie-sw-dense.js eddie-sw-gpu.js eddie-transformers-sw.js; do
+                   eddie-sw-lite.js eddie-sw-dense.js eddie-sw-gpu.js eddie-sw-agent.js eddie-transformers-sw.js; do
             test -f "dist/$f" || { echo "missing dist/$f" >&2; exit 1; }
           done
 

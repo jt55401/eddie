@@ -75,7 +75,7 @@
   let searchTimer = null;
   let lastSearchedQuery = "";
   let initWaiters = []; // resolve() once the index is loaded (index_ready or ready)
-  const transportPlans = Object.create(null); // tier -> Promise<{kind, registration?, hello?, swSearch?}>
+  const transportPlans = Object.create(null); // tier -> Promise<{kind, registration?, hello?, sw?}>
   let searchTier = null; // "lite" | "dense" | "gpu": the tier the search transport was made for
   let pendingConsentKind = null; // runtime kind of the lane the consent card is for
   let searchCreating = null; // Promise while ensureSearchTransport runs
@@ -740,7 +740,7 @@
    * The transport decision for one service worker tier (see
    * lib/transport.js): register that tier's worker and say hello, or fall
    * back to page workers. Made once per tier and only when something needs
-   * it: a modal open (lite), a consent (dense/gpu), an Ask (gpu) or a
+   * it: a modal open (lite), a consent (dense/gpu), an Ask (agent) or a
    * returning visitor's warm-up. A plain page view registers nothing.
    */
   function ensureTransportPlan(tier) {
@@ -756,8 +756,11 @@
       secureContext: window.isSecureContext,
     });
     if (kind !== "sw" || forcePageWorkers) return { kind: "worker", tier };
+    // The agent tier's channel speaks the agent protocol; every other tier
+    // hosts the search engine.
+    const channelKind = tier === "agent" ? "agent" : "search";
     let registration = null;
-    let swSearch = null;
+    let sw = null;
     try {
       if (!legacyCleanup) {
         legacyCleanup = lib.unregisterLegacyServiceWorker(navigator.serviceWorker, baseUrl).then((done) => {
@@ -770,21 +773,21 @@
         url: lib.assetUrl(baseUrl, lib.swScriptName(tier), version),
         scope: lib.swScope(baseUrl, tier),
       });
-      swSearch = new lib.ServiceWorkerTransport(registration, { kind: "search", version });
-      const hello = await swSearch.connect();
+      sw = new lib.ServiceWorkerTransport(registration, { kind: channelKind, version });
+      const hello = await sw.connect();
       if (hello.tier && hello.tier !== tier) throw new Error(`service worker at ${lib.swScope(baseUrl, tier)} reports tier ${hello.tier}`);
       // The gpu tier cannot run a webgpu-onnx lane without WebGPU in the
       // service worker's scope while this page could: search stays
       // page-side for quality, the agent still goes wherever the service
       // worker can host it.
-      if (lib.searchStaysOnPage({ tier, swOnnx: hello.onnx, pageHasGpu: !!(await probePageGpu()), denseRuntime: config.denseRuntime })) {
-        swSearch.terminate();
-        swSearch = null;
+      if (channelKind === "search" && lib.searchStaysOnPage({ tier, swOnnx: hello.onnx, pageHasGpu: !!(await probePageGpu()), denseRuntime: config.denseRuntime })) {
+        sw.terminate();
+        sw = null;
       }
-      return { kind: "sw", tier, registration, hello, swSearch };
+      return { kind: "sw", tier, registration, hello, sw };
     } catch (err) {
       console.info(`eddie: ${tier} service worker unavailable, using page workers:`, err && err.message ? err.message : err);
-      if (swSearch) swSearch.terminate();
+      if (sw) sw.terminate();
       return { kind: "worker", tier };
     }
   }
@@ -853,7 +856,7 @@
   async function createSearchTransport(tier, waitMs) {
     const planPromise = ensureTransportPlan(tier);
     const plan = waitMs == null ? await planPromise.catch(() => null) : await withDeadline(planPromise, waitMs);
-    let t = plan && plan.kind === "sw" && plan.swSearch && !forcePageWorkers ? plan.swSearch : null;
+    let t = plan && plan.kind === "sw" && plan.sw && !forcePageWorkers ? plan.sw : null;
     if (t && t.closed) t = null;
     if (!t) {
       try {
@@ -1180,7 +1183,7 @@
     const tier = lib.searchTierFor({ rememberedTier });
     const plan = await ensureTransportPlan(tier).catch(() => null);
     if (!plan || search || isOpen) return; // the modal opened first: the normal flow owns init
-    const engineReady = plan.kind === "sw" && !!plan.swSearch && lib.canReuseSearch(plan.hello.search, indexUrl);
+    const engineReady = plan.kind === "sw" && !!plan.sw && lib.canReuseSearch(plan.hello.search, indexUrl);
     decision = lib.decideWarm({ mode: config.warm, saveData, engineReady, checked: false, returning: true });
     console.debug("eddie warm:", decision.action, decision.reason);
     if (decision.action === "none") return;
@@ -1663,19 +1666,18 @@
     if (agent) return Promise.resolve(agent);
     if (agentCreating) return agentCreating;
     agentCreating = (async () => {
-      // The agent always lives in the gpu tier (WebLLM is only imported there).
-      const plan = await withDeadline(ensureTransportPlan("gpu"), TRANSPORT_WAIT_MS);
+      // The agent always lives in the agent tier (WebLLM is only imported
+      // there), whose worker is registered here, on the first Ask after
+      // consent: the search tiers never fetch WebLLM.
+      const plan = await withDeadline(ensureTransportPlan("agent"), TRANSPORT_WAIT_MS);
       if (agent) return agent;
       let t = null;
-      if (plan && plan.kind === "sw" && plan.hello && plan.hello.gpu && !forcePageWorkers) {
-        const sw = new lib.ServiceWorkerTransport(plan.registration, { kind: "agent", version });
-        try {
-          await sw.connect();
-          t = sw;
-        } catch (err) {
-          console.info("eddie: agent falls back to a page worker:", err && err.message ? err.message : err);
-          sw.terminate();
-        }
+      if (plan && plan.kind === "sw" && plan.hello && plan.hello.gpu && plan.sw && !plan.sw.closed && !forcePageWorkers) {
+        t = plan.sw;
+      } else if (plan && plan.sw) {
+        // Connected, but unusable for the agent (no WebGPU in the worker's scope).
+        console.info("eddie: agent falls back to a page worker");
+        plan.sw.terminate();
       }
       if (!t) t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-agent-worker.js", version), { type: "module" });
       attachAgent(t);

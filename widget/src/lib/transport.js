@@ -420,13 +420,17 @@
 
   // -- service worker tiers ------------------------------------------------
   //
-  // Three builds of widget/src/eddie-sw.js (see widget/build.sh), each in
+  // Four builds of widget/src/eddie-sw.js (see widget/build.sh), each in
   // its own scope under the asset directory, so a page installs only the
   // imports its visitor has opted into:
   //   lite   eddie-sw-lite.js   keyword + sparse search (lite wasm)
   //   dense  eddie-sw-dense.js  + the CPU dense lane (dense wasm)
-  //   gpu    eddie-sw-gpu.js    + transformers.js (WebGPU lane) + WebLLM (agent)
+  //   gpu    eddie-sw-gpu.js    + transformers.js (WebGPU search lane)
+  //   agent  eddie-sw-agent.js  WebLLM + the agent engine, registered at
+  //                             agent consent; never a search host
 
+  // The search tiers. The agent tier is separate: no index lane maps to it
+  // and it is never remembered as a search tier.
   const SW_TIERS = ["lite", "dense", "gpu"];
 
   function swScriptName(tier) {
