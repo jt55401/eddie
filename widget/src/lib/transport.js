@@ -269,8 +269,10 @@
         return true;
       } catch (err) {
         if (this.closed) return false;
+        console.debug(`eddie: ${this.channelKind} channel silent (${err && err.message}); reconnecting`);
         try {
           await this.reconnect();
+          console.debug(`eddie: ${this.channelKind} channel reconnected`);
           return true;
         } catch (err2) {
           console.warn("eddie: service worker reconnect failed", err2);
