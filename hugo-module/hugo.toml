@@ -23,6 +23,15 @@
   # Shown before the first model download (search or agent). Empty string
   # uses the widget's built-in default consent copy.
   consentText = ""
+  # "auto" keeps the search engine and the answer model in a service worker
+  # that outlives page navigations (falls back to page workers where service
+  # workers are unavailable); "off" always uses page workers.
+  persist = "auto"
+  # "auto" loads the search engine right after the page loads when the
+  # visitor already consented to the model on this browser and its files are
+  # cached (never under Data Saver); "always" also downloads an uncached
+  # model without asking; "off" waits for the first search.
+  warm = "auto"
 
 [module]
   [module.hugoVersion]

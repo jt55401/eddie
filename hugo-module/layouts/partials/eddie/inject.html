@@ -14,6 +14,8 @@
 {{- $agentModel := $cfg.agentModel | default "auto" -}}
 {{- $denseRuntime := $cfg.denseRuntime | default "auto" -}}
 {{- $consentText := $cfg.consentText | default "" -}}
+{{- $persist := $cfg.persist | default "auto" -}}
+{{- $warm := $cfg.warm | default "auto" -}}
 {{/*
   relURL/absURL only prepend the site's baseURL path prefix (e.g. "/blog/"
   for a site served under https://example.com/blog/) to a *relative* path.
@@ -41,6 +43,16 @@
   {{- $cacheBust = substr (crypto.SHA256 .Content) 0 12 -}}
 {{- end -}}
 {{- $indexUrl = printf "%s?v=%v" $indexUrl $cacheBust -}}
+{{- if ne $warm "off" -}}
+{{/*
+  Warm-at-load hints: the retriever and the index are site assets the widget
+  fetches as soon as it decides to warm up (see data-warm); prefetching them
+  during the idle time after load makes that instant. Model files are never
+  prefetched: they need the visitor's consent.
+*/}}
+<link rel="prefetch" href="{{ "eddie/eddie.wasm" | relURL }}" as="fetch" crossorigin="anonymous">
+<link rel="prefetch" href="{{ $indexUrl }}" as="fetch" crossorigin="anonymous">
+{{- end }}
 <script src="{{ "eddie/eddie-widget.js" | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
@@ -55,5 +67,7 @@
         data-agent-model="{{ $agentModel }}"
         data-dense-runtime="{{ $denseRuntime }}"
         data-consent-text="{{ $consentText }}"
+        data-persist="{{ $persist }}"
+        data-warm="{{ $warm }}"
         defer></script>
 {{- end -}}
