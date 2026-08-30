@@ -5,6 +5,11 @@
 [params.eddie]
   enabled = true
   indexUrl = "/eddie/index.ed"
+  # "boot" puts only eddie-boot.js (about 2 KB compressed: trigger button and
+  # keyboard shortcut) on each page and fetches the full widget on the first
+  # interaction, or after load for a visitor who used the search before.
+  # "full" loads eddie-widget.js on every page view.
+  loader = "boot"
   position = "bottom-right"
   theme = "auto"
   qaMode = "auto"
@@ -27,10 +32,12 @@
   # that outlives page navigations (falls back to page workers where service
   # workers are unavailable); "off" always uses page workers.
   persist = "auto"
-  # "auto" loads the search engine right after the page loads when the
-  # visitor already consented to the model on this browser and its files are
-  # cached (never under Data Saver); "always" also downloads an uncached
-  # model without asking; "off" waits for the first search.
+  # "auto" loads the search engine right after the page loads for a visitor
+  # who opened the search before on this browser, and the model too when it
+  # was consented to and its files are cached (never under Data Saver; a
+  # first-time visitor's page view fetches nothing beyond the loader);
+  # "always" also downloads an uncached model without asking; "off" waits
+  # for the first search.
   warm = "auto"
 
 [module]

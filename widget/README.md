@@ -1,28 +1,33 @@
 <!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Eddie browser runtime
 
-`widget/build.sh` produces eight files in `dist/`:
+`widget/build.sh` produces fourteen files in `dist/`:
 
 | File | Role |
 |---|---|
+| `eddie-boot.js` | Default loader (about 3 KB compressed, on every page view): draws the trigger button and installs Ctrl/Cmd+K, then fetches `eddie-widget.js` on the first interaction or, for a visitor who used the search before, after load. See [Loader](#loader). |
 | `eddie-widget.js` | Search UI (closed Shadow DOM). Reads the `data-*` attributes on its `<script>` tag. |
-| `eddie-sw.js` | Module service worker: hosts the search engine and the agent so they survive navigations (see [Persistent engines](#persistent-engines)). |
 | `eddie-worker.js` | Classic Web Worker, the page-side fallback for the search engine: loads the index, the WASM retriever and the dense model; answers `search`/`page`/`chunk`/`qa`. |
 | `eddie-agent-worker.js` | Module worker, the page-side fallback for the agent: runs WebLLM and streams a cited answer over evidence the widget hands it. |
-| `eddie-wasm.js`, `eddie.wasm` | wasm-bindgen glue (`--target no-modules`, for the classic worker) + retriever (`src/wasm.rs`). |
-| `eddie-wasm-esm.js` | wasm-bindgen glue for the same `eddie.wasm` as an ES module (`--target web`), imported by the service worker. |
-| `eddie-transformers-sw.js` | transformers.js 4.2.0 (`dist/transformers.web.js`, Apache-2.0) with its onnxruntime-web imports pointed at the ORT "bundle" build, so it loads without `import()`; only the service worker uses it. |
+| `eddie-lite.wasm`, `eddie-lite.js`, `eddie-lite-esm.js` | The retriever without model code (`--no-default-features`: index parsing, BM25, learned sparse with the WordPiece query tokenizer built in, RRF, snippets, QA ranking, sidecars) and its wasm-bindgen glue for the classic worker (`--target no-modules`) and for the service workers (`--target web`). What every visitor who opens the search loads. |
+| `eddie-dense.wasm`, `eddie-dense.js`, `eddie-dense-esm.js` | The same plus the candle BERT embedder for `wasm-candle` lanes. Fetched only after a visitor accepts a CPU dense lane; the engine hands the loaded index over to it. The classic glue's global is renamed `wasm_bindgen_dense` so both can live in one worker. |
+| `eddie-sw-lite.js`, `eddie-sw-dense.js`, `eddie-sw-gpu.js` | Three builds of one module service worker source, each with the static imports of its tier (lite: `eddie-lite-esm.js`; dense: plus `eddie-dense-esm.js`; gpu: plus transformers.js and WebLLM), registered in their own scopes (see [Persistent engines](#persistent-engines)). |
+| `eddie-transformers-sw.js` | transformers.js 4.2.0 (`dist/transformers.web.js`, Apache-2.0) with its onnxruntime-web imports pointed at the ORT "bundle" build, so it loads without `import()`; only the gpu service worker imports it. |
 
-The four JS entry points are built by concatenating `widget/src/lib/*.js`
-(pure helpers, exposed as `EddieLib`) with their main file. The engines
+The JS entry points are built by concatenating `widget/src/lib/*.js`
+(pure helpers, exposed as `EddieLib`) with their main file; the three
+service worker files are the same `eddie-sw.js` source with a different
+import block prepended. The engines
 themselves are `lib/search-engine.js` and `lib/agent-engine.js`; the entry
 files only bind them to a host (`self.postMessage`, `importScripts`,
 static or dynamic imports). There is no bundler; edit `widget/src/**` and
 rerun `bash widget/build.sh` (or `bash widget/build.sh --js-only` to skip
-the WASM build and only reassemble the bundles from an earlier
-`widget/pkg/` and `widget/pkg-esm/`). The build downloads
-`transformers.web.js` once into `widget/vendor/` (SHA-256 pinned in
-`build.sh`).
+the WASM builds and only reassemble the bundles from an earlier
+`widget/pkg*/`; `--sizes` prints raw, gzip and brotli bytes per file). The
+build downloads `transformers.web.js` once into `widget/vendor/` (SHA-256
+pinned in `build.sh`). `scripts/report-asset-sizes.sh` enforces the size
+budgets CI runs (boot, widget, worker and lite wasm after brotli, plus the
+dense module).
 
 ## Tests
 
@@ -37,12 +42,35 @@ evidence merging, citation post-processing), both engines against fake
 WASM/WebLLM (init and consent flow, cache check, lane fallback, index
 reload, fatal traps, load sharing, streaming, abort), the transports
 (request/reply, reconnect after a stopped service worker, registration
-without `.ready`) and the decisions behind `data-persist` and `data-warm`.
+without `.ready`, tier selection, the 0.4.2 registration cleanup), the
+decisions behind `data-persist`, `data-warm` and the boot loader, and the
+lite-first flow (embedded sparse vocabulary, sidecar selection, the
+lite-to-dense hand-over, site-bundled models).
+
+## Loader
+
+The Hugo partial (and every CMS integration) puts `eddie-boot.js` on the
+page by default. It reads the same `data-*` attributes as the widget,
+renders the trigger button in its own closed Shadow DOM (same position,
+offsets and theme) and listens for the trigger, Ctrl/Cmd+K and
+`window.eddie.open()`. The first of those injects
+`<script src="eddie-widget.js?v=…">` with the attributes copied over; the
+full widget removes the boot trigger when it mounts and opens the modal if
+that is what the visitor asked for. Hovering or focusing the trigger only
+preloads. `lib/boot.js` also loads the widget after `load` (idle callback)
+when the visitor opened the search or accepted a model before on this
+browser (`localStorage` `eddie.search.used` / `eddie.search.consent`) and
+neither Data Saver nor `prefers-reduced-data` is on, or when
+`data-warm="always"`; the widget then runs its own warm-up. A first-time
+visitor's page view costs the boot script and nothing else. Sites that
+want the full widget on every page (`loader = "full"` in Hugo) use the
+script tag below with `eddie-widget.js` directly; loading both is
+harmless (the second mount is skipped).
 
 ## Script tag
 
 ```html
-<script src="/eddie/eddie-widget.js?v=<build hash>"
+<script src="/eddie/eddie-boot.js?v=<build hash>"
         data-index-url="/eddie/index.ed?v=<build hash>"
         data-position="bottom-right"     <!-- top-left | top-right | bottom-left | bottom-right -->
         data-theme="auto"                <!-- auto | light | dark -->
@@ -54,19 +82,44 @@ without `.ready`) and the decisions behind `data-persist` and `data-warm`.
         data-agent-mode="auto"           <!-- off | auto -->
         data-agent-model="auto"          <!-- auto | quality | <WebLLM model id> -->
         data-dense-runtime="auto"        <!-- auto | wasm | webgpu -->
-        data-consent-text=""             <!-- override of the download consent copy; {size} and {model} are substituted -->
+        data-consent-text=""             <!-- override of the download consent copy; {size}, {model} and {origin} are substituted -->
         data-persist="auto"              <!-- auto | off: keep the engines in a service worker across navigations -->
-        data-warm="auto"                 <!-- auto | off | always: initialise search before the modal opens -->
+        data-warm="auto"                 <!-- auto | off | always: initialise search before the modal opens (auto: returning visitors only) -->
         defer></script>
 ```
 
 `?v=` on the script `src` (or, failing that, on `data-index-url`) is also
-appended to `eddie-worker.js`, `eddie-wasm.js`, `eddie.wasm`,
-`eddie-agent-worker.js` and `eddie-sw.js` so a redeploy never pairs cached
-glue with a new binary (the service worker is registered with
-`updateViaCache: "none"`, so its static imports are revalidated too). When
-`data-index-url` is absent the index is `index.ed` next to the widget
-script.
+appended to `eddie-widget.js`, `eddie-worker.js`, `eddie-lite.js`,
+`eddie-lite.wasm`, `eddie-dense.js`, `eddie-dense.wasm`,
+`eddie-agent-worker.js`, `eddie-sw-*.js`, the index sidecars and bundled
+model files, so a redeploy never pairs cached glue with a new binary (the
+service workers are registered with `updateViaCache: "none"`, so their
+static imports bypass the HTTP cache at install). With every asset URL
+versioned, `/eddie/*` can be served with a one-year `immutable`
+Cache-Control; `hugo-module/example/_headers` is a Cloudflare Pages /
+Netlify example that does that while keeping the two unversioned loader
+URLs revalidating. When `data-index-url` is absent the index is `index.ed`
+next to the widget script.
+
+## What is fetched when
+
+Measured 2026-08-30 on the jason-grey.com index (75 pages, 435 chunks,
+bge-small `wasm-candle` lane bundled next to the index, Qwen3-Embedding
+`webgpu-onnx` lane, learned sparse with the vocabulary embedded, 141 QA
+entries), brotli where the host compresses:
+
+| Step | Fetched | Bytes |
+|---|---|---:|
+| Page view, first visit | `eddie-boot.js` | 3.2 KB |
+| First open, keyword + sparse search | `eddie-widget.js` 29 KB, `eddie-sw-lite.js` 16 KB + `eddie-lite-esm.js` 4 KB (or `eddie-worker.js` 14 KB + `eddie-lite.js` 4 KB page-side), `eddie-lite.wasm` 200 KB, `index.ed` 517 KB | 766 KB |
+| CPU dense lane accepted (no WebGPU) | `eddie-sw-dense.js` + `eddie-dense-esm.js`, `eddie-dense.wasm` 733 KB, `models/bge-small/*` 67 MB (f16, from the site) | 68 MB |
+| WebGPU lane accepted | `eddie-sw-gpu.js` + `eddie-transformers-sw.js` 168 KB + WebLLM 1.8 MB + ORT bundle 38 KB (jsDelivr), `index.qwen3e.ed` 534 KB, the ONNX repo from huggingface.co | see the plan doc |
+| First FAQ card / agent evidence | the active lane's QA sidecar (`index.<lane>.ed`, 44 KB for bge-small) | |
+
+The 0.4.2 defaults for the same site were 2.07 MB on every first page
+view (widget + service worker with WebLLM and transformers.js imported at
+install) and 2.53 MB more on the first open (dense wasm, 1.09 MB index,
+712 KB `tokenizer.json` from huggingface.co).
 
 ## Host element
 
@@ -130,27 +183,44 @@ section says how that is decided.
 Dedicated workers die with the document, so every navigation used to
 re-fetch the index, re-create the dense model session (about 3.5 s for
 the Qwen3-Embedding ONNX lane on an RTX 4090) and reload the WebLLM
-engine (5 to 16 s depending on the GPU shader cache). The widget now keeps both engines in one module
-service worker, `eddie-sw.js`, registered with scope = the asset directory
-(`/eddie/` by default). Pages outside that scope are not controlled by it
-and never will be: the worker has no `fetch` handler, so the browser does
-not start it for navigations, and pages talk to it through
-`registration.active.postMessage`, never `navigator.serviceWorker.controller`
-(nor `.ready`, which only resolves for the controlling registration).
+engine (5 to 16 s depending on the GPU shader cache). The widget keeps
+both engines in a module service worker instead. There are three builds
+of it, one per tier, because a service worker cannot `import()` and must
+carry its dependencies as static imports:
 
-**Transport choice** (`lib/transport.js`). After `load`, from an idle
-callback, the widget registers the service worker (`data-persist="auto"`,
+| Tier | Script | Scope | Imports | Registered |
+|---|---|---|---|---|
+| lite | `eddie-sw-lite.js` | `/eddie/sw/lite/` | `eddie-lite-esm.js` | on the first modal open (or a returning visitor's warm-up) |
+| dense | `eddie-sw-dense.js` | `/eddie/sw/dense/` | lite + `eddie-dense-esm.js` | when a `wasm-candle` lane is accepted |
+| gpu | `eddie-sw-gpu.js` | `/eddie/sw/gpu/` | lite + `eddie-transformers-sw.js` + WebLLM | when a `webgpu-onnx` lane or the agent is accepted |
+
+Pages outside those scopes are not controlled by the workers and never
+will be: they have no `fetch` handler, so the browser does not start them
+for navigations, and pages talk to them through
+`registration.active.postMessage`, never `navigator.serviceWorker.controller`
+(nor `.ready`, which only resolves for the controlling registration). A
+plain page view by a first-time visitor registers nothing. The first
+transport setup also unregisters the single-scope worker Eddie 0.4.2
+registered at `/eddie/` (its script no longer exists).
+
+**Transport choice** (`lib/transport.js`). When something needs an
+engine, the widget registers that tier's worker (`data-persist="auto"`,
 `navigator.serviceWorker` present, secure context) and opens a
-`MessageChannel` to it; the worker must answer `hello` within 3 s. A modal
-opened before that decision waits at most 3 s, then starts page-side
-workers for this page. Anything that fails (no service worker support,
-`register()` rejected because a CDN import failed, no `hello`) means
-page-side workers, which speak exactly the same protocol; `data-persist="off"`
-forces them. One exception: when the service worker reports no WebGPU
-(`hello.onnx === false`) but the page has an adapter and
-`data-dense-runtime` allows WebGPU, search stays page-side so the
-webgpu-onnx lane is not silently replaced by the wasm lane; the agent still
-uses the service worker if it can.
+`MessageChannel` to it; the worker must answer `hello` within 3 s and
+report the expected tier. A modal opened before that decision waits at
+most 3 s, then starts page-side workers for this page. Anything that fails
+(no service worker support, `register()` rejected because a CDN import
+failed, no `hello`) means page-side workers, which speak exactly the same
+protocol and load the dense module or transformers.js themselves;
+`data-persist="off"` forces them. Accepting a lane the current tier cannot
+host moves the search to the right tier (`switchSearchTier`): a new
+channel, `init` with consent, the old worker left to idle out. The tier is
+remembered (`localStorage` `eddie.search.tier`) so the next page registers
+it directly. The agent always uses the gpu tier. One exception: when the
+gpu worker reports no WebGPU (`hello.onnx === false`) but the page has an
+adapter and `data-dense-runtime` allows WebGPU, search stays page-side so
+the webgpu-onnx lane is not silently replaced by the wasm lane; the agent
+still uses the service worker if it can.
 
 **Keepalive.** Chrome stops an idle service worker after about 30 s and
 the transferred ports die with it. The widget pings every 15 s while the
@@ -168,15 +238,16 @@ that state at once (`data-reused="true"`) instead of sending `init`. On
 Ask, a loaded model with the chosen id is reused without a `load`.
 
 **Warm at load** (`data-warm`, `lib/warm.js`). After `load` and an idle
-callback, once the transport is decided: `auto` sends `cache_check` (which
-fetches only `eddie.wasm` and the index, site assets the Hugo partial also
-prefetches) and then `init` when the visitor accepted this lane before on
-this browser (`localStorage` `eddie.search.consent`, written on accept and
-on every `ready` with a lane) and the lane's files are in IndexedDB; it
-never downloads a model, and does nothing under Data Saver. `always` also
-downloads an uncached lane without asking (the site owner's choice;
-still not under Data Saver). `off` waits for the first search. A service
-worker that already reports `ready` is adopted without any of this.
+callback: `auto` does nothing for a first-time visitor; for one who opened
+the search before on this browser (`localStorage` `eddie.search.used`) it
+registers the remembered tier and sends `cache_check` (which fetches only
+`eddie-lite.wasm` and the index), then `init` when the visitor accepted
+this lane before (`eddie.search.consent`, written on accept and on every
+`ready` with a lane) and the lane's files are in IndexedDB; it never
+downloads a model, and does nothing under Data Saver. `always` also
+downloads an uncached lane without asking (the site owner's choice; still
+not under Data Saver). `off` waits for the first search. A service worker
+that already reports `ready` is adopted without any of this.
 
 **Redeploys.** `?v=` changes the service worker URL, so the browser
 installs a new worker; an `init` with a different index URL reloads the
@@ -186,8 +257,8 @@ workers for the rest of its life (Retry) and the next page gets a fresh
 worker once Chrome has stopped the old one.
 
 **Why static imports.** `import()` is disallowed in service workers. The
-worker therefore statically imports the ES-module WASM glue
-(`eddie-wasm-esm.js`, over the same `eddie.wasm`), WebLLM from
+workers therefore statically import the ES-module WASM glue
+(`eddie-lite-esm.js`, `eddie-dense-esm.js`), WebLLM from
 `cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.84/+esm` (service worker script
 fetches reject redirects, which rules out the `esm.run` alias the page
 worker uses) and `eddie-transformers-sw.js`, a copy of transformers.js
@@ -195,7 +266,8 @@ whose `onnxruntime-web` imports point at the ORT bundle build. The stock
 ORT build loads its WASM binding with `import()`; the bundle build embeds
 it, provided `env.useWasmCache = false` and `wasmPaths` names only the
 `.wasm` file (the service worker sets both). If any of those imports fail,
-`register()` rejects and the widget uses page-side workers.
+`register()` rejects and the widget uses page-side workers. Only the gpu
+tier pays for them, and only after a visitor opted in.
 
 **Not covered.** Firefox and Safari have no WebGPU in service workers
 today, so there the service worker hosts the WASM lane only and the agent
@@ -264,9 +336,10 @@ connect-src 'self' https://huggingface.co https://*.hf.co https://cdn.jsdelivr.n
 - `esm.run` (and its jsDelivr redirects): WebLLM in the page-side agent worker.
 - `huggingface.co` / `*.hf.co`: model files (the resolve endpoint redirects to `cdn-lfs*.hf.co` / `*.aws.cdn.hf.co`).
 - `raw.githubusercontent.com`: WebLLM's model-library WASM files, and `blob:` workers for WebLLM's internal use.
-- The service worker script and its static imports are covered by
-  `worker-src`/`script-src` (`'self'` for `eddie-sw.js`, `eddie-wasm-esm.js`
-  and `eddie-transformers-sw.js`, `https://cdn.jsdelivr.net` for the CDN
-  modules). No `Service-Worker-Allowed` header is needed: the scope stays
-  under the asset directory.
-- Without the agent and without WebGPU lanes, `script-src 'self'` and `connect-src 'self' https://huggingface.co https://*.hf.co` are enough (add `https://cdn.jsdelivr.net` to `script-src` when the service worker is on; it imports WebLLM and transformers.js at install time regardless).
+- The service worker scripts and their static imports are covered by
+  `worker-src`/`script-src` (`'self'` for `eddie-sw-*.js`,
+  `eddie-*-esm.js` and `eddie-transformers-sw.js`,
+  `https://cdn.jsdelivr.net` for the CDN modules the gpu tier imports). No
+  `Service-Worker-Allowed` header is needed: the scopes stay under the
+  asset directory.
+- Without the agent and without WebGPU lanes, `script-src 'self'` and `connect-src 'self' https://huggingface.co https://*.hf.co` are enough; an index whose models are bundled next to it (`eddie index --bundle-model`) and whose sparse vocabulary is embedded (the default) needs no `huggingface.co` at all.

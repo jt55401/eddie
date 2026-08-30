@@ -1,39 +1,69 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
 #
-# Build the Eddie browser widget.
-# Produces dist/ with eight files ready to deploy alongside a Hugo site:
-#   eddie.wasm, eddie-wasm.js, eddie-worker.js, eddie-widget.js,
-#   eddie-agent-worker.js (the page-side hosts) and
-#   eddie-sw.js, eddie-wasm-esm.js, eddie-transformers-sw.js (the service
-#   worker host; see widget/README.md "Persistent engines").
+# Build the Eddie browser runtime into dist/.
+#
+# WASM (two variants of src/wasm.rs, each with a classic-worker glue and an
+# ES-module glue):
+#   eddie-lite.wasm   --no-default-features: index parsing, BM25, learned
+#                     sparse (WordPiece query tokenizer built in), RRF,
+#                     snippets, QA ranking, sidecars. Every visitor who
+#                     opens the search loads this one.
+#   eddie-dense.wasm  default features: lite + the candle BERT embedder for
+#                     wasm-candle lanes. Fetched only after a visitor accepts
+#                     a CPU dense lane.
+#   eddie-lite.js / eddie-dense.js         wasm-bindgen --target no-modules
+#                     (importScripts; globals `wasm_bindgen` / `wasm_bindgen_dense`)
+#   eddie-lite-esm.js / eddie-dense-esm.js wasm-bindgen --target web (static
+#                     imports in the service workers)
+#
+# Page-side scripts:
+#   eddie-boot.js          default loader: trigger button + shortcut, fetches
+#                          eddie-widget.js on first interaction
+#   eddie-widget.js        the full widget
+#   eddie-worker.js        search engine in a classic dedicated worker (fallback host)
+#   eddie-agent-worker.js  agent in a module worker (fallback host)
+#
+# Service workers, one source (widget/src/eddie-sw.js) built three times
+# with different static imports (import() is not allowed in a service
+# worker), each registered in its own scope by lib/transport.js:
+#   eddie-sw-lite.js        lite wasm (keyword + sparse search)
+#   eddie-sw-dense.js       lite + dense wasm (CPU dense lane)
+#   eddie-sw-gpu.js         lite wasm + transformers.js (WebGPU lane) + WebLLM (agent)
+#   eddie-transformers-sw.js transformers.js copy the gpu tier imports
+#
+# Usage: widget/build.sh [--js-only] [--sizes]
+#   --js-only  reuse widget/pkg*/ from an earlier build (fast JS iteration)
+#   --sizes    print raw / gzip / brotli sizes of every dist file at the end
 
 set -euo pipefail
 
-# `--js-only` skips the WASM build and only re-assembles the JS bundles from
-# an existing widget/pkg/ (fast iteration on the widget and workers).
 JS_ONLY=0
+SIZES=0
 for arg in "$@"; do
   case "$arg" in
     --js-only) JS_ONLY=1 ;;
+    --sizes) SIZES=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DIST="$PROJECT_ROOT/dist"
 NPM_SCOPE="${NPM_SCOPE:-jt55401}"
 
-# The service worker cannot import() (HTML spec), so it statically imports a
-# copy of transformers.js whose onnxruntime-web imports are redirected to the
-# "bundle" build, which carries its WASM binding inline. Pinned by version
-# and SHA-256; the version must match TRANSFORMERS_URL in widget/src/worker.js.
+# The gpu service worker statically imports a copy of transformers.js whose
+# onnxruntime-web imports are redirected to the "bundle" build, which
+# carries its WASM binding inline. Pinned by version and SHA-256; the
+# version must match TRANSFORMERS_URL in widget/src/worker.js.
 TRANSFORMERS_VERSION="4.2.0"
 TRANSFORMERS_WEB_SHA256="25e0cbdf5df922996299fcd2cf835101ba979b134389a0dcc54f92022ca7e0ff"
 # The exact onnxruntime-web version that transformers.js release depends on
-# (its package.json `dependencies`); checked against the manifest when the
-# copy is fetched, so bumping TRANSFORMERS_VERSION forces this pin to follow.
+# (its package.json `dependencies`); checked when the copy is fetched, so
+# bumping TRANSFORMERS_VERSION forces this pin to follow.
 ORT_VERSION="1.26.0-dev.20260416-b7804b056c"
+WEBLLM_URL="https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.84/+esm"
 VENDOR_DIR="$SCRIPT_DIR/vendor"
 
 WASM_PACK_SCOPE_ARGS=()
@@ -42,84 +72,87 @@ if [[ -n "$NPM_SCOPE" ]]; then
 fi
 
 # Cargo.toml's release profile is opt-level=3 for the native CLI; the WASM
-# build trades speed for size. Override either by exporting the variable.
+# build trades speed for size. Override by exporting the variable.
 # (panic=abort was measured on 2026-08-28: +0 bytes after brotli, so it stays off.)
 export CARGO_PROFILE_RELEASE_OPT_LEVEL="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-s}"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+bytes() { wc -c <"$1" | tr -d ' '; }
+br_bytes() { brotli -q 11 -c "$1" | wc -c | tr -d ' '; }
+gz_bytes() { gzip -9 -c "$1" | wc -c | tr -d ' '; }
 
-if (( JS_ONLY )); then
-  [[ -f "$SCRIPT_DIR/pkg/eddie_bg.wasm" ]] || { echo "--js-only needs an earlier full build (widget/pkg/ is missing)" >&2; exit 1; }
-  [[ -f "$SCRIPT_DIR/pkg-esm/eddie.js" ]] || { echo "--js-only needs an earlier full build (widget/pkg-esm/ is missing)" >&2; exit 1; }
-else
-echo "==> Building WASM module (opt-level=$CARGO_PROFILE_RELEASE_OPT_LEVEL)..."
-wasm-pack build "$PROJECT_ROOT" \
-  "${WASM_PACK_SCOPE_ARGS[@]}" \
-  --target no-modules \
-  --out-dir "$SCRIPT_DIR/pkg" \
-  --out-name eddie \
-  --release
+# variant -> wasm-pack out-dir for each target. widget/pkg stays the dense
+# no-modules build named `eddie` (the @scope/eddie npm package).
+pkg_dir() {
+  case "$1/$2" in
+    dense/no-modules) echo "$SCRIPT_DIR/pkg" ;;
+    dense/web)        echo "$SCRIPT_DIR/pkg-esm" ;;
+    lite/no-modules)  echo "$SCRIPT_DIR/pkg-lite" ;;
+    lite/web)         echo "$SCRIPT_DIR/pkg-lite-esm" ;;
+  esac
+}
+out_name() { case "$1" in dense) echo eddie ;; lite) echo eddie-lite ;; esac; }
 
-# Second wasm-bindgen pass for the service worker: ES-module glue over the
-# same Rust build. wasm-bindgen emits the same binary for both targets (only
-# the JS differs); the hashes are compared before the optimisation pass so
-# the service worker can init() against the one eddie.wasm.
-echo "==> Building ES-module WASM glue (--target web)..."
-wasm-pack build "$PROJECT_ROOT" \
-  "${WASM_PACK_SCOPE_ARGS[@]}" \
-  --target web \
-  --out-dir "$SCRIPT_DIR/pkg-esm" \
-  --out-name eddie \
-  --release
-ESM_WASM_SAME=1
-if [[ "$(sha256_of "$SCRIPT_DIR/pkg/eddie_bg.wasm")" != "$(sha256_of "$SCRIPT_DIR/pkg-esm/eddie_bg.wasm")" ]]; then
-  ESM_WASM_SAME=0
-  echo "==> Note: --target web produced a different binary; dist/ gets a separate eddie-esm.wasm."
-fi
-echo "$ESM_WASM_SAME" > "$SCRIPT_DIR/pkg-esm/.same-binary"
-
+# Try wasm-opt -Oz and keep the result only when it is smaller after brotli
+# (raw, without brotli). Measured 2026-08-30: -Oz grows both variants after
+# brotli, so this usually reports "skipped"; it stays in case that changes.
 optimize_wasm() {
   local WASM_BIN="$1"
-  if command -v wasm-opt >/dev/null 2>&1; then
-    echo "==> Running candidate WASM optimization (wasm-opt -Oz --all-features) on $(basename "$WASM_BIN")..."
-    WASM_OPT_CANDIDATE="$(mktemp)"
-    cp "$WASM_BIN" "$WASM_OPT_CANDIDATE"
-    wasm-opt -Oz --all-features "$WASM_OPT_CANDIDATE" -o "$WASM_OPT_CANDIDATE"
-
-    if command -v brotli >/dev/null 2>&1; then
-      base_br="$(brotli -q 11 -c "$WASM_BIN" | wc -c | tr -d ' ')"
-      opt_br="$(brotli -q 11 -c "$WASM_OPT_CANDIDATE" | wc -c | tr -d ' ')"
-      if (( opt_br < base_br )); then
-        mv "$WASM_OPT_CANDIDATE" "$WASM_BIN"
-        echo "==> Applied wasm-opt candidate (brotli bytes: $base_br -> $opt_br)."
-      else
-        rm -f "$WASM_OPT_CANDIDATE"
-        echo "==> Skipped wasm-opt candidate (brotli bytes: $base_br -> $opt_br, no gain)."
-      fi
-    else
-      base_raw="$(wc -c <"$WASM_BIN" | tr -d ' ')"
-      opt_raw="$(wc -c <"$WASM_OPT_CANDIDATE" | tr -d ' ')"
-      if (( opt_raw < base_raw )); then
-        mv "$WASM_OPT_CANDIDATE" "$WASM_BIN"
-        echo "==> Applied wasm-opt candidate (raw bytes: $base_raw -> $opt_raw)."
-      else
-        rm -f "$WASM_OPT_CANDIDATE"
-        echo "==> Skipped wasm-opt candidate (raw bytes: $base_raw -> $opt_raw, no gain)."
-      fi
-    fi
-  else
+  if ! command -v wasm-opt >/dev/null 2>&1; then
     echo "==> wasm-opt not found; skipping optional WASM optimization pass."
+    return
+  fi
+  echo "==> Running candidate WASM optimization (wasm-opt -Oz --all-features) on $(basename "$WASM_BIN")..."
+  local cand
+  cand="$(mktemp "${TMPDIR:-/tmp}/eddie-wasm-opt.XXXXXX")"
+  cp "$WASM_BIN" "$cand"
+  wasm-opt -Oz --all-features "$cand" -o "$cand"
+  local before after unit
+  if command -v brotli >/dev/null 2>&1; then before="$(br_bytes "$WASM_BIN")"; after="$(br_bytes "$cand")"; unit=brotli; else before="$(bytes "$WASM_BIN")"; after="$(bytes "$cand")"; unit=raw; fi
+  if (( after < before )); then
+    mv "$cand" "$WASM_BIN"
+    echo "==> Applied wasm-opt candidate ($unit bytes: $before -> $after)."
+  else
+    rm -f "$cand"
+    echo "==> Skipped wasm-opt candidate ($unit bytes: $before -> $after, no gain)."
   fi
 }
-optimize_wasm "$SCRIPT_DIR/pkg/eddie_bg.wasm"
-if (( ! ESM_WASM_SAME )); then
-  optimize_wasm "$SCRIPT_DIR/pkg-esm/eddie_bg.wasm"
-fi
-fi # JS_ONLY
 
-# transformers.js copy for the service worker (cached in widget/vendor/).
+if (( JS_ONLY )); then
+  for v in lite dense; do
+    for t in no-modules web; do
+      d="$(pkg_dir "$v" "$t")"
+      [[ -f "$d/$(out_name "$v")_bg.wasm" ]] || { echo "--js-only needs an earlier full build ($d is missing)" >&2; exit 1; }
+    done
+  done
+else
+  command -v wasm-pack >/dev/null || { echo "wasm-pack is required (cargo install wasm-pack)" >&2; exit 1; }
+  for variant in lite dense; do
+    features=()
+    [[ "$variant" == "lite" ]] && features=(--no-default-features)
+    for target in no-modules web; do
+      dir="$(pkg_dir "$variant" "$target")"
+      echo "==> Building eddie-$variant ($target, opt-level=$CARGO_PROFILE_RELEASE_OPT_LEVEL)..."
+      wasm-pack build "$PROJECT_ROOT" "${WASM_PACK_SCOPE_ARGS[@]}" --target "$target" --out-dir "$dir" --out-name "$(out_name "$variant")" --release -- "${features[@]}"
+    done
+    # wasm-bindgen emits the same binary for both targets (only the JS
+    # differs); compare before optimising so one file serves both glues.
+    nm="$(pkg_dir "$variant" no-modules)/$(out_name "$variant")_bg.wasm"
+    web="$(pkg_dir "$variant" web)/$(out_name "$variant")_bg.wasm"
+    same=1
+    if [[ "$(sha256_of "$nm")" != "$(sha256_of "$web")" ]]; then
+      same=0
+      echo "==> Note: --target web produced a different eddie-$variant binary; dist/ gets a separate eddie-$variant-esm.wasm."
+    fi
+    echo "$same" > "$(pkg_dir "$variant" web)/.same-binary"
+    optimize_wasm "$nm"
+    (( same )) || optimize_wasm "$web"
+  done
+fi
+
+# transformers.js copy for the gpu service worker (cached in widget/vendor/).
 TF_WEB="$VENDOR_DIR/transformers-$TRANSFORMERS_VERSION.web.js"
 if [[ ! -f "$TF_WEB" ]] || [[ "$(sha256_of "$TF_WEB")" != "$TRANSFORMERS_WEB_SHA256" ]]; then
   echo "==> Fetching transformers.js $TRANSFORMERS_VERSION (web build) for the service worker..."
@@ -142,24 +175,45 @@ if ! grep -q "transformers@$TRANSFORMERS_VERSION\"" "$SCRIPT_DIR/src/worker.js";
   echo "widget/src/worker.js pins a different transformers.js version than build.sh ($TRANSFORMERS_VERSION)" >&2
   exit 1
 fi
+if ! grep -q "web-llm@0.2.84" "$SCRIPT_DIR/src/eddie-agent-worker.js"; then
+  echo "widget/src/eddie-agent-worker.js pins a different WebLLM version than build.sh ($WEBLLM_URL)" >&2
+  exit 1
+fi
 echo "==> transformers.js $TRANSFORMERS_VERSION uses onnxruntime-web $ORT_VERSION"
 
 echo "==> Assembling dist/..."
-mkdir -p "$PROJECT_ROOT/dist"
-cp "$SCRIPT_DIR/pkg/eddie_bg.wasm" "$PROJECT_ROOT/dist/eddie.wasm"
-cp "$SCRIPT_DIR/pkg/eddie.js"      "$PROJECT_ROOT/dist/eddie-wasm.js"
-ESM_WASM_FILE="eddie.wasm"
-if [[ "$(cat "$SCRIPT_DIR/pkg-esm/.same-binary" 2>/dev/null || echo 1)" != "1" ]]; then
-  ESM_WASM_FILE="eddie-esm.wasm"
-  cp "$SCRIPT_DIR/pkg-esm/eddie_bg.wasm" "$PROJECT_ROOT/dist/eddie-esm.wasm"
-else
-  rm -f "$PROJECT_ROOT/dist/eddie-esm.wasm"
-fi
-{
-  echo "// SPDX-License-Identifier: GPL-3.0-only"
-  echo "// Generated by widget/build.sh (wasm-pack --target web); the service worker imports this."
-  cat "$SCRIPT_DIR/pkg-esm/eddie.js"
-} > "$PROJECT_ROOT/dist/eddie-wasm-esm.js"
+mkdir -p "$DIST"
+rm -f "$DIST"/eddie.wasm "$DIST"/eddie-esm.wasm "$DIST"/eddie-wasm.js "$DIST"/eddie-wasm-esm.js "$DIST"/eddie-sw.js \
+      "$DIST"/eddie-lite-esm.wasm "$DIST"/eddie-dense-esm.wasm
+for variant in lite dense; do
+  name="$(out_name "$variant")"
+  cp "$(pkg_dir "$variant" no-modules)/${name}_bg.wasm" "$DIST/eddie-$variant.wasm"
+  if [[ "$(cat "$(pkg_dir "$variant" web)/.same-binary" 2>/dev/null || echo 1)" != "1" ]]; then
+    cp "$(pkg_dir "$variant" web)/${name}_bg.wasm" "$DIST/eddie-$variant-esm.wasm"
+  fi
+  {
+    echo "// SPDX-License-Identifier: GPL-3.0-only"
+    echo "// Generated by widget/build.sh (wasm-pack --target no-modules, eddie-$variant); loaded with importScripts by eddie-worker.js."
+    if [[ "$variant" == "dense" ]]; then
+      # The lite glue already declared `wasm_bindgen` in the worker's global
+      # scope; a second `let` of the same name is a SyntaxError.
+      sed -e '1s/^let wasm_bindgen = /let wasm_bindgen_dense = /' "$(pkg_dir "$variant" no-modules)/$name.js"
+    else
+      cat "$(pkg_dir "$variant" no-modules)/$name.js"
+    fi
+  } > "$DIST/eddie-$variant.js"
+  if [[ "$variant" == "dense" ]] && ! grep -q '^let wasm_bindgen_dense = ' "$DIST/eddie-dense.js"; then
+    echo "eddie-dense.js: the wasm-bindgen global was not renamed; the glue layout changed, update build.sh" >&2
+    exit 1
+  fi
+  {
+    echo "// SPDX-License-Identifier: GPL-3.0-only"
+    echo "// Generated by widget/build.sh (wasm-pack --target web, eddie-$variant); the service workers import this."
+    cat "$(pkg_dir "$variant" web)/$name.js"
+  } > "$DIST/eddie-$variant-esm.js"
+done
+LITE_WASM_FILE="eddie-lite.wasm"; [[ -f "$DIST/eddie-lite-esm.wasm" ]] && LITE_WASM_FILE="eddie-lite-esm.wasm"
+DENSE_WASM_FILE="eddie-dense.wasm"; [[ -f "$DIST/eddie-dense-esm.wasm" ]] && DENSE_WASM_FILE="eddie-dense-esm.wasm"
 
 ORT_BUNDLE_URL="https://cdn.jsdelivr.net/npm/onnxruntime-web@$ORT_VERSION/dist/ort.webgpu.bundle.min.mjs"
 {
@@ -168,8 +222,8 @@ ORT_BUNDLE_URL="https://cdn.jsdelivr.net/npm/onnxruntime-web@$ORT_VERSION/dist/o
   sed -e "s#import \* as ONNX_WEB from \"onnxruntime-web/webgpu\";#import * as ONNX_WEB from \"$ORT_BUNDLE_URL\";#" \
       -e "s#import { Tensor } from \"onnxruntime-common\";#import { Tensor } from \"$ORT_BUNDLE_URL\";#" \
       "$TF_WEB"
-} > "$PROJECT_ROOT/dist/eddie-transformers-sw.js"
-if grep -q 'from "onnxruntime' "$PROJECT_ROOT/dist/eddie-transformers-sw.js"; then
+} > "$DIST/eddie-transformers-sw.js"
+if grep -q 'from "onnxruntime' "$DIST/eddie-transformers-sw.js"; then
   echo "eddie-transformers-sw.js still has a bare onnxruntime import; the rewrite in build.sh needs updating for this transformers.js version" >&2
   exit 1
 fi
@@ -177,7 +231,8 @@ fi
 # Each JS entry point is the concatenation of the pure modules it uses
 # (widget/src/lib/*.js, exposed as `EddieLib`) and its main file. No bundler:
 # the lib files attach to a lexical `EddieLib` when one is in scope.
-# `defines` is a line of constants prepended to the bundle (may be empty).
+# `defines` is prepended to the bundle (constants, or the static imports of
+# a service worker tier; may be empty).
 bundle() {
   local out="$1"; shift
   local main="$1"; shift
@@ -188,8 +243,8 @@ bundle() {
     echo "// Generated by widget/build.sh from widget/src/$main and widget/src/lib/*.js; edit those instead."
     if [[ "$wrap" == "iife" ]]; then echo "(function () {"; fi
     echo '"use strict";'
-    echo "const EddieLib = {};"
     if [[ -n "$defines" ]]; then echo "$defines"; fi
+    echo "const EddieLib = {};"
     for lib in "$@"; do
       cat "$SCRIPT_DIR/src/lib/$lib"
       echo
@@ -197,13 +252,49 @@ bundle() {
     cat "$SCRIPT_DIR/src/$main"
     if [[ "$wrap" == "iife" ]]; then echo "})();"; fi
   } > "$out"
-  node --check "$out"
+  if [[ "$wrap" == "module" ]]; then
+    # A .mjs copy makes every Node version parse the static imports as ESM.
+    local check
+    check="$(mktemp "${TMPDIR:-/tmp}/eddie-check.XXXXXX.mjs")"
+    cp "$out" "$check"
+    node --check "$check"
+    rm -f "$check"
+  else
+    node --check "$out"
+  fi
 }
 
-bundle "$PROJECT_ROOT/dist/eddie-worker.js"       worker.js             plain "" urls.js lanes.js download.js search-engine.js
-bundle "$PROJECT_ROOT/dist/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js lanes.js agent.js transport.js warm.js
-bundle "$PROJECT_ROOT/dist/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-engine.js
-bundle "$PROJECT_ROOT/dist/eddie-sw.js"           eddie-sw.js           plain "const EDDIE_ESM_WASM = \"$ESM_WASM_FILE\";" urls.js lanes.js download.js agent.js search-engine.js agent-engine.js
+bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "" boot.js
+bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js lanes.js agent.js transport.js warm.js
+bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js download.js search-engine.js
+bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-engine.js
+
+# The agent (agent.js, agent-engine.js) is bundled into the gpu tier only.
+SW_LIBS=(urls.js lanes.js download.js search-engine.js)
+SW_GPU_LIBS=("${SW_LIBS[@]}" agent.js agent-engine.js)
+SW_LITE_IMPORTS="import initLiteWasm, * as liteWasmApi from \"./eddie-lite-esm.js\";
+const EDDIE_LITE_WASM = \"$LITE_WASM_FILE\";"
+bundle "$DIST/eddie-sw-lite.js" eddie-sw.js module "$SW_LITE_IMPORTS
+const EDDIE_SW_TIER = \"lite\";
+const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, webllm = null, transformers = null;" "${SW_LIBS[@]}"
+bundle "$DIST/eddie-sw-dense.js" eddie-sw.js module "$SW_LITE_IMPORTS
+import initDenseWasm, * as denseWasmApi from \"./eddie-dense-esm.js\";
+const EDDIE_SW_TIER = \"dense\";
+const EDDIE_DENSE_WASM = \"$DENSE_WASM_FILE\", webllm = null, transformers = null;" "${SW_LIBS[@]}"
+bundle "$DIST/eddie-sw-gpu.js" eddie-sw.js module "$SW_LITE_IMPORTS
+import * as webllm from \"$WEBLLM_URL\";
+import * as transformers from \"./eddie-transformers-sw.js\";
+const EDDIE_SW_TIER = \"gpu\";
+const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null;" "${SW_GPU_LIBS[@]}"
 
 echo "==> Build complete. Output:"
-ls -lh "$PROJECT_ROOT/dist/"
+ls -lh "$DIST/"
+
+if (( SIZES )); then
+  echo
+  printf '%-26s %10s %10s %10s\n' file "raw" "gzip" "brotli"
+  for f in "$DIST"/*; do
+    if command -v brotli >/dev/null 2>&1; then br="$(br_bytes "$f")"; else br="-"; fi
+    printf '%-26s %10s %10s %10s\n' "$(basename "$f")" "$(bytes "$f")" "$(gz_bytes "$f")" "$br"
+  done
+fi

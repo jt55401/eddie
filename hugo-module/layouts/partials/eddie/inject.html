@@ -43,17 +43,16 @@
   {{- $cacheBust = substr (crypto.SHA256 .Content) 0 12 -}}
 {{- end -}}
 {{- $indexUrl = printf "%s?v=%v" $indexUrl $cacheBust -}}
-{{- if ne $warm "off" -}}
 {{/*
-  Warm-at-load hints: the retriever and the index are site assets the widget
-  fetches as soon as it decides to warm up (see data-warm); prefetching them
-  during the idle time after load makes that instant. Model files are never
-  prefetched: they need the visitor's consent.
+  loader = "boot" (default) puts the 2 KB eddie-boot.js on the page: it draws
+  the trigger and the Ctrl/Cmd+K shortcut and fetches eddie-widget.js on the
+  first interaction (or after load for a visitor who used the search
+  before). loader = "full" loads eddie-widget.js on every page view.
 */}}
-<link rel="prefetch" href="{{ "eddie/eddie.wasm" | relURL }}" as="fetch" crossorigin="anonymous">
-<link rel="prefetch" href="{{ $indexUrl }}" as="fetch" crossorigin="anonymous">
-{{- end }}
-<script src="{{ "eddie/eddie-widget.js" | relURL }}"
+{{- $loader := $cfg.loader | default "boot" -}}
+{{- $script := "eddie/eddie-boot.js" -}}
+{{- if eq $loader "full" -}}{{- $script = "eddie/eddie-widget.js" -}}{{- end -}}
+<script src="{{ $script | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
         data-theme="{{ $theme }}"

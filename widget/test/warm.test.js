@@ -12,10 +12,12 @@ test("warm off never does anything; a ready persistent engine is adopted", () =>
   assert.equal(W.decideWarm({ mode: "always", engineReady: true, saveData: true }).action, "adopt");
 });
 
-test("auto: data saver stops before any check; otherwise check the cache first", () => {
-  assert.equal(W.decideWarm({ mode: "auto", saveData: true, checked: false }).action, "none");
-  assert.equal(W.decideWarm({ mode: "auto", saveData: false, checked: false }).action, "check");
+test("auto: data saver stops before any check; a first-time visitor never warms; a returning one checks the cache", () => {
+  assert.equal(W.decideWarm({ mode: "auto", saveData: true, checked: false, returning: true }).action, "none");
+  assert.deepEqual(W.decideWarm({ mode: "auto", saveData: false, checked: false }), { action: "none", consent: false, reason: "first visit" });
+  assert.equal(W.decideWarm({ mode: "auto", saveData: false, checked: false, returning: true }).action, "check");
   assert.equal(W.decideWarm({ mode: "always", saveData: true, checked: false }).action, "check", "always still checks: a cached lane costs no data");
+  assert.equal(W.decideWarm({ mode: "always", checked: false }).action, "check", "always does not wait for a returning visitor");
 });
 
 test("auto: init only for a cached lane the visitor consented to before (or no dense lane)", () => {
@@ -38,6 +40,8 @@ test("always: cached lanes init without consent; uncached ones download unless d
   assert.equal(W.decideWarm(Object.assign({}, base, { cached: false, saveData: true })).action, "none");
 });
 
-test("the consent key is stable", () => {
+test("the storage keys are stable", () => {
   assert.equal(W.SEARCH_CONSENT_KEY, "eddie.search.consent");
+  assert.equal(W.SEARCH_TIER_KEY, "eddie.search.tier");
+  assert.equal(W.SEARCH_USED_KEY, "eddie.search.used");
 });

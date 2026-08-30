@@ -174,3 +174,45 @@ test("registerServiceWorker resolves once a worker is active, rejects on redunda
     /cannot be started/
   );
 });
+
+test("service worker tiers: script names, scopes under the asset directory, tier per lane kind", () => {
+  assert.deepEqual(T.SW_TIERS, ["lite", "dense", "gpu"]);
+  assert.equal(T.swScriptName("gpu"), "eddie-sw-gpu.js");
+  assert.equal(T.swScope("https://x.test/eddie/", "lite"), "https://x.test/eddie/sw/lite/");
+  assert.equal(T.swScope("https://x.test/eddie", "dense"), "https://x.test/eddie/sw/dense/");
+  assert.equal(T.tierForLane("wasm-candle"), "dense");
+  assert.equal(T.tierForLane("webgpu-onnx"), "gpu");
+  assert.equal(T.tierForLane(null), "lite");
+});
+
+test("search tier: the lane about to load wins, then the remembered consent, else lite", () => {
+  assert.equal(T.searchTierFor({}), "lite");
+  assert.equal(T.searchTierFor({ rememberedTier: "gpu" }), "gpu");
+  assert.equal(T.searchTierFor({ rememberedTier: "bogus" }), "lite");
+  assert.equal(T.searchTierFor({ rememberedTier: "gpu", laneKind: "wasm-candle" }), "dense");
+  assert.equal(T.searchTierFor({ laneKind: "webgpu-onnx" }), "gpu");
+});
+
+test("searchStaysOnPage only ever applies to the gpu tier", () => {
+  assert.equal(T.searchStaysOnPage({ tier: "lite", swOnnx: false, pageHasGpu: true, denseRuntime: "auto" }), false);
+  assert.equal(T.searchStaysOnPage({ tier: "dense", swOnnx: false, pageHasGpu: true, denseRuntime: "auto" }), false);
+  assert.equal(T.searchStaysOnPage({ tier: "gpu", swOnnx: false, pageHasGpu: true, denseRuntime: "auto" }), true);
+});
+
+test("the 0.4.2 single-scope registration is unregistered; any other match is left alone", async () => {
+  const calls = [];
+  const container = (scope) => ({
+    getRegistration: async (url) => {
+      calls.push(url);
+      return scope ? { scope, unregister: async () => calls.push("unregister " + scope) } : undefined;
+    },
+  });
+  assert.equal(await T.unregisterLegacyServiceWorker(container("https://x.test/eddie/"), "https://x.test/eddie/"), true);
+  assert.deepEqual(calls, ["https://x.test/eddie/", "unregister https://x.test/eddie/"]);
+  calls.length = 0;
+  assert.equal(await T.unregisterLegacyServiceWorker(container("https://x.test/"), "https://x.test/eddie/"), false, "the site's own worker at / stays");
+  assert.deepEqual(calls, ["https://x.test/eddie/"]);
+  assert.equal(await T.unregisterLegacyServiceWorker(container(null), "https://x.test/eddie/"), false);
+  assert.equal(await T.unregisterLegacyServiceWorker(undefined, "https://x.test/eddie/"), false);
+  assert.equal(await T.unregisterLegacyServiceWorker({ getRegistration: async () => { throw new Error("no"); } }, "https://x.test/eddie/"), false);
+});

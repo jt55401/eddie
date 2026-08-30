@@ -17,11 +17,19 @@
   "use strict";
 
   const SEARCH_CONSENT_KEY = "eddie.search.consent";
+  // The service worker tier that consent needs ("dense" | "gpu"), so a
+  // returning visitor's warm-up registers the right worker at once.
+  const SEARCH_TIER_KEY = "eddie.search.tier";
+  // Set on the first modal open: from then on the visitor is "returning".
+  const SEARCH_USED_KEY = "eddie.search.used";
 
   /**
    * opts:
    *   mode          "auto" | "off" | "always"
    *   saveData      navigator.connection.saveData
+   *   returning     the visitor opened the search or accepted a model on this
+   *                 browser before (localStorage); a first-time visitor never
+   *                 warms in "auto", so a plain page view registers nothing
    *   engineReady   a persistent engine already reports `ready` for this index
    *   checked       a cache_check result is in (lane/cached below are valid)
    *   lane          the dense lane the engine would load ({id} or null)
@@ -40,6 +48,7 @@
     if (o.engineReady) return { action: "adopt", consent: false, reason: "engine already ready" };
     if (!o.checked) {
       if (mode === "auto" && o.saveData) return { action: "none", consent: false, reason: "data saver" };
+      if (mode === "auto" && !o.returning) return { action: "none", consent: false, reason: "first visit" };
       return { action: "check", consent: false, reason: "cache state unknown" };
     }
     if (!o.lane) return { action: "init", consent: false, reason: "no dense lane to download" };
@@ -55,5 +64,5 @@
     return { action: "none", consent: false, reason: "lane not cached" };
   }
 
-  return { SEARCH_CONSENT_KEY, decideWarm };
+  return { SEARCH_CONSENT_KEY, SEARCH_TIER_KEY, SEARCH_USED_KEY, decideWarm };
 });

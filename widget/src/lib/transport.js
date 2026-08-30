@@ -406,16 +406,88 @@
    * worker is available: the service worker cannot run webgpu-onnx lanes
    * (`swOnnx` false, no WebGPU in its scope) while this page has an adapter
    * and the site allows the WebGPU runtime. Persistence is not worth a
-   * quieter dense lane.
+   * quieter dense lane. Only the gpu tier can run those lanes at all; the
+   * lite and dense tiers never hold a webgpu lane, so the question does not
+   * arise for them.
    */
   function searchStaysOnPage(opts) {
     const o = opts || {};
+    if (o.tier && o.tier !== "gpu") return false;
     if (o.swOnnx) return false;
     if (!o.pageHasGpu) return false;
     return o.denseRuntime !== "wasm";
   }
 
+  // -- service worker tiers ------------------------------------------------
+  //
+  // Three builds of widget/src/eddie-sw.js (see widget/build.sh), each in
+  // its own scope under the asset directory, so a page installs only the
+  // imports its visitor has opted into:
+  //   lite   eddie-sw-lite.js   keyword + sparse search (lite wasm)
+  //   dense  eddie-sw-dense.js  + the CPU dense lane (dense wasm)
+  //   gpu    eddie-sw-gpu.js    + transformers.js (WebGPU lane) + WebLLM (agent)
+
+  const SW_TIERS = ["lite", "dense", "gpu"];
+
+  function swScriptName(tier) {
+    return `eddie-sw-${tier}.js`;
+  }
+
+  /** Registration scope of a tier: `<asset dir>sw/<tier>/` (a key, never navigated to). */
+  function swScope(baseUrl, tier) {
+    return String(baseUrl).replace(/\/?$/, "/") + "sw/" + tier + "/";
+  }
+
+  /** The tier that can host a dense lane of `kind` ("wasm-candle" | "webgpu-onnx" | null). */
+  function tierForLane(kind) {
+    if (kind === "webgpu-onnx") return "gpu";
+    if (kind === "wasm-candle") return "dense";
+    return "lite";
+  }
+
+  /**
+   * Which tier the search engine should live in right now: the tier of the
+   * lane about to be loaded (`laneKind`, known once the engine asked for
+   * consent or the visitor accepted), else the tier remembered from an
+   * earlier consent on this browser (`rememberedTier`), else lite.
+   */
+  function searchTierFor(opts) {
+    const o = opts || {};
+    if (o.laneKind) return tierForLane(o.laneKind);
+    if (SW_TIERS.includes(o.rememberedTier)) return o.rememberedTier;
+    return "lite";
+  }
+
+  /**
+   * Eddie 0.4.2 registered one service worker with scope = the asset
+   * directory. Its script (eddie-sw.js) no longer ships; unregister it so
+   * the browser stops trying to update it. Any other registration matching
+   * that URL (the site's own worker at "/") is left alone.
+   */
+  async function unregisterLegacyServiceWorker(container, baseUrl) {
+    if (!container || typeof container.getRegistration !== "function") return false;
+    let reg;
+    try {
+      reg = await container.getRegistration(baseUrl);
+    } catch (_) {
+      return false;
+    }
+    if (!reg || reg.scope !== baseUrl) return false;
+    try {
+      await reg.unregister();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   return {
+    SW_TIERS,
+    swScriptName,
+    swScope,
+    tierForLane,
+    searchTierFor,
+    unregisterLegacyServiceWorker,
     HELLO_TIMEOUT_MS,
     PING_TIMEOUT_MS,
     IDLE_PING_TIMEOUT_MS,

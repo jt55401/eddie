@@ -19,6 +19,9 @@
 (function () {
   const scriptEl = document.currentScript;
   if (!scriptEl) return;
+  // Loaded twice (a page that carries eddie-boot.js and eddie-widget.js, or
+  // a second injection): the first mount wins.
+  if (document.getElementById("eddie-host")) return;
   const lib = EddieLib;
 
   const config = lib.parseWidgetConfig((name) => scriptEl.getAttribute(name));
@@ -31,6 +34,8 @@
   const siteName = config.qaSubject || location.hostname;
   const reducedMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
   const saveData = !!(navigator.connection && navigator.connection.saveData);
+  // Read once, before any open on this page marks the visitor as returning.
+  const returningAtLoad = !!(readSearchConsent() || searchUsedBefore());
 
   const HEART_SPRITES = [
     [".11111.", "1222221", "1222221", ".12221."], // solid
@@ -42,6 +47,8 @@
   const HIDDEN_SECTIONS = /^(summary|summary lane|semantic segment)$/i;
   const AGENT_CONSENT_KEY = "eddie.agent.consent";
   const SEARCH_CONSENT_KEY = lib.SEARCH_CONSENT_KEY;
+  const SEARCH_TIER_KEY = lib.SEARCH_TIER_KEY;
+  const SEARCH_USED_KEY = lib.SEARCH_USED_KEY;
   // How long a modal open waits for the transport decision (service worker
   // registration + hello) before starting a page-side worker instead.
   const TRANSPORT_WAIT_MS = 3000;
@@ -68,8 +75,12 @@
   let searchTimer = null;
   let lastSearchedQuery = "";
   let initWaiters = []; // resolve() once the index is loaded (index_ready or ready)
-  let transportPlan = null; // Promise<{kind, registration?, hello?, swSearch?}>
+  const transportPlans = Object.create(null); // tier -> Promise<{kind, registration?, hello?, swSearch?}>
+  let searchTier = null; // "lite" | "dense" | "gpu": the tier the search transport was made for
+  let pendingConsentKind = null; // runtime kind of the lane the consent card is for
   let searchCreating = null; // Promise while ensureSearchTransport runs
+  let switching = null; // Promise while the search moves to another tier
+  let legacyCleanup = null; // Promise: the 0.4.2 single-scope registration, unregistered once
   let forcePageWorkers = false; // after a dead service-worker engine: this page uses page workers
   let pageGpu = null; // null (unknown) | false | { maxBufferSize, hasF16 }
   let pageGpuProbe = null;
@@ -725,40 +736,56 @@
     else window.addEventListener("load", () => fn(), { once: true });
   }
 
-  function ensureTransportPlan() {
-    if (!transportPlan) transportPlan = setupTransport();
-    return transportPlan;
+  /**
+   * The transport decision for one service worker tier (see
+   * lib/transport.js): register that tier's worker and say hello, or fall
+   * back to page workers. Made once per tier and only when something needs
+   * it: a modal open (lite), a consent (dense/gpu), an Ask (gpu) or a
+   * returning visitor's warm-up. A plain page view registers nothing.
+   */
+  function ensureTransportPlan(tier) {
+    const t = tier || "lite";
+    if (!transportPlans[t]) transportPlans[t] = setupTransport(t);
+    return transportPlans[t];
   }
 
-  async function setupTransport() {
+  async function setupTransport(tier) {
     const kind = lib.chooseTransportKind({
       persist: config.persist,
       hasServiceWorker: !!navigator.serviceWorker,
       secureContext: window.isSecureContext,
     });
-    if (kind !== "sw" || forcePageWorkers) return { kind: "worker" };
+    if (kind !== "sw" || forcePageWorkers) return { kind: "worker", tier };
     let registration = null;
     let swSearch = null;
     try {
+      if (!legacyCleanup) {
+        legacyCleanup = lib.unregisterLegacyServiceWorker(navigator.serviceWorker, baseUrl).then((done) => {
+          if (done) console.info("eddie: unregistered the 0.4.2 service worker (scope " + baseUrl + ")");
+        });
+      }
+      await legacyCleanup;
       registration = await lib.registerServiceWorker({
         container: navigator.serviceWorker,
-        url: lib.assetUrl(baseUrl, "eddie-sw.js", version),
-        scope: baseUrl,
+        url: lib.assetUrl(baseUrl, lib.swScriptName(tier), version),
+        scope: lib.swScope(baseUrl, tier),
       });
       swSearch = new lib.ServiceWorkerTransport(registration, { kind: "search", version });
       const hello = await swSearch.connect();
-      // The service worker cannot run a webgpu-onnx lane (no WebGPU in its
-      // scope) while this page could: search stays page-side for quality,
-      // the agent still goes wherever the service worker can host it.
-      if (lib.searchStaysOnPage({ swOnnx: hello.onnx, pageHasGpu: !!(await probePageGpu()), denseRuntime: config.denseRuntime })) {
+      if (hello.tier && hello.tier !== tier) throw new Error(`service worker at ${lib.swScope(baseUrl, tier)} reports tier ${hello.tier}`);
+      // The gpu tier cannot run a webgpu-onnx lane without WebGPU in the
+      // service worker's scope while this page could: search stays
+      // page-side for quality, the agent still goes wherever the service
+      // worker can host it.
+      if (lib.searchStaysOnPage({ tier, swOnnx: hello.onnx, pageHasGpu: !!(await probePageGpu()), denseRuntime: config.denseRuntime })) {
         swSearch.terminate();
         swSearch = null;
       }
-      return { kind: "sw", registration, hello, swSearch };
+      return { kind: "sw", tier, registration, hello, swSearch };
     } catch (err) {
-      console.info("eddie: service worker unavailable, using page workers:", err && err.message ? err.message : err);
+      console.info(`eddie: ${tier} service worker unavailable, using page workers:`, err && err.message ? err.message : err);
       if (swSearch) swSearch.terminate();
-      return { kind: "worker" };
+      return { kind: "worker", tier };
     }
   }
 
@@ -801,35 +828,81 @@
   }
 
   // -- Search transport --
-  /** Create and wire the search transport (no init yet). `wait` bounds the transport decision. */
-  function ensureSearchTransport(waitMs) {
+  /**
+   * Create and wire the search transport for `tier` (no init yet). `waitMs`
+   * bounds the transport decision; the tier defaults to the one a stored
+   * consent remembers, else lite.
+   */
+  function ensureSearchTransport(waitMs, tier) {
     if (search) return Promise.resolve(search);
     if (searchCreating) return searchCreating;
+    const t0 = tier || lib.searchTierFor({ rememberedTier: readSearchTier() });
     searchCreating = (async () => {
-      const planPromise = ensureTransportPlan();
-      const plan = waitMs == null ? await planPromise.catch(() => null) : await withDeadline(planPromise, waitMs);
+      const t = await createSearchTransport(t0, waitMs);
       if (search) return search;
-      let t = plan && plan.kind === "sw" && plan.swSearch && !forcePageWorkers ? plan.swSearch : null;
-      if (!t) {
-        try {
-          t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-worker.js", version));
-        } catch (err) {
-          showInitError("Couldn't start the search worker: " + (err && err.message ? err.message : err), false);
-          return null;
-        }
-      }
-      attachSearch(t, plan);
-      return t;
+      if (!t) return null;
+      attachSearch(t.transport, t.plan, t0);
+      return t.transport;
     })().finally(() => {
       searchCreating = null;
     });
     return searchCreating;
   }
 
-  function attachSearch(t, plan) {
+  /** A transport for `tier`: the tier's service worker channel, else a page worker. */
+  async function createSearchTransport(tier, waitMs) {
+    const planPromise = ensureTransportPlan(tier);
+    const plan = waitMs == null ? await planPromise.catch(() => null) : await withDeadline(planPromise, waitMs);
+    let t = plan && plan.kind === "sw" && plan.swSearch && !forcePageWorkers ? plan.swSearch : null;
+    if (t && t.closed) t = null;
+    if (!t) {
+      try {
+        t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-worker.js", version));
+      } catch (err) {
+        showInitError("Couldn't start the search worker: " + (err && err.message ? err.message : err), false);
+        return null;
+      }
+    }
+    return { transport: t, plan };
+  }
+
+  /**
+   * Move the search engine to the tier that can host the lane the visitor
+   * just accepted (a lite service worker has no candle, no transformers.js).
+   * Page workers load what they need themselves and never move. The old
+   * channel is dropped; Chrome stops the idle worker on its own.
+   */
+  function switchSearchTier(tier) {
+    if (!search || search.kind !== "sw" || tier === searchTier) return Promise.resolve();
+    if (switching) return switching;
+    switching = (async () => {
+      const made = await createSearchTransport(tier, null);
+      if (!made || !search) return;
+      const old = search;
+      try {
+        old.postRaw({ type: "disconnect" });
+      } catch (_) {
+        // port already gone
+      }
+      old.terminate();
+      search = null;
+      searchable = false;
+      initSent = false;
+      setWorkerState("idle");
+      attachSearch(made.transport, made.plan, tier);
+      console.info(`eddie: search moved to the ${tier} tier (${made.transport.kind})`);
+    })().finally(() => {
+      switching = null;
+    });
+    return switching;
+  }
+
+  function attachSearch(t, plan, tier) {
     search = t;
+    searchTier = tier || "lite";
     initSent = false;
     host.dataset.transport = t.kind;
+    host.dataset.tier = searchTier;
     t.on("status", handleStatus);
     t.on("ready", handleReady);
     t.on("error", (msg) => {
@@ -1005,11 +1078,14 @@
     switch (msg.state) {
       case "loading_wasm":
         setWorkerState("loading");
-        setStatus("Loading search engine…", null);
+        setStatus(msg.variant === "dense" ? "Loading the dense search engine…" : "Loading search engine…", null);
         announce("Loading search engine");
         break;
       case "loading_index":
         setStatus("Loading index…", msg.progress);
+        break;
+      case "loading_sidecar":
+        setStatus("Loading index vectors…", msg.progress);
         break;
       case "index_ready":
         manifestInfo = msg.manifest || null;
@@ -1023,6 +1099,7 @@
         setWorkerState("awaiting_consent");
         showStatus(false);
         pendingConsentLane = msg.lane && msg.lane.id ? msg.lane.id : null;
+        pendingConsentKind = msg.lane && msg.lane.kind ? msg.lane.kind : null;
         if (consentDeclined) break;
         showConsent(msg);
         break;
@@ -1063,7 +1140,8 @@
     host.dataset.runtime = msg.runtime || "";
     host.dataset.readyMs = String(Math.round(performance.now()));
     host.dataset.reused = msg.reused ? "true" : "false";
-    if (msg.lane) rememberSearchConsent(msg.lane);
+    host.dataset.wasm = msg.wasm || "";
+    if (msg.lane) rememberSearchConsent(msg.lane, msg.runtime === "webgpu" ? "gpu" : "dense");
     showStatus(false);
     hide(consentCard);
     lastDegradedNotice = lib.degradedNotice(msg.arms, msg.degraded);
@@ -1074,21 +1152,29 @@
   }
 
   // -- Warm at load (data-warm) --
-  // Runs after `load` and an idle callback, once the transport is decided.
-  // Never downloads a model without a prior consent on this browser (auto);
-  // `always` is the site owner's choice to warm uncached lanes too.
+  // Runs after `load` and an idle callback. In "auto" only a returning
+  // visitor (opened the search or accepted a model on this browser before)
+  // gets a transport at all, and a model download only after a prior
+  // consent with the files still cached; `always` is the site owner's
+  // choice to warm uncached lanes too. A first-time visitor's page view
+  // fetches nothing beyond this script.
   async function warmUp() {
-    if (config.warm === "off") return;
-    const plan = await ensureTransportPlan().catch(() => null);
-    if (!plan || search) return; // the modal opened first: the normal flow owns init
-    const engineReady = plan.kind === "sw" && !!plan.swSearch && lib.canReuseSearch(plan.hello.search, indexUrl);
-    let decision = lib.decideWarm({ mode: config.warm, saveData, engineReady, checked: false });
+    if (config.warm === "off" || search || isOpen) return;
+    const rememberedTier = readSearchTier();
+    let decision = lib.decideWarm({ mode: config.warm, saveData, engineReady: false, checked: false, returning: returningAtLoad });
     console.debug("eddie warm:", decision.action, decision.reason);
     if (decision.action === "none") return;
-    const t = await ensureSearchTransport(null);
+    const tier = lib.searchTierFor({ rememberedTier });
+    const plan = await ensureTransportPlan(tier).catch(() => null);
+    if (!plan || search || isOpen) return; // the modal opened first: the normal flow owns init
+    const engineReady = plan.kind === "sw" && !!plan.swSearch && lib.canReuseSearch(plan.hello.search, indexUrl);
+    decision = lib.decideWarm({ mode: config.warm, saveData, engineReady, checked: false, returning: true });
+    console.debug("eddie warm:", decision.action, decision.reason);
+    if (decision.action === "none") return;
+    const t = await ensureSearchTransport(null, tier);
     if (!t) return;
     if (decision.action === "adopt") return; // attachSearch adopted the ready state
-    if (initSent) return;
+    if (initSent || isOpen) return;
     let cr;
     try {
       cr = await search.call("cache_check", { indexUrl, baseUrl, version, denseRuntime: config.denseRuntime }, { requestId: ++requestSeq, timeoutMs: 240000 });
@@ -1102,13 +1188,20 @@
       saveData,
       engineReady: cr.phase === "ready",
       checked: true,
+      returning: true,
       lane: cr.lane,
       cached: cr.cached,
       consentedLane: readSearchConsent(),
     });
     console.debug("eddie warm:", decision.action, decision.reason);
     if (decision.action === "init") {
-      if (decision.consent && cr.lane) pendingConsentLane = cr.lane.id;
+      if (cr.lane) {
+        pendingConsentLane = cr.lane.id;
+        pendingConsentKind = cr.lane.kind || null;
+        // The engine will load this lane: make sure the transport can host it.
+        await switchSearchTier(lib.searchTierFor({ laneKind: cr.lane.kind }));
+        if (!search) return;
+      }
       postInit(decision.consent);
     } else if (decision.action === "adopt") {
       postInit(false); // the engine answers with ready at once
@@ -1123,9 +1216,34 @@
     }
   }
 
-  function rememberSearchConsent(laneId) {
+  function readSearchTier() {
+    try {
+      return localStorage.getItem(SEARCH_TIER_KEY) || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function searchUsedBefore() {
+    try {
+      return !!localStorage.getItem(SEARCH_USED_KEY);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function rememberSearchUsed() {
+    try {
+      localStorage.setItem(SEARCH_USED_KEY, "1");
+    } catch (_) {
+      // storage unavailable: every visit is a first visit
+    }
+  }
+
+  function rememberSearchConsent(laneId, tier) {
     try {
       localStorage.setItem(SEARCH_CONSENT_KEY, String(laneId));
+      if (tier) localStorage.setItem(SEARCH_TIER_KEY, String(tier));
     } catch (_) {
       // storage unavailable: no warm-up next visit
     }
@@ -1144,6 +1262,8 @@
     consentText.textContent = lib.consentCopy({
       sizeBytes: msg.sizeBytes,
       model: short,
+      origin: msg.origin || (lane.origin || "huggingface"),
+      sidecarBytes: msg.sidecarBytes || 0,
       saveData: saveData || !!msg.saveData,
       consentText: config.consentText,
     });
@@ -1152,12 +1272,18 @@
     announce("Semantic search needs a model download. " + consentText.textContent);
   }
 
-  function acceptConsent() {
+  async function acceptConsent() {
     hide(consentCard);
     if (!search) return;
-    if (pendingConsentLane) rememberSearchConsent(pendingConsentLane);
-    postInit(true);
+    const tier = lib.searchTierFor({ laneKind: pendingConsentKind });
+    if (pendingConsentLane) rememberSearchConsent(pendingConsentLane, tier === "lite" ? null : tier);
     input.focus();
+    setStatus("Loading search model…", null);
+    // The lite service worker cannot host the lane: move first, then init
+    // with consent on the tier that can.
+    await switchSearchTier(tier);
+    if (!search) return;
+    postInit(true);
   }
 
   function declineConsent() {
@@ -1524,7 +1650,8 @@
     if (agent) return Promise.resolve(agent);
     if (agentCreating) return agentCreating;
     agentCreating = (async () => {
-      const plan = await withDeadline(ensureTransportPlan(), TRANSPORT_WAIT_MS);
+      // The agent always lives in the gpu tier (WebLLM is only imported there).
+      const plan = await withDeadline(ensureTransportPlan("gpu"), TRANSPORT_WAIT_MS);
       if (agent) return agent;
       let t = null;
       if (plan && plan.kind === "sw" && plan.hello && plan.hello.gpu && !forcePageWorkers) {
@@ -1810,7 +1937,9 @@
 
   // -- Modal open/close --
   function openModal() {
+    if (isOpen) return;
     isOpen = true;
+    rememberSearchUsed();
     rotateHeartSprite();
     backdrop.classList.add("sa-open");
     trigger.style.display = "none";
@@ -1964,9 +2093,19 @@
   document.body.appendChild(host);
   host.dataset.persist = config.persist;
   host.dataset.warm = config.warm;
+  host.dataset.boot = scriptEl.getAttribute("data-boot") || "";
+  window.eddie = Object.assign(window.eddie || {}, { open: openModal, close: closeModal });
+  // Handed over from eddie-boot.js: drop its trigger and honour a click or
+  // shortcut that arrived while this script was loading.
+  const boot = window.__eddieBoot;
+  if (boot && typeof boot.dispose === "function") {
+    const wantOpen = !!boot.open;
+    boot.dispose();
+    if (wantOpen) openModal();
+  }
   afterLoad(() =>
     onIdle(() => {
-      ensureTransportPlan().then(() => warmUp()).catch((err) => console.warn("eddie warm-up failed", err));
+      warmUp().catch((err) => console.warn("eddie warm-up failed", err));
     })
   );
 })();
