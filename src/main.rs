@@ -47,7 +47,7 @@ use eddie::search::{
     rank_qa, retrieve,
 };
 use eddie::sparse::{
-    SparseDocEncoder, SparseOptions, sparse_query_terms, sparse_tokenizer_from_bytes,
+    SparseDocEncoder, SparseOptions, WordPiece, sparse_query_terms, sparse_tokenizer_from_bytes,
     tokenizer_json_sha256,
 };
 
@@ -1364,9 +1364,9 @@ fn lane_list(index: &SearchIndex) -> String {
 /// Returns `None`, with a warning, when it cannot be loaded or does not
 /// match, so the search degrades instead of failing or scoring against the
 /// wrong vocabulary.
-fn load_sparse_tokenizer(index: &SearchIndex) -> Option<tokenizers::Tokenizer> {
+fn load_sparse_tokenizer(index: &SearchIndex) -> Option<WordPiece> {
     let spec = index.manifest.sparse.as_ref()?;
-    let fetch = || -> Result<tokenizers::Tokenizer> {
+    let fetch = || -> Result<WordPiece> {
         let repo = eddie::embed::hub::ModelRepo::open(&spec.tokenizer, spec.revision.as_deref())
             .with_context(|| format!("opening HuggingFace repo {}", spec.tokenizer))?;
         let path = repo
@@ -1435,7 +1435,7 @@ struct QueryInputs {
 /// widget does.
 struct QueryRuntime {
     dense: Option<QueryEmbedder>,
-    sparse_tokenizer: Option<tokenizers::Tokenizer>,
+    sparse_tokenizer: Option<WordPiece>,
     mode: Mode,
     options: RankingOptions,
 }

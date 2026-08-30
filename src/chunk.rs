@@ -42,18 +42,7 @@ pub struct Document {
     pub source_path: String,
 }
 
-/// Metadata attached to each chunk, linking it back to its source document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkMeta {
-    pub title: String,
-    pub url: String,
-    pub section: Option<String>,
-    #[serde(default)]
-    pub date: Option<String>,
-    #[serde(default)]
-    pub granularity: Option<String>,
-    pub chunk_index: usize,
-}
+pub use crate::records::ChunkMeta;
 
 /// An embeddable text chunk with its metadata.
 ///

@@ -40,12 +40,10 @@ use anyhow::{Context, Result, bail};
 use brotli::{CompressorReader, Decompressor};
 
 use crate::bm25::{Bm25Index, ByteCursor, write_varint};
-use crate::chunk::ChunkMeta;
-use crate::claims::ClaimEntry;
 use crate::manifest::{
     Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SparseSpec, SparseTerm,
 };
-use crate::qa::QaEntry;
+use crate::records::{ChunkMeta, ClaimEntry, QaEntry};
 
 const ED_MAGIC: &[u8; 4] = b"SAED";
 const ED_VERSION: u32 = 2;
