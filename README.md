@@ -395,15 +395,24 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  A[Visitor Opens Widget] --> B[Fetch index.ed manifest]
-  B --> C[Pick dense lane:<br/>WebGPU or WASM candle]
-  C --> D[Load Model Files<br/>cached in browser]
-  D --> E[Query]
-  E --> F[BM25 + Sparse + Dense]
-  F --> G[Weighted RRF + Page Grouping]
-  G --> H[Ranked Results]
-  H -.optional, WebGPU only.-> I[Agent: plan / search / answer]
+  A[Page load + idle] --> B[Service worker or page workers]
+  B --> C[Fetch index.ed manifest]
+  C --> D[Pick dense lane:<br/>WebGPU or WASM candle]
+  D --> E[Load Model Files<br/>cached in browser]
+  E --> F[Query]
+  F --> G[BM25 + Sparse + Dense]
+  G --> H[Weighted RRF + Page Grouping]
+  H --> I[Ranked Results]
+  I -.optional, WebGPU only.-> J[Agent: plan / search / answer]
 ```
+
+The engines live in a module service worker scoped to the asset directory
+when the browser allows it, so a navigation within the site keeps the
+loaded index, the dense model and the WebLLM engine; otherwise (or with
+`persist = "off"`) they run in page-side workers as before. With
+`warm = "auto"` the search engine initialises right after page load when
+the visitor already consented to the model on this browser and its files
+are cached. Details and the message protocol: [widget/README.md](widget/README.md).
 
 ML inference uses [Candle](https://github.com/huggingface/candle)
 (HuggingFace's Rust ML framework) for the WASM lane, and
