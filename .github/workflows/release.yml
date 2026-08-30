@@ -124,21 +124,16 @@ jobs:
         run: |
           set -euo pipefail
           ls -l release-assets/
-          cp dist/eddie.wasm release-assets/
-          cp dist/eddie.wasm.br release-assets/
-          cp dist/eddie.wasm.gz release-assets/
-          cp dist/eddie-wasm.js release-assets/
-          cp dist/eddie-wasm.js.br release-assets/
-          cp dist/eddie-wasm.js.gz release-assets/
-          cp dist/eddie-worker.js release-assets/
-          cp dist/eddie-worker.js.br release-assets/
-          cp dist/eddie-worker.js.gz release-assets/
-          cp dist/eddie-agent-worker.js release-assets/
-          cp dist/eddie-agent-worker.js.br release-assets/
-          cp dist/eddie-agent-worker.js.gz release-assets/
-          cp dist/eddie-widget.js release-assets/
-          cp dist/eddie-widget.js.br release-assets/
-          cp dist/eddie-widget.js.gz release-assets/
+          # widget/assets.list is the single source of truth for the widget
+          # runtime file list; read it instead of hardcoding names here.
+          mapfile -t WIDGET_ASSETS < <(grep -v '^#' widget/assets.list | grep -v '^?' | grep -v '^$')
+          for asset in "${WIDGET_ASSETS[@]}"; do
+            for f in "dist/$asset" "dist/$asset.br" "dist/$asset.gz"; do
+              if [[ -f "$f" ]]; then
+                cp "$f" release-assets/
+              fi
+            done
+          done
           cp dist/ASSET_SIZES.md release-assets/
           cp dist/asset-sizes.csv release-assets/
           tar -czf release-assets/eddie-hugo-module.tar.gz -C hugo-module .
@@ -158,28 +153,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: |
-            release-assets/eddie-linux-x86_64
-            release-assets/eddie-linux-aarch64
-            release-assets/eddie-macos-aarch64
-            release-assets/eddie-macos-x86_64
-            release-assets/eddie-windows-x86_64.exe
-            release-assets/eddie.wasm
-            release-assets/eddie.wasm.br
-            release-assets/eddie.wasm.gz
-            release-assets/eddie-wasm.js
-            release-assets/eddie-wasm.js.br
-            release-assets/eddie-wasm.js.gz
-            release-assets/eddie-worker.js
-            release-assets/eddie-worker.js.br
-            release-assets/eddie-worker.js.gz
-            release-assets/eddie-agent-worker.js
-            release-assets/eddie-agent-worker.js.br
-            release-assets/eddie-agent-worker.js.gz
-            release-assets/eddie-widget.js
-            release-assets/eddie-widget.js.br
-            release-assets/eddie-widget.js.gz
-            release-assets/ASSET_SIZES.md
-            release-assets/asset-sizes.csv
-            release-assets/eddie-hugo-module.tar.gz
-            release-assets/SHA256SUMS
+          # A glob over the whole staging directory instead of an enumerated
+          # list: "Collect release files" above is the only place that
+          # decides what lands in release-assets/, so a new widget asset (or
+          # one added by a parallel branch) can't go stale here too.
+          files: release-assets/*

@@ -24,16 +24,19 @@ jobs:
           # at publish time (see docs/guides/package-publishing.md). They must
           # never be committed, or a widget fix can ship stale bits to every
           # CMS package except the one that gets rebuilt.
-          tracked="$(git ls-files 'integrations/*/assets/eddie-wasm.js' \
-                                    'integrations/*/assets/eddie-widget.js' \
-                                    'integrations/*/assets/eddie-worker.js' \
-                                    'integrations/*/assets/eddie-agent-worker.js' \
-                                    'integrations/*/assets/eddie.wasm' \
-                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-wasm.js' \
-                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-widget.js' \
-                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-worker.js' \
-                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie-agent-worker.js' \
-                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/eddie.wasm')"
+          #
+          # Matched by directory, not by enumerating the current widget/
+          # assets.list filenames: nothing should ever be tracked under a
+          # generated assets_dir, so this doesn't need updating when the
+          # asset list changes. (Note: the previous per-filename globs here,
+          # e.g. 'integrations/*/assets/eddie-wasm.js', never matched the
+          # real assets_dir paths -- those live one directory deeper, under
+          # .../npm/assets/ or .../gem/assets/ -- so this check was a no-op
+          # for every target except the mkdocs one, which spelled its path
+          # out in full.)
+          tracked="$(git ls-files 'integrations/*/npm/assets/*' \
+                                    'integrations/*/gem/assets/*' \
+                                    'integrations/mkdocs/pypi/src/eddie_mkdocs/assets/*')"
           if [[ -n "$tracked" ]]; then
             echo "Committed widget runtime assets found (these must be generated, not committed):" >&2
             echo "$tracked" >&2
@@ -163,11 +166,14 @@ jobs:
         run: bash scripts/report-asset-sizes.sh
 
       - name: Verify widget artifacts
+        # widget/build.sh already fails the build itself on a dist/ vs.
+        # widget/assets.list mismatch; this is a visible-in-CI double check
+        # reading the same single source of truth instead of a second
+        # hardcoded list.
         run: |
-          for f in eddie-boot.js eddie-widget.js eddie-worker.js eddie-agent-worker.js \
-                   eddie-lite.wasm eddie-lite.js eddie-lite-esm.js \
-                   eddie-dense.wasm eddie-dense.js eddie-dense-esm.js \
-                   eddie-sw-lite.js eddie-sw-dense.js eddie-sw-gpu.js eddie-transformers-sw.js; do
+          set -euo pipefail
+          mapfile -t WIDGET_ASSETS < <(grep -v '^#' widget/assets.list | grep -v '^?' | grep -v '^$')
+          for f in "${WIDGET_ASSETS[@]}"; do
             test -f "dist/$f" || { echo "missing dist/$f" >&2; exit 1; }
           done
 
