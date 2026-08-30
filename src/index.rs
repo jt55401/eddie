@@ -31,6 +31,18 @@
 //! bm25/sparse document ids are validated against the chunk count. Output is
 //! deterministic: sections are written in a fixed order and every dictionary
 //! is sorted.
+//!
+//! ## Sidecars
+//!
+//! [`SearchIndex::to_ed_split`] moves selected `dense/<scope>/<lane>`
+//! sections out of the core file into one sidecar per lane
+//! (`<stem>.<lane>.ed`): the same `SAED` container with its own CRC, a
+//! payload holding only that lane's sections, and a manifest copy whose
+//! `sidecar_lane` names the lane. The core manifest lists them in
+//! `sidecars` and both carry the same `index_id`, so
+//! [`SearchIndex::attach_sidecar`] can refuse a sidecar from another build.
+//! A core index loads without its sidecars; searches that need an
+//! unattached lane degrade the way a missing embedder does.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Read, Write};
@@ -38,10 +50,12 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use brotli::{CompressorReader, Decompressor};
+use sha2::{Digest, Sha256};
 
 use crate::bm25::{Bm25Index, ByteCursor, write_varint};
 use crate::manifest::{
-    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SparseSpec, SparseTerm,
+    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SidecarSpec, SparseSpec,
+    SparseTerm,
 };
 use crate::records::{ChunkMeta, ClaimEntry, QaEntry};
 
@@ -599,28 +613,276 @@ pub struct IndexInfo {
     pub sections: Vec<SectionInfo>,
 }
 
-impl SearchIndex {
-    /// Serialize the index as a `SAED` v2 container.
-    pub fn write_ed_to<W: Write>(&self, mut w: W) -> Result<()> {
-        let manifest_json = serde_json::to_vec(&self.manifest).context("serializing manifest")?;
-        let payload = self.payload_bytes()?;
-        let crc = crc32(&payload);
-        let compressed =
-            brotli_compress(&payload, BROTLI_QUALITY).context("compressing payload")?;
+/// One sidecar file produced by [`SearchIndex::to_ed_split`].
+#[derive(Debug, Clone)]
+pub struct SidecarFile {
+    /// File name relative to the core index.
+    pub file: String,
+    pub lane: String,
+    /// Scopes whose `dense/<scope>/<lane>` section the file carries.
+    pub scopes: Vec<String>,
+    pub bytes: Vec<u8>,
+}
 
-        w.write_all(ED_MAGIC)?;
-        w.write_all(&ED_VERSION.to_le_bytes())?;
-        w.write_all(&len_u32(manifest_json.len(), "manifest")?.to_le_bytes())?;
-        w.write_all(&manifest_json)?;
-        w.write_all(&len_u32(compressed.len(), "compressed payload")?.to_le_bytes())?;
-        w.write_all(&crc.to_le_bytes())?;
-        w.write_all(&len_u32(payload.len(), "payload")?.to_le_bytes())?;
-        w.write_all(&compressed)?;
+/// A core index and its sidecar files, ready to be written.
+#[derive(Debug, Clone)]
+pub struct SplitIndex {
+    pub core: Vec<u8>,
+    pub sidecars: Vec<SidecarFile>,
+}
+
+/// What [`SearchIndex::attach_sidecar`] loaded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttachedSidecar {
+    pub lane: String,
+    pub scopes: Vec<String>,
+}
+
+impl SearchIndex {
+    /// Serialize the index as one `SAED` v2 container with every section
+    /// inline. Fails when a chunk lane the manifest lists is not loaded
+    /// (attach every sidecar first).
+    pub fn write_ed_to<W: Write>(&self, mut w: W) -> Result<()> {
+        for spec in &self.manifest.dense {
+            if !self.dense.iter().any(|l| l.spec.id == spec.id) {
+                bail!(
+                    "dense lane {:?} is not attached; attach its sidecar before writing a single-file index",
+                    spec.id
+                );
+            }
+        }
+        let mut manifest = self.manifest.clone();
+        manifest.sidecars.clear();
+        manifest.sidecar_lane = None;
+        manifest.index_id = Some(self.index_id()?);
+        let payload = self.payload_with(&|_, _| true)?;
+        w.write_all(&container_bytes(&manifest, &payload)?)?;
         Ok(())
     }
 
-    /// The uncompressed `SAGI` v5 payload.
+    /// Serialize as a core file plus one sidecar per lane for the
+    /// `(scope, lane)` sections `select` returns `true` for. Sidecar files
+    /// are named `<stem>.<lane>.ed`; the core manifest lists them in
+    /// `sidecars` and shares its `index_id` with them.
+    pub fn to_ed_split(
+        &self,
+        stem: &str,
+        select: &dyn Fn(&str, &DenseSpec) -> bool,
+    ) -> Result<SplitIndex> {
+        let mut base = self.manifest.clone();
+        base.sidecars.clear();
+        base.sidecar_lane = None;
+        base.index_id = Some(self.index_id()?);
+
+        let mut sidecars = Vec::new();
+        let mut entries = Vec::new();
+        for spec in &self.manifest.dense {
+            let scopes: Vec<String> = [
+                (SCOPE_CHUNKS, &self.dense),
+                (SCOPE_QA, &self.qa_dense),
+                (SCOPE_CLAIMS, &self.claims_dense),
+            ]
+            .into_iter()
+            .filter(|(scope, lanes)| {
+                lanes.iter().any(|l| l.spec.id == spec.id) && select(scope, spec)
+            })
+            .map(|(scope, _)| scope.to_string())
+            .collect();
+            if scopes.is_empty() {
+                continue;
+            }
+            let file = format!("{}.{}.ed", stem, spec.id);
+            let payload = self.lane_payload(&spec.id, &scopes)?;
+            let mut manifest = base.clone();
+            manifest.sidecar_lane = Some(spec.id.clone());
+            let bytes = container_bytes(&manifest, &payload)?;
+            for scope in &scopes {
+                entries.push(SidecarSpec {
+                    file: file.clone(),
+                    lane: spec.id.clone(),
+                    scope: scope.clone(),
+                    bytes: bytes.len() as u64,
+                });
+            }
+            sidecars.push(SidecarFile {
+                file,
+                lane: spec.id.clone(),
+                scopes,
+                bytes,
+            });
+        }
+
+        let mut core_manifest = base;
+        core_manifest.sidecars = entries;
+        let payload =
+            self.payload_with(&|scope, lane| core_manifest.sidecar_for(scope, lane).is_none())?;
+        let core = container_bytes(&core_manifest, &payload)?;
+        Ok(SplitIndex { core, sidecars })
+    }
+
+    /// Identity shared by a core index and its sidecars: the first 16 hex
+    /// digits of the SHA-256 of the chunk metadata, the texts and the dense
+    /// lane specs. Two builds of the same content with the same lanes agree;
+    /// anything else differs.
+    pub fn index_id(&self) -> Result<String> {
+        let mut h = Sha256::new();
+        h.update(serde_json::to_vec(&self.metadata).context("serializing chunk metadata")?);
+        for (text, overlap) in self.texts.iter().zip(&self.overlap_words) {
+            h.update((text.len() as u64).to_le_bytes());
+            h.update(text.as_bytes());
+            h.update(overlap.to_le_bytes());
+        }
+        h.update(serde_json::to_vec(&self.manifest.dense).context("serializing dense specs")?);
+        let digest = h.finalize();
+        let mut out = String::with_capacity(16);
+        for b in &digest[..8] {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        Ok(out)
+    }
+
+    /// Load a sidecar file's dense sections into this index. Checks that the
+    /// file is a sidecar, that its `index_id` and chunk count match, and that
+    /// every section matches the manifest lane (dim, quant, rows). Attaching
+    /// the same sidecar twice replaces the sections; chunk lanes keep
+    /// manifest order.
+    pub fn attach_sidecar(&mut self, bytes: &[u8]) -> Result<AttachedSidecar> {
+        let container = parse_container(bytes)?;
+        let lane_id = container.manifest.sidecar_lane.clone().context(
+            "not a sidecar file (its manifest has no sidecar_lane); sidecars are the <index>.<lane>.ed files written next to the core index",
+        )?;
+        match (&self.manifest.index_id, &container.manifest.index_id) {
+            (Some(core), Some(side)) if core == side => {}
+            (Some(core), Some(side)) => bail!(
+                "sidecar for lane {:?} belongs to another index build (index_id {} but this index is {})",
+                lane_id,
+                side,
+                core
+            ),
+            _ => bail!(
+                "cannot verify the sidecar for lane {:?}: the core index or the sidecar carries no index_id",
+                lane_id
+            ),
+        }
+        if container.manifest.chunks != self.manifest.chunks {
+            bail!(
+                "sidecar for lane {:?} has {} chunks but this index has {}",
+                lane_id,
+                container.manifest.chunks,
+                self.manifest.chunks
+            );
+        }
+        let spec = self
+            .manifest
+            .dense_lane(&lane_id)
+            .cloned()
+            .with_context(|| format!("sidecar lane {:?} is not in the manifest", lane_id))?;
+        let payload = brotli_decompress_exact(container.compressed, container.decompressed_len)
+            .context("decompressing sidecar payload")?;
+        if crc32(&payload) != container.crc32 {
+            bail!("sidecar payload CRC mismatch; the file is corrupt");
+        }
+
+        let counts = [
+            (SCOPE_CHUNKS, self.manifest.chunks, "chunks"),
+            (SCOPE_QA, self.qa.len(), "qa entries"),
+            (SCOPE_CLAIMS, self.claims.len(), "claims"),
+        ];
+        let mut scopes = Vec::new();
+        for (name, body) in iter_sections(&payload)? {
+            let Some((scope, lane)) = parse_lane_section_name(name) else {
+                continue;
+            };
+            if lane != lane_id {
+                bail!(
+                    "sidecar for lane {:?} carries section {:?} of another lane",
+                    lane_id,
+                    name
+                );
+            }
+            let Some(&(_, expected_rows, what)) = counts.iter().find(|(s, _, _)| *s == scope)
+            else {
+                continue;
+            };
+            let lane = DenseLane::from_bytes(spec.clone(), body)
+                .with_context(|| format!("reading sidecar section {:?}", name))?;
+            if lane.dim != spec.dim || lane.quant != spec.quant {
+                bail!(
+                    "sidecar section {:?} is {}-d {:?} but the manifest lane is {}-d {:?}",
+                    name,
+                    lane.dim,
+                    lane.quant,
+                    spec.dim,
+                    spec.quant
+                );
+            }
+            if lane.rows != expected_rows {
+                bail!(
+                    "sidecar section {:?} has {} rows but the index has {} {}",
+                    name,
+                    lane.rows,
+                    expected_rows,
+                    what
+                );
+            }
+            let target = match scope {
+                SCOPE_CHUNKS => &mut self.dense,
+                SCOPE_QA => &mut self.qa_dense,
+                _ => &mut self.claims_dense,
+            };
+            match target.iter().position(|l| l.spec.id == lane_id) {
+                Some(pos) => target[pos] = lane,
+                None => target.push(lane),
+            }
+            scopes.push(scope.to_string());
+        }
+        if scopes.is_empty() {
+            bail!("sidecar for lane {:?} has no dense sections", lane_id);
+        }
+        let order = &self.manifest.dense;
+        for lanes in [&mut self.dense, &mut self.qa_dense, &mut self.claims_dense] {
+            lanes.sort_by_key(|l| order.iter().position(|s| s.id == l.spec.id));
+        }
+        Ok(AttachedSidecar {
+            lane: lane_id,
+            scopes,
+        })
+    }
+
+    /// The uncompressed `SAGI` v5 payload with every section inline.
     pub fn payload_bytes(&self) -> Result<Vec<u8>> {
+        self.payload_with(&|_, _| true)
+    }
+
+    /// The `SAGI` payload holding only `lane_id`'s sections for `scopes`.
+    fn lane_payload(&self, lane_id: &str, scopes: &[String]) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PAYLOAD_MAGIC);
+        out.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
+        for scope in scopes {
+            let lanes = match scope.as_str() {
+                SCOPE_CHUNKS => &self.dense,
+                SCOPE_QA => &self.qa_dense,
+                SCOPE_CLAIMS => &self.claims_dense,
+                other => bail!("unknown dense scope {:?}", other),
+            };
+            let lane = lanes
+                .iter()
+                .find(|l| l.spec.id == lane_id)
+                .with_context(|| format!("no dense/{}/{} lane to split out", scope, lane_id))?;
+            write_section(
+                &mut out,
+                &lane_section_name(scope, lane_id),
+                &lane.to_bytes(),
+            )?;
+        }
+        Ok(out)
+    }
+
+    /// The `SAGI` payload with the dense sections `keep(scope, lane)`
+    /// accepts (the rest go to sidecars).
+    fn payload_with(&self, keep: &dyn Fn(&str, &str) -> bool) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         out.extend_from_slice(PAYLOAD_MAGIC);
         out.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
@@ -646,11 +908,13 @@ impl SearchIndex {
             write_section(&mut out, SECTION_SPARSE, &sparse.to_bytes()?)?;
         }
         for lane in &self.dense {
-            write_section(
-                &mut out,
-                &lane_section_name(SCOPE_CHUNKS, &lane.spec.id),
-                &lane.to_bytes(),
-            )?;
+            if keep(SCOPE_CHUNKS, &lane.spec.id) {
+                write_section(
+                    &mut out,
+                    &lane_section_name(SCOPE_CHUNKS, &lane.spec.id),
+                    &lane.to_bytes(),
+                )?;
+            }
         }
         if !self.qa.is_empty() {
             write_section(
@@ -659,11 +923,13 @@ impl SearchIndex {
                 &serde_json::to_vec(&self.qa).context("serializing qa entries")?,
             )?;
             for lane in &self.qa_dense {
-                write_section(
-                    &mut out,
-                    &lane_section_name(SCOPE_QA, &lane.spec.id),
-                    &lane.to_bytes(),
-                )?;
+                if keep(SCOPE_QA, &lane.spec.id) {
+                    write_section(
+                        &mut out,
+                        &lane_section_name(SCOPE_QA, &lane.spec.id),
+                        &lane.to_bytes(),
+                    )?;
+                }
             }
         }
         if !self.claims.is_empty() {
@@ -673,11 +939,13 @@ impl SearchIndex {
                 &serde_json::to_vec(&self.claims).context("serializing claims")?,
             )?;
             for lane in &self.claims_dense {
-                write_section(
-                    &mut out,
-                    &lane_section_name(SCOPE_CLAIMS, &lane.spec.id),
-                    &lane.to_bytes(),
-                )?;
+                if keep(SCOPE_CLAIMS, &lane.spec.id) {
+                    write_section(
+                        &mut out,
+                        &lane_section_name(SCOPE_CLAIMS, &lane.spec.id),
+                        &lane.to_bytes(),
+                    )?;
+                }
             }
         }
         Ok(out)
@@ -688,9 +956,16 @@ impl SearchIndex {
         Ok(parse_container(bytes)?.manifest)
     }
 
-    /// Parse and validate a whole `.ed` file.
+    /// Parse and validate a whole `.ed` file (a core index or a 0.4.1
+    /// single-file index; sidecar files are rejected with a hint).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let container = parse_container(bytes)?;
+        if let Some(lane) = &container.manifest.sidecar_lane {
+            bail!(
+                "this file is the sidecar for dense lane {:?}; load the core index first and attach it with attach_sidecar",
+                lane
+            );
+        }
         let payload = brotli_decompress_exact(container.compressed, container.decompressed_len)
             .context("decompressing index payload")?;
         let actual_crc = crc32(&payload);
@@ -891,10 +1166,13 @@ impl SearchIndex {
                 _ => claims_dense.push(lane),
             }
         }
-        // Keep chunk lanes in manifest order and require one section per lane.
+        // Keep chunk lanes in manifest order and require one section per
+        // lane unless the manifest says the section lives in a sidecar.
         dense.sort_by_key(|l| manifest.dense.iter().position(|s| s.id == l.spec.id));
         for spec in &manifest.dense {
-            if !dense.iter().any(|l| l.spec.id == spec.id) {
+            if !dense.iter().any(|l| l.spec.id == spec.id)
+                && manifest.sidecar_for(SCOPE_CHUNKS, &spec.id).is_none()
+            {
                 bail!(
                     "manifest lane {:?} has no dense/chunks/{} section",
                     spec.id,
@@ -1250,6 +1528,7 @@ impl IndexBuilder {
         if index.claims.is_empty() {
             index.claims_dense.clear();
         }
+        index.manifest.index_id = Some(index.index_id()?);
         Ok(index)
     }
 }
@@ -1458,6 +1737,24 @@ fn len_u32(len: usize, what: &str) -> Result<u32> {
     u32::try_from(len).with_context(|| format!("{} exceeds 4 GiB", what))
 }
 
+/// A `SAED` v2 container around `payload` (brotli-compressed, CRC-32 of the
+/// uncompressed bytes in the header).
+fn container_bytes(manifest: &Manifest, payload: &[u8]) -> Result<Vec<u8>> {
+    let manifest_json = serde_json::to_vec(manifest).context("serializing manifest")?;
+    let crc = crc32(payload);
+    let compressed = brotli_compress(payload, BROTLI_QUALITY).context("compressing payload")?;
+    let mut out = Vec::with_capacity(24 + manifest_json.len() + compressed.len());
+    out.extend_from_slice(ED_MAGIC);
+    out.extend_from_slice(&ED_VERSION.to_le_bytes());
+    out.extend_from_slice(&len_u32(manifest_json.len(), "manifest")?.to_le_bytes());
+    out.extend_from_slice(&manifest_json);
+    out.extend_from_slice(&len_u32(compressed.len(), "compressed payload")?.to_le_bytes());
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&len_u32(payload.len(), "payload")?.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
 fn brotli_compress(input: &[u8], quality: u32) -> Result<Vec<u8>> {
     let mut reader = CompressorReader::new(Cursor::new(input), 16 * 1024, quality, BROTLI_WINDOW);
     let mut out = Vec::new();
@@ -1585,6 +1882,7 @@ pub(crate) mod testutil {
                     "tokenizer.json".into(),
                     "model.safetensors".into(),
                 ],
+                base_url: None,
             },
         }
     }
@@ -1743,6 +2041,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
+    use crate::manifest::{Family, RuntimeSpec};
 
     fn meta(url: &str, idx: usize, gran: &str) -> ChunkMeta {
         ChunkMeta {
@@ -2497,6 +2796,228 @@ mod tests {
                 assert_eq!(a.1.to_bits(), b.1.to_bits());
             }
         }
+    }
+
+    fn webgpu_spec(id: &str, dim: usize) -> DenseSpec {
+        let mut spec = wasm_spec(id, dim, Quant::F32);
+        spec.model = "Qwen/Qwen3-Embedding-0.6B".into();
+        spec.family = Family::Qwen3;
+        spec.runtime = RuntimeSpec::WebgpuOnnx {
+            repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX".into(),
+            dtype: "q4".into(),
+            dtype_f16: None,
+            pooling: "last_token".into(),
+            base_url: None,
+        };
+        spec
+    }
+
+    /// `sample_index` plus a second (webgpu) chunk lane.
+    fn two_lane_index() -> SearchIndex {
+        let base = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(
+            base.metadata.clone(),
+            base.texts.clone(),
+            base.overlap_words.clone(),
+        )
+        .unwrap();
+        for lane in &base.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(
+                webgpu_spec("qwen3e", 2),
+                2,
+                3,
+                &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                Quant::F32,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        b.add_qa(base.qa.clone());
+        for lane in &base.qa_dense {
+            b.add_dense_lane(SCOPE_QA, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_QA,
+            DenseLane::from_f32(webgpu_spec("qwen3e", 2), 2, 1, &[0.0, 1.0], Quant::F32).unwrap(),
+        )
+        .unwrap();
+        b.add_claims(base.claims.clone());
+        for lane in &base.claims_dense {
+            b.add_dense_lane(SCOPE_CLAIMS, lane.clone()).unwrap();
+        }
+        b.finish().unwrap()
+    }
+
+    /// The default CLI policy: webgpu chunk lanes and every qa/claims lane
+    /// go to sidecars, wasm-candle chunk lanes stay in the core.
+    fn default_split(scope: &str, spec: &DenseSpec) -> bool {
+        scope != SCOPE_CHUNKS || matches!(spec.runtime, RuntimeSpec::WebgpuOnnx { .. })
+    }
+
+    #[test]
+    fn split_writes_one_sidecar_per_lane_and_attach_restores_them() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let names: Vec<&str> = split.sidecars.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(names, vec!["site.minilm.ed", "site.qwen3e.ed"]);
+        assert_eq!(split.sidecars[0].scopes, vec!["qa", "claims"]);
+        assert_eq!(split.sidecars[1].scopes, vec!["chunks", "qa"]);
+
+        let core = SearchIndex::from_bytes(&split.core).unwrap();
+        let m = &core.manifest;
+        assert_eq!(m.dense.len(), 2, "manifest still lists both lanes");
+        assert_eq!(core.dense.len(), 1, "only the wasm lane is inline");
+        assert_eq!(core.dense[0].spec.id, "minilm");
+        assert!(core.qa_dense.is_empty() && core.claims_dense.is_empty());
+        assert_eq!(core.qa.len(), 1, "qa entries stay in the core");
+        assert_eq!(m.sidecars.len(), 4);
+        for s in &m.sidecars {
+            let file = split.sidecars.iter().find(|f| f.file == s.file).unwrap();
+            assert_eq!(s.bytes as usize, file.bytes.len(), "{}", s.file);
+        }
+        assert_eq!(
+            m.sidecar_for("chunks", "qwen3e").unwrap().file,
+            "site.qwen3e.ed"
+        );
+        assert!(m.sidecar_for("chunks", "minilm").is_none());
+        assert_eq!(m.sidecar_files(), vec!["site.minilm.ed", "site.qwen3e.ed"]);
+        assert_eq!(
+            m.index_id.as_deref(),
+            Some(index.index_id().unwrap().as_str())
+        );
+        assert!(m.sidecar_lane.is_none());
+        // The core still searches with what it has.
+        assert!(core.dense_lane("qwen3e").is_none());
+        assert_eq!(core.dense_lane("minilm"), Some(0));
+
+        // A sidecar is not an index.
+        let err = SearchIndex::from_bytes(&split.sidecars[1].bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sidecar for dense lane \"qwen3e\"")
+        );
+        // The sidecar's header is readable on its own.
+        let side = SearchIndex::manifest_from_bytes(&split.sidecars[1].bytes).unwrap();
+        assert_eq!(side.sidecar_lane.as_deref(), Some("qwen3e"));
+        assert_eq!(side.index_id, m.index_id);
+        assert!(side.sidecars.is_empty());
+
+        // Attach in the "wrong" order: chunk lanes end up in manifest order.
+        let mut core = core;
+        let att = core.attach_sidecar(&split.sidecars[1].bytes).unwrap();
+        assert_eq!(att.lane, "qwen3e");
+        assert_eq!(att.scopes, vec!["chunks", "qa"]);
+        assert_eq!(core.dense_lane("minilm"), Some(0));
+        assert_eq!(core.dense_lane("qwen3e"), Some(1));
+        assert!(core.qa_lane("qwen3e").is_some());
+        let att = core.attach_sidecar(&split.sidecars[0].bytes).unwrap();
+        assert_eq!(att.scopes, vec!["qa", "claims"]);
+        assert_eq!(core.dense, index.dense);
+        assert_eq!(core.qa_dense, index.qa_dense);
+        assert_eq!(core.claims_dense, index.claims_dense);
+        // Attaching again is idempotent.
+        core.attach_sidecar(&split.sidecars[0].bytes).unwrap();
+        assert_eq!(core.qa_dense.len(), 2);
+        // Fully attached, it round-trips to a single file again.
+        let mut single = Vec::new();
+        core.write_ed_to(&mut single).unwrap();
+        let back = SearchIndex::from_bytes(&single).unwrap();
+        assert!(back.manifest.sidecars.is_empty());
+        assert_eq!(back.dense, index.dense);
+    }
+
+    #[test]
+    fn attach_rejects_foreign_and_corrupt_sidecars() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let mut core = SearchIndex::from_bytes(&split.core).unwrap();
+
+        // The core file itself is not a sidecar.
+        let err = core.attach_sidecar(&split.core).unwrap_err();
+        assert!(err.to_string().contains("not a sidecar file"), "{err}");
+
+        // A sidecar from another build (different texts) is refused.
+        let other = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(
+            other.metadata.clone(),
+            vec!["x".into(), "y".into(), "z".into()],
+            vec![0, 0, 0],
+        )
+        .unwrap();
+        for lane in &other.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(webgpu_spec("qwen3e", 2), 2, 3, &[0.0; 6], Quant::F32).unwrap(),
+        )
+        .unwrap();
+        let foreign = b
+            .finish()
+            .unwrap()
+            .to_ed_split("site", &default_split)
+            .unwrap();
+        let err = core.attach_sidecar(&foreign.sidecars[0].bytes).unwrap_err();
+        assert!(err.to_string().contains("another index build"), "{err}");
+        assert!(core.dense_lane("qwen3e").is_none());
+
+        // A flipped payload byte fails the CRC.
+        let mut corrupt = split.sidecars[1].bytes.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        let err = core.attach_sidecar(&corrupt).unwrap_err();
+        assert!(
+            err.to_string().contains("CRC") || err.to_string().contains("decompress"),
+            "{err}"
+        );
+
+        // A single-file index (0.4.1 layout) has no sidecars and refuses one.
+        let mut single = SearchIndex::from_bytes(&ed_bytes(&index)).unwrap();
+        assert!(single.manifest.sidecars.is_empty());
+        assert_eq!(single.dense.len(), 2);
+        let err = single.attach_sidecar(&split.core).unwrap_err();
+        assert!(err.to_string().contains("not a sidecar file"), "{err}");
+    }
+
+    #[test]
+    fn writing_a_single_file_needs_every_chunk_lane() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let core = SearchIndex::from_bytes(&split.core).unwrap();
+        let err = core.write_ed_to(&mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("not attached"), "{err}");
+        // Nothing selected means no sidecars and a core equal to the single file.
+        let none = index.to_ed_split("site", &|_, _| false).unwrap();
+        assert!(none.sidecars.is_empty());
+        let m = SearchIndex::manifest_from_bytes(&none.core).unwrap();
+        assert!(m.sidecars.is_empty());
+        assert_eq!(
+            SearchIndex::from_bytes(&none.core).unwrap().dense,
+            index.dense
+        );
+    }
+
+    #[test]
+    fn index_id_tracks_content_and_lanes() {
+        let a = sample_index();
+        let b = sample_index();
+        assert_eq!(a.index_id().unwrap(), b.index_id().unwrap());
+        assert_eq!(a.index_id().unwrap().len(), 16);
+        let mut c = sample_index();
+        c.manifest.dense[0].revision = Some("other".into());
+        assert_ne!(a.index_id().unwrap(), c.index_id().unwrap());
+        let mut d = sample_index();
+        d.texts[0].push('!');
+        assert_ne!(a.index_id().unwrap(), d.index_id().unwrap());
+        // Written single files carry the id too.
+        let m = SearchIndex::manifest_from_bytes(&ed_bytes(&a)).unwrap();
+        assert_eq!(m.index_id.as_deref(), Some(a.index_id().unwrap().as_str()));
     }
 
     #[test]

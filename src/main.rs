@@ -220,6 +220,28 @@ enum Command {
         /// BM25 arms see (stored texts stay clean either way).
         #[arg(long, default_value_t = false)]
         no_title_context: bool,
+
+        /// Write webgpu-onnx chunk lanes and every qa/claims lane to
+        /// `<output>.<lane>.ed` sidecar files next to the core index (on by
+        /// default; the browser fetches a sidecar only when it can use the
+        /// lane). See --no-sidecar-lanes.
+        #[arg(long, default_value_t = false, hide = true)]
+        sidecar_lanes: bool,
+
+        /// Keep every dense lane inside the single index file (0.4.1 layout).
+        #[arg(long, default_value_t = false, conflicts_with = "sidecar_lanes")]
+        no_sidecar_lanes: bool,
+
+        /// Copy a wasm-candle lane's model next to the index as
+        /// `models/<lane-id>/{config.json,tokenizer.json,model.safetensors}`
+        /// with the weights converted to f16 (half the download), and point
+        /// the lane's runtime at it. Repeat for several lanes.
+        #[arg(long = "bundle-model", value_name = "LANE_ID")]
+        bundle_model: Vec<String>,
+
+        /// `all`: bundle every wasm-candle lane (see --bundle-model).
+        #[arg(long = "bundle-models", value_name = "all")]
+        bundle_models: Option<String>,
     },
 
     /// Search an existing index.
@@ -588,6 +610,10 @@ fn main() -> Result<()> {
             qa_ollama_temperature,
             qa_subject,
             no_title_context,
+            sidecar_lanes,
+            no_sidecar_lanes,
+            bundle_model,
+            bundle_models,
         } => cmd_index(
             content_dir,
             cms,
@@ -626,6 +652,10 @@ fn main() -> Result<()> {
             qa_ollama_temperature,
             qa_subject,
             !no_title_context,
+            OutputLayout {
+                sidecar_lanes: sidecar_lanes || !no_sidecar_lanes,
+                bundle: resolve_bundle_request(bundle_model, bundle_models.as_deref())?,
+            },
         ),
         Command::Search {
             index,
@@ -770,6 +800,7 @@ fn cmd_index(
     qa_ollama_temperature: f32,
     qa_subject: Option<String>,
     title_context: bool,
+    layout: OutputLayout,
 ) -> Result<()> {
     // Sub-flags only take effect with their section flag; say so up front
     // rather than silently building an index without the section.
@@ -1232,14 +1263,43 @@ fn cmd_index(
         builder.add_claims(claims);
     }
 
-    let index = builder.finish()?;
+    let mut index = builder.finish()?;
 
-    eprintln!("Writing index to {}...", output.display());
-    let file = fs::File::create(&output)
-        .with_context(|| format!("creating output file {}", output.display()))?;
-    let mut writer = BufWriter::new(file);
-    index.write_ed_to(&mut writer)?;
-    writer.flush()?;
+    let out_dir = output
+        .parent()
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from("."));
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("creating output directory {}", out_dir.display()))?;
+    bundle_models(&mut index, &layout.bundle, &out_dir)?;
+
+    if layout.sidecar_lanes {
+        let stem = index_stem(&output);
+        let split = index.to_ed_split(&stem, &sidecar_policy)?;
+        eprintln!("Writing index to {}...", output.display());
+        write_bytes(&output, &split.core)?;
+        eprintln!("  core: {} bytes", split.core.len());
+        for side in &split.sidecars {
+            let path = out_dir.join(&side.file);
+            write_bytes(&path, &side.bytes)?;
+            eprintln!(
+                "  sidecar {}: {} bytes (lane {}, {})",
+                side.file,
+                side.bytes.len(),
+                side.lane,
+                side.scopes.join("+")
+            );
+        }
+        remove_stale_sidecars(&out_dir, &stem, &split)?;
+    } else {
+        eprintln!("Writing index to {}...", output.display());
+        let file = fs::File::create(&output)
+            .with_context(|| format!("creating output file {}", output.display()))?;
+        let mut writer = BufWriter::new(file);
+        index.write_ed_to(&mut writer)?;
+        writer.flush()?;
+    }
 
     eprintln!(
         "Done! Index contains {} chunks over {} pages, {} qa entries, {} claims; lanes: {}.",
@@ -1255,6 +1315,157 @@ fn cmd_index(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    Ok(())
+}
+
+/// How `eddie index` lays out its output files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputLayout {
+    /// Sidecar files for webgpu chunk lanes and every qa/claims lane.
+    sidecar_lanes: bool,
+    bundle: BundleRequest,
+}
+
+/// Which wasm-candle lanes get their model files written next to the index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BundleRequest {
+    None,
+    Lanes(Vec<String>),
+    All,
+}
+
+fn resolve_bundle_request(lanes: Vec<String>, all: Option<&str>) -> Result<BundleRequest> {
+    match all {
+        Some(v) if v.eq_ignore_ascii_case("all") => {
+            if !lanes.is_empty() {
+                eprintln!("warning: --bundle-models all already covers --bundle-model");
+            }
+            Ok(BundleRequest::All)
+        }
+        Some(other) => bail!("--bundle-models accepts only `all` (got {:?})", other),
+        None if lanes.is_empty() => Ok(BundleRequest::None),
+        None => Ok(BundleRequest::Lanes(lanes)),
+    }
+}
+
+/// The default sidecar policy: webgpu-onnx chunk lanes (most visitors never
+/// run them) and every qa/claims lane leave the core file; wasm-candle chunk
+/// lanes stay because a CPU dense search needs them with the first query.
+fn sidecar_policy(scope: &str, spec: &DenseSpec) -> bool {
+    scope != SCOPE_CHUNKS || matches!(spec.runtime, RuntimeSpec::WebgpuOnnx { .. })
+}
+
+/// `index.ed` → `index`: the prefix sidecar files share with the core.
+fn index_stem(output: &std::path::Path) -> String {
+    let name = output
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "index.ed".to_string());
+    name.strip_suffix(".ed").unwrap_or(&name).to_string()
+}
+
+fn write_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Delete `<stem>.<lane>.ed` files from an earlier build whose lane is gone,
+/// so a stale sidecar never sits next to a core that does not list it.
+fn remove_stale_sidecars(
+    dir: &std::path::Path,
+    stem: &str,
+    split: &eddie::index::SplitIndex,
+) -> Result<()> {
+    let prefix = format!("{}.", stem);
+    for entry in fs::read_dir(dir).with_context(|| format!("listing {}", dir.display()))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_sidecar = name.starts_with(&prefix)
+            && name.ends_with(".ed")
+            && name.len() > prefix.len() + 3
+            && !name[prefix.len()..name.len() - 3].contains('.');
+        if is_sidecar && !split.sidecars.iter().any(|s| s.file == name) {
+            eprintln!("  removing stale sidecar {}", name);
+            fs::remove_file(entry.path())
+                .with_context(|| format!("removing {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write the requested lanes' model files under `<out_dir>/models/<lane>/`
+/// and point their manifest runtime at them.
+fn bundle_models(
+    index: &mut SearchIndex,
+    request: &BundleRequest,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    let lanes: Vec<String> = match request {
+        BundleRequest::None => return Ok(()),
+        BundleRequest::All => index
+            .manifest
+            .dense
+            .iter()
+            .filter(|d| matches!(d.runtime, RuntimeSpec::WasmCandle { .. }))
+            .map(|d| d.id.clone())
+            .collect(),
+        BundleRequest::Lanes(ids) => ids.clone(),
+    };
+    if lanes.is_empty() {
+        eprintln!("warning: --bundle-models all: no wasm-candle lane to bundle");
+        return Ok(());
+    }
+    for lane_id in lanes {
+        let pos = index
+            .manifest
+            .dense
+            .iter()
+            .position(|d| d.id == lane_id)
+            .with_context(|| {
+                format!(
+                    "--bundle-model {}: no such lane (lanes: {})",
+                    lane_id,
+                    lane_list(index)
+                )
+            })?;
+        let spec = index.manifest.dense[pos].clone();
+        if !matches!(spec.runtime, RuntimeSpec::WasmCandle { .. }) {
+            bail!(
+                "--bundle-model {}: only wasm-candle lanes can be bundled (transformers.js fetches its own ONNX repo for webgpu-onnx lanes)",
+                lane_id
+            );
+        }
+        let dir = out_dir.join("models").join(&lane_id);
+        eprintln!(
+            "Bundling model for lane '{}' into {} (f16 weights)...",
+            lane_id,
+            dir.display()
+        );
+        let started = Instant::now();
+        let bundled = eddie::embed::bundle_model_files(&spec, &dir)?;
+        eprintln!(
+            "  {} files, {} bytes ({:.1}s)",
+            bundled.files.len(),
+            bundled.bytes,
+            started.elapsed().as_secs_f64()
+        );
+        let base_url = format!("models/{}/", lane_id);
+        let runtime = RuntimeSpec::WasmCandle {
+            files: bundled.files,
+            base_url: Some(base_url),
+        };
+        index.manifest.dense[pos].runtime = runtime.clone();
+        for lane in index
+            .dense
+            .iter_mut()
+            .chain(index.qa_dense.iter_mut())
+            .chain(index.claims_dense.iter_mut())
+            .filter(|l| l.spec.id == lane_id)
+        {
+            lane.spec.runtime = runtime.clone();
+        }
+    }
+    // The runtime is part of the lane spec the index identity covers.
+    index.manifest.index_id = Some(index.index_id()?);
     Ok(())
 }
 
@@ -1529,7 +1740,35 @@ fn run_query(
 fn load_index(path: &PathBuf) -> Result<SearchIndex> {
     eprintln!("Loading index from {}...", path.display());
     let bytes = fs::read(path).with_context(|| format!("opening index file {}", path.display()))?;
-    let index = SearchIndex::from_bytes(&bytes)?;
+    let mut index = SearchIndex::from_bytes(&bytes)?;
+    let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+    let sidecar_files: Vec<String> = index
+        .manifest
+        .sidecar_files()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for file in &sidecar_files {
+        let side = dir.join(file);
+        match fs::read(&side) {
+            Ok(bytes) => {
+                let attached = index
+                    .attach_sidecar(&bytes)
+                    .with_context(|| format!("attaching sidecar {}", side.display()))?;
+                eprintln!(
+                    "  attached sidecar {} (lane {}, {})",
+                    file,
+                    attached.lane,
+                    attached.scopes.join("+")
+                );
+            }
+            Err(e) => eprintln!(
+                "  warning: sidecar {} not loaded ({}); its lane is skipped",
+                side.display(),
+                e
+            ),
+        }
+    }
     eprintln!(
         "  {} chunks, {} pages, lanes: {}, sparse terms: {}",
         index.manifest.chunks,
@@ -1865,6 +2104,57 @@ fn cmd_stats(index_path: PathBuf, json: bool) -> Result<()> {
             s.terms, s.tokenizer, s.vocab_hash
         ),
         None => println!("sparse: none"),
+    }
+    if let Some(id) = &info.manifest.index_id {
+        println!("index_id: {}", id);
+    }
+    if !info.manifest.sidecars.is_empty() {
+        println!();
+        println!("Sidecars (next to the index; fetched only when the lane is used):");
+        let dir = index_path.parent().map(PathBuf::from).unwrap_or_default();
+        for file in info.manifest.sidecar_files() {
+            let scopes: Vec<String> = info
+                .manifest
+                .sidecars
+                .iter()
+                .filter(|s| s.file == file)
+                .map(|s| format!("{}/{}", s.scope, s.lane))
+                .collect();
+            let declared = info
+                .manifest
+                .sidecars
+                .iter()
+                .find(|s| s.file == file)
+                .map(|s| s.bytes)
+                .unwrap_or(0);
+            let path = dir.join(file);
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    let side = SearchIndex::inspect(&bytes, None)?;
+                    let sections: Vec<String> =
+                        side.sections.iter().map(|s| s.name.clone()).collect();
+                    let status = if bytes.len() as u64 == declared {
+                        "ok".to_string()
+                    } else {
+                        format!("size differs from manifest ({} declared)", declared)
+                    };
+                    println!(
+                        "  {:<28} {:>12} bytes  [{}]  {}",
+                        file,
+                        bytes.len(),
+                        sections.join(", "),
+                        status
+                    );
+                }
+                Err(e) => println!(
+                    "  {:<28} {:>12} bytes  [{}]  missing ({})",
+                    file,
+                    declared,
+                    scopes.join(", "),
+                    e
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -2897,7 +3187,7 @@ fn flags_given(flags: &[(bool, &'static str)]) -> Vec<&'static str> {
 /// Warn when a lane's manifest runtime cannot be honoured by the browser.
 fn warn_about_lane_runtime(spec: &DenseSpec) {
     match &spec.runtime {
-        RuntimeSpec::WasmCandle { files } => {
+        RuntimeSpec::WasmCandle { files, .. } => {
             let weights: Vec<&str> = files
                 .iter()
                 .map(String::as_str)
@@ -3052,6 +3342,7 @@ fn parse_runtime_spec(spec: &str) -> Result<Option<RuntimeSpec>> {
         dtype: parts[1].to_string(),
         dtype_f16: segment(2),
         pooling,
+        base_url: None,
     }))
 }
 

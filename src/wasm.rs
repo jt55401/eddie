@@ -12,6 +12,7 @@
 //! init_index(index_bytes)                                      // parse + validate
 //! init_dense_wasm(lane_id, config, tokenizer, weights)         // bert lanes only; `dense-wasm` builds only
 //! init_sparse_tokenizer(tokenizer_bytes)                       // enables the sparse arm; sha256 must match manifest.sparse.vocab_hash
+//! attach_sidecar(bytes) -> JSON {lane, scopes}                 // loads an index.<lane>.ed sidecar's dense sections
 //! search(query, top_k, mode, dense_lane_id|null, dense_query_vec|null)
 //!     -> JSON {results:[PageResult], arms:{dense,sparse,bm25}, degraded:[string], mode, dense_lane}
 //! page(url)   -> JSON {title, url, date, chunks:[{id, section, granularity, text}]}   // finest granularity only, document order
@@ -236,6 +237,23 @@ pub fn init_dense_wasm(
     })
 }
 
+/// Attach a sidecar file (`manifest.sidecars[].file`, fetched relative to
+/// the index URL): its `dense/<scope>/<lane>` sections join the loaded
+/// index after the identity (`index_id`), chunk count and lane shape are
+/// checked. Until a lane's sidecar is attached, searches that ask for it
+/// report the dense arm as skipped instead of failing.
+#[wasm_bindgen]
+pub fn attach_sidecar(bytes: &[u8]) -> Result<String, JsValue> {
+    install_panic_hook();
+    with_engine_mut(|engine| {
+        let attached = engine
+            .index
+            .attach_sidecar(bytes)
+            .map_err(|e| js_err("attach_sidecar", format!("{:#}", e)))?;
+        to_json(&attached)
+    })
+}
+
 /// Load the WordPiece tokenizer that enables the learned-sparse arm. The
 /// bytes must be the `tokenizer.json` the index was built with: their
 /// SHA-256 is checked against `manifest.sparse.vocab_hash`, because a
@@ -304,10 +322,25 @@ fn resolve_dense(
         let id = lane_id.ok_or_else(|| {
             JsValue::from_str("dense_lane_id is required when dense_query_vec is given")
         })?;
-        let lane = engine
-            .index
-            .dense_lane(id)
-            .ok_or_else(|| js_err("search", format!("unknown dense lane {:?}", id)))?;
+        let Some(lane) = engine.index.dense_lane(id) else {
+            // A lane the manifest lists but whose chunk vectors live in a
+            // sidecar that is not attached yet degrades; a lane the manifest
+            // never heard of is caller misuse.
+            return match engine
+                .index
+                .manifest
+                .sidecar_for(crate::index::SCOPE_CHUNKS, id)
+            {
+                Some(side) => Ok((
+                    None,
+                    Some(format!(
+                        "dense: lane {:?} is not attached (sidecar {} not loaded)",
+                        id, side.file
+                    )),
+                )),
+                None => Err(js_err("search", format!("unknown dense lane {:?}", id))),
+            };
+        };
         let dim = engine.index.dense[lane].dim;
         if v.len() != dim {
             return Err(js_err(

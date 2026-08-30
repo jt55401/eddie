@@ -62,8 +62,16 @@ pub enum Quant {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RuntimeSpec {
     /// Candle BERT inside the WASM module (CPU). `files` are fetched from the
-    /// HuggingFace repo named by `DenseSpec::model` at `DenseSpec::revision`.
-    WasmCandle { files: Vec<String> },
+    /// HuggingFace repo named by `DenseSpec::model` at `DenseSpec::revision`,
+    /// or from `base_url` when the model is bundled next to the index.
+    WasmCandle {
+        files: Vec<String>,
+        /// Where `files` live, relative to the index URL (`models/<lane>/`
+        /// for a model bundled by `eddie index --bundle-model`). Absent means
+        /// HuggingFace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
     /// transformers.js ONNX model on WebGPU. `dtype_f16` is used when the
     /// adapter exposes `shader-f16`, otherwise `dtype`.
     WebgpuOnnx {
@@ -73,7 +81,30 @@ pub enum RuntimeSpec {
         dtype_f16: Option<String>,
         /// transformers.js pooling name: `mean`, `cls`, or `last_token`.
         pooling: String,
+        /// Where the ONNX repo files live, relative to the index URL, when a
+        /// site hosts them itself. Absent means HuggingFace.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
     },
+}
+
+impl RuntimeSpec {
+    /// The `kind` tag as written in the manifest.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            RuntimeSpec::WasmCandle { .. } => "wasm-candle",
+            RuntimeSpec::WebgpuOnnx { .. } => "webgpu-onnx",
+        }
+    }
+
+    /// Site-relative location of the model files, when bundled.
+    pub fn base_url(&self) -> Option<&str> {
+        match self {
+            RuntimeSpec::WasmCandle { base_url, .. } | RuntimeSpec::WebgpuOnnx { base_url, .. } => {
+                base_url.as_deref()
+            }
+        }
+    }
 }
 
 /// One dense embedding lane.
@@ -164,6 +195,20 @@ pub struct FusionWeights {
     pub bm25: f64,
 }
 
+/// One dense lane section stored in its own `.ed` file next to the core
+/// index (`eddie index --sidecar-lanes`). A lane's sections for several
+/// scopes share one file; each scope has its own entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SidecarSpec {
+    /// File name relative to the core index (`index.<lane>.ed`).
+    pub file: String,
+    pub lane: String,
+    /// `chunks`, `qa` or `claims`.
+    pub scope: String,
+    /// Size of `file` in bytes (repeated on every entry that shares the file).
+    pub bytes: u64,
+}
+
 /// Uncompressed header of an `.ed` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
@@ -191,6 +236,19 @@ pub struct Manifest {
     /// (`crate::index::context_prefix`). Stored texts stay clean either way.
     #[serde(default)]
     pub title_context: bool,
+    /// Dense lane sections that live in sidecar files instead of this
+    /// file's payload (see `SearchIndex::to_ed_split`). Empty for a
+    /// single-file index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sidecars: Vec<SidecarSpec>,
+    /// Identity a core index shares with its sidecars: hex SHA-256 prefix of
+    /// the chunk metadata, the texts and the dense lane specs. A sidecar
+    /// attaches only when it matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_id: Option<String>,
+    /// Set only in a sidecar file: the lane whose sections it carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_lane: Option<String>,
 }
 
 impl Manifest {
@@ -207,11 +265,33 @@ impl Manifest {
             built_at: None,
             fusion: None,
             title_context: false,
+            sidecars: Vec::new(),
+            index_id: None,
+            sidecar_lane: None,
         }
     }
 
     pub fn dense_lane(&self, id: &str) -> Option<&DenseSpec> {
         self.dense.iter().find(|d| d.id == id)
+    }
+
+    /// The sidecar entry holding `scope`'s section of `lane`, if that section
+    /// is not in the core file.
+    pub fn sidecar_for(&self, scope: &str, lane: &str) -> Option<&SidecarSpec> {
+        self.sidecars
+            .iter()
+            .find(|s| s.scope == scope && s.lane == lane)
+    }
+
+    /// Distinct sidecar file names, in manifest order.
+    pub fn sidecar_files(&self) -> Vec<&str> {
+        let mut files: Vec<&str> = Vec::new();
+        for s in &self.sidecars {
+            if !files.contains(&s.file.as_str()) {
+                files.push(&s.file);
+            }
+        }
+        files
     }
 
     /// First lane the WASM module can run on its own (CPU BERT).
@@ -247,6 +327,7 @@ mod tests {
                     "tokenizer.json".into(),
                     "model.safetensors".into(),
                 ],
+                base_url: Some("models/minilm/".into()),
             },
         });
         m.dense.push(DenseSpec {
@@ -266,8 +347,16 @@ mod tests {
                 dtype: "q4".into(),
                 dtype_f16: Some("q4f16".into()),
                 pooling: "last_token".into(),
+                base_url: None,
             },
         });
+        m.sidecars.push(SidecarSpec {
+            file: "index.qwen3e.ed".into(),
+            lane: "qwen3e".into(),
+            scope: "chunks".into(),
+            bytes: 12345,
+        });
+        m.index_id = Some("0123456789abcdef".into());
         m.sparse = Some(SparseSpec {
             model: "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill".into(),
             tokenizer: "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill".into(),
@@ -281,14 +370,28 @@ mod tests {
         assert!(json.contains("\"kind\":\"wasm-candle\""));
         assert!(json.contains("\"kind\":\"webgpu-onnx\""));
         assert!(json.contains("\"pooling\":\"last\""));
+        assert!(json.contains("\"base_url\":\"models/minilm/\""));
+        assert!(json.contains("\"sidecars\":[{\"file\":\"index.qwen3e.ed\""));
+        assert!(!json.contains("sidecar_lane"));
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
         assert_eq!(back.first_wasm_lane().unwrap().id, "minilm");
         assert_eq!(back.dense_lane("qwen3e").unwrap().dim, 1024);
-        // Older manifests without the field read as "no title context".
+        assert_eq!(back.dense[0].runtime.base_url(), Some("models/minilm/"));
+        assert_eq!(back.dense[1].runtime.kind(), "webgpu-onnx");
+        assert_eq!(back.sidecar_for("chunks", "qwen3e").unwrap().bytes, 12345);
+        assert!(back.sidecar_for("qa", "qwen3e").is_none());
+        assert_eq!(back.sidecar_files(), vec!["index.qwen3e.ed"]);
+        // Older manifests without the fields read as "no title context",
+        // no sidecars, no identity; a 0.4.1 runtime spec has no base_url.
         let legacy: Manifest =
             serde_json::from_str(r#"{"format":5,"eddie":"0.4.0","chunks":1,"pages":1}"#).unwrap();
         assert!(!legacy.title_context);
+        assert!(legacy.sidecars.is_empty());
+        assert!(legacy.index_id.is_none());
+        let legacy_runtime: RuntimeSpec =
+            serde_json::from_str(r#"{"kind":"wasm-candle","files":["config.json"]}"#).unwrap();
+        assert_eq!(legacy_runtime.base_url(), None);
     }
 
     #[test]
@@ -305,7 +408,10 @@ mod tests {
             max_seq_len: 16,
             revision: None,
             quant: Quant::F32,
-            runtime: RuntimeSpec::WasmCandle { files: vec![] },
+            runtime: RuntimeSpec::WasmCandle {
+                files: vec![],
+                base_url: None,
+            },
         };
         assert_eq!(spec.prefixed(TextKind::Query, "hi"), "Q: hi");
         assert_eq!(spec.prefixed(TextKind::Document, "hi"), "hi");
