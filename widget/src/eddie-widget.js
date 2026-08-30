@@ -45,6 +45,9 @@
   // How long a modal open waits for the transport decision (service worker
   // registration + hello) before starting a page-side worker instead.
   const TRANSPORT_WAIT_MS = 3000;
+  // Longest a search-engine request may stay unanswered over the service
+  // worker before the widget checks whether the worker is still alive.
+  const SW_CALL_TIMEOUT_MS = 60000;
 
   // -- State --
   let search = null; // search transport (lib/transport.js), null until needed
@@ -880,8 +883,15 @@
   /** Modal-open path: make sure a transport exists and an init is under way. */
   async function ensureWorker() {
     if (search) {
-      if (workerState === "error") retryInit();
-      else if (!initSent) postInit(false);
+      if (workerState === "error") {
+        retryInit();
+        return;
+      }
+      // With the modal closed nothing pinged the service worker, so Chrome
+      // may have stopped it: a failed ping reconnects and emits reset,
+      // which re-sends init while the modal is open.
+      if (search.kind === "sw" && initSent) await search.ensureAlive();
+      if (search && !initSent) postInit(false);
       return;
     }
     const t = await ensureSearchTransport(TRANSPORT_WAIT_MS);
@@ -952,14 +962,22 @@
   async function callWorker(type, payload) {
     if (!search) throw new Error("search worker not running");
     const requestId = ++requestSeq;
+    // A service worker that died mid-request never answers: bound the wait
+    // and let the retry below reconnect.
+    const opts = { requestId, timeoutMs: search.kind === "sw" ? SW_CALL_TIMEOUT_MS : 0 };
     try {
-      return await search.call(type, payload, { requestId });
+      return await search.call(type, payload, opts);
     } catch (err) {
-      if (!err || err.fatal || !lib.isNotLoadedMessage(err.message)) throw err;
+      if (!err || err.fatal || !search) throw err;
+      if (err.timeout) {
+        if (!(await search.ensureAlive())) throw err;
+      } else if (!lib.isNotLoadedMessage(err.message) && !/service worker restarted/.test(err.message)) {
+        throw err;
+      }
       if (!search) throw err;
       if (!initSent || workerState === "idle") postInit(false);
       await whenIndexLoaded();
-      return search.call(type, payload, { requestId: ++requestSeq });
+      return search.call(type, payload, { requestId: ++requestSeq, timeoutMs: opts.timeoutMs });
     }
   }
 
@@ -1565,8 +1583,10 @@
       const t = await ensureAgentTransport();
       if (run.aborted) return;
       if (t.kind === "sw") {
-        // The service worker may still hold the model from an earlier page.
+        // The service worker may still hold the model from an earlier page
+        // (or may have been stopped meanwhile: reconnect first).
         try {
+          if (!(await t.ensureAlive())) throw new Error("the answer engine is unreachable");
           const st = await t.state();
           if (lib.canReuseAgent(st.agent, agentModel.id)) {
             agentLoaded = true;
