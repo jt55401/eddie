@@ -287,6 +287,40 @@ import * as transformers from \"./eddie-transformers-sw.js\";
 const EDDIE_SW_TIER = \"gpu\";
 const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null;" "${SW_GPU_LIBS[@]}"
 
+# widget/assets.list is the single source of truth for dist/'s file list;
+# every other piece of release/integration plumbing reads it instead of
+# hardcoding names (see the comment at the top of that file). Copy it into
+# dist/ so a built dist/ is self-describing even where widget/ itself isn't
+# checked out (published CMS packages), then verify the build produced
+# exactly what the list promises -- neither a missing required file nor an
+# unlisted extra one.
+ASSET_LIST="$SCRIPT_DIR/assets.list"
+cp "$ASSET_LIST" "$DIST/assets.list"
+mapfile -t REQUIRED_ASSETS < <(grep -v '^#' "$ASSET_LIST" | grep -v '^?' | grep -v '^$')
+mapfile -t OPTIONAL_ASSETS < <(grep '^?' "$ASSET_LIST" | sed 's/^?//')
+manifest_failed=0
+for f in "${REQUIRED_ASSETS[@]}"; do
+  [[ -f "$DIST/$f" ]] || { echo "widget/assets.list requires $f but build.sh did not produce dist/$f" >&2; manifest_failed=1; }
+done
+for f in "$DIST"/*; do
+  name="$(basename "$f")"
+  # assets.list is this step's own output; ASSET_SIZES.md/asset-sizes.csv
+  # are scripts/report-asset-sizes.sh's output into the same directory, not
+  # part of the widget build -- both are expected bystanders, not drift.
+  case "$name" in
+    assets.list | ASSET_SIZES.md | asset-sizes.csv) continue ;;
+  esac
+  listed=0
+  for known in "${REQUIRED_ASSETS[@]}" "${OPTIONAL_ASSETS[@]}"; do
+    [[ "$name" == "$known" ]] && { listed=1; break; }
+  done
+  (( listed )) || { echo "dist/$name was produced but is not in widget/assets.list (update the list or fix the build)" >&2; manifest_failed=1; }
+done
+if (( manifest_failed )); then
+  echo "dist/ does not match widget/assets.list; see messages above." >&2
+  exit 1
+fi
+
 echo "==> Build complete. Output:"
 ls -lh "$DIST/"
 
