@@ -120,11 +120,21 @@ Per-CMS guides: [Hugo](docs/guides/hugo.md),
 
 | Tool | Runs on | Search | Answers | Server | Cost |
 |---|---|---|---|---|---|
-| **Eddie** | Visitor's browser | Keywords, learned terms and meaning | Yes, cited | No | Free |
-| Pagefind | Visitor's browser | Keywords | No | No | Free |
-| Algolia DocSearch | Cloud | Keywords and meaning | No | Yes | Free for open source |
-| kapa.ai | Cloud | Meaning | Yes | Yes | Enterprise |
-| DocsBot | Cloud | Meaning | Yes | Yes | $16–$416/month |
+| **Eddie** | Visitor's browser | Keywords, learned terms and meaning | Yes, in the browser, cited | No | Free, GPL-3.0 |
+| [Pagefind](https://pagefind.app/) | Visitor's browser | Keywords | No | No | Free, MIT |
+| [Orama](https://github.com/oramasearch/orama) | Visitor's browser | Keywords, vector, hybrid | Yes, through an LLM service | No, for search | Free, Apache-2.0. Cloud is paid |
+| [Algolia DocSearch](https://docsearch.algolia.com/) | Cloud | Keywords and meaning | No | Yes | Free for open-source docs |
+| [kapa.ai](https://www.kapa.ai/) | Cloud | Meaning | Yes | Yes | Enterprise |
+| [DocsBot](https://docsbot.ai/) | Cloud | Meaning | Yes | Yes | Free tier, then $49–$499/month |
+
+Orama is the closest alternative: also client-side, also open source, and it
+does vector search too. Reach for it if you want a search library to build
+on, or you already have embeddings. Reach for Eddie if you want the whole
+pipeline done for you, from indexing your markdown to a widget that
+generates its own query embeddings and answers in the browser.
+
+Pagefind is the smallest download by a wide margin. If keyword search
+answers your visitors' questions, use it.
 
 ## Project layout
 

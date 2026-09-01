@@ -51,20 +51,35 @@ on the same dataset, not one run against a number from another project.
 
 | Tool | Runs on | Search | Answers | Server | Cost |
 |---|---|---|---|---|---|
-| **Eddie** | Visitor's browser | Keywords, learned terms and meaning | Yes, cited | No | Free |
-| Pagefind | Visitor's browser | Keywords | No | No | Free |
-| Algolia DocSearch | Cloud | Keywords and meaning | No | Yes | Free for open source |
-| kapa.ai | Cloud | Meaning | Yes | Yes | Enterprise |
-| DocsBot | Cloud | Meaning | Yes | Yes | $16–$416/month |
+| **Eddie** | Visitor's browser | Keywords, learned terms and meaning | Yes, in the browser, cited | No | Free, GPL-3.0 |
+| [Pagefind](https://pagefind.app/) | Visitor's browser | Keywords | No | No | Free, MIT |
+| [Orama](https://github.com/oramasearch/orama) | Visitor's browser | Keywords, vector, hybrid | Yes, through an LLM service | No, for search | Free, Apache-2.0. Cloud is paid |
+| [Algolia DocSearch](https://docsearch.algolia.com/) | Cloud | Keywords and meaning | No | Yes | Free for open-source docs |
+| [kapa.ai](https://www.kapa.ai/) | Cloud | Meaning | Yes | Yes | Enterprise |
+| [DocsBot](https://docsbot.ai/) | Cloud | Meaning | Yes | Yes | Free tier, then $49–$499/month |
+
+Checked 2026-09-01 against each project's own site.
 
 The trade is straightforward. Cloud tools do the work on their servers, so
-the visitor downloads nothing and you pay a bill and send them your content.
-Eddie does the work on the visitor's device, so you pay nothing and host
-nothing, and the visitor downloads a model once if they want results that
-match meaning.
+the visitor downloads nothing, and you pay a bill and send them your
+content. The two browser-side tools cost you nothing and host nothing, and
+ask the visitor for a download instead.
 
-Pagefind is the closest comparison: also client-side, also free, keyword
-only. If keyword search is enough for your site, it is a smaller download.
+**Pagefind** is the smallest download by a wide margin, and keyword-only.
+Its own site describes a 10,000 page site searching within a 300 kB total
+payload. If keyword search answers your visitors' questions, it is the
+better choice.
+
+**Orama** is the closest alternative to Eddie: client-side, Apache-2.0,
+with full-text, vector and hybrid search, and a plugin that can generate
+embeddings in the browser. The difference is scope. Orama is a search
+library you build on, and it indexes documents you give it. Eddie is a
+finished pipeline: a CLI that reads your markdown or built HTML, chunk and
+model selection made for you, a widget with consent prompts and a settings
+panel, and answers generated in the browser rather than through a service.
+If you want to build the search experience yourself, Orama gives you more
+room. If you want search on a Hugo site this afternoon, Eddie does more of
+the work.
 
 ## Papers and references
 
