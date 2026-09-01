@@ -129,13 +129,25 @@ cannot fetch it; the agent worker has no wasm and no transformers.js.
 | (b) first open + one keyword/sparse search, no consent | **791,841** (index 541,846, lite wasm 200,086, widget 26,149, `eddie-sw-lite.js` 16,616, glue 3,814, boot 3,330) | 0 |
 | (c) CPU dense lane accepted, browser without WebGPU | **47,216,790** (f16 weights 45,441,912, `eddie-dense.wasm` 731,823, tokenizer 148,046, `index.minilm.ed` 82,172, `eddie-sw-dense.js` 16,612, dense glue 4,081, config 303, on top of (b) minus the sidecar) | 0 |
 | (d) WebGPU search lane accepted, no agent | **1,169,013** ((b) plus `index.bge-small.ed` 192,476, `eddie-transformers-sw.js` 168,074, `eddie-sw-gpu.js` 16,622) | **39,100,991** (ONNX q8 weights 34,084,532 from `us.aws.cdn.hf.co`, ORT asyncify wasm 4,793,017 from jsDelivr, 223,442 of config/tokenizer/api from huggingface.co) |
+| (e) agent accepted, no search lane accepted | **800,583** ((b) plus `eddie-sw-agent.js` 8,742, and nothing else) | WebLLM 1,834,414 from jsDelivr, its runtime wasm 6,100,268 from raw.githubusercontent.com, ~400 MB of Qwen3 weights from `us.aws.cdn.hf.co` and 54,700 of config from huggingface.co |
 
-Row (d) really ran the lane: `data-lane="bge-small"`, `data-runtime="webgpu"`,
-`data-arms="dense,sparse,bm25"`, ready 23 s after the click. What is not in
-it is WebLLM. In pass 1 the same click also pulled 1.82 MB of WebLLM plus a
-38 KB ORT bundle from jsDelivr, because `sw/gpu` imported them; the 4.79 MB
-of jsDelivr traffic above is the ORT asyncify wasm transformers.js needs and
-nothing else.
+Row (d) really ran the lane: `data-lane="bge-small"`,
+`data-runtime="webgpu"`, `data-arms="dense,sparse,bm25"`, ready 23 s after
+the click. What is not in it is WebLLM. In pass 1 the same click also pulled
+1.82 MB of WebLLM plus a 38 KB ORT bundle from jsDelivr, because `sw/gpu`
+imported them; the 4.79 MB of jsDelivr traffic above is the ORT asyncify
+wasm transformers.js needs and nothing else.
+
+Row (e) is the same split seen from the other side. The visitor never
+accepted a search lane -- `data-tier` stayed `lite` -- pressed Ask, and
+accepted the agent. The site served one extra file, `eddie-sw-agent.js`,
+and the browser fetched WebLLM and its weights. No `eddie-sw-gpu.js`, no
+168 KB transformers.js copy, no ORT: in pass 1 the agent lived in the gpu
+tier, so accepting it dragged both in.
+
+External bytes here are TLS-stream bytes at the proxy, so they are an upper
+bound on payload and the weight figure is approximate; the origin set is
+exact, and it is the origin set that the tier split is about.
 
 
 ### Caching: what a returning visitor pays
