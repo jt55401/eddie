@@ -37,8 +37,14 @@
   }
 
   async function readBody(response, onProgress) {
-    const lenHeader = response.headers && response.headers.get ? response.headers.get("Content-Length") : null;
-    const total = lenHeader && /^\d+$/.test(lenHeader) && Number(lenHeader) > 0 ? Number(lenHeader) : null;
+    const headers = response.headers && response.headers.get ? response.headers : null;
+    const lenHeader = headers ? headers.get("Content-Length") : null;
+    // A compressed response (Content-Encoding: br/gzip) announces the wire
+    // size while the stream yields decoded bytes: the announced total is
+    // neither a buffer size nor a progress denominator then.
+    const encoding = headers ? String(headers.get("Content-Encoding") || "").trim().toLowerCase() : "";
+    const encoded = encoding !== "" && encoding !== "identity";
+    const total = !encoded && lenHeader && /^\d+$/.test(lenHeader) && Number(lenHeader) > 0 ? Number(lenHeader) : null;
     if (onProgress) onProgress(0, total);
     if (!response.body || typeof response.body.getReader !== "function") {
       const buf = new Uint8Array(await response.arrayBuffer());

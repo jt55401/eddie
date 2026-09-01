@@ -14,12 +14,11 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
-use tokenizers::Tokenizer;
 
-use crate::embed::prepare_tokenizer;
 pub use crate::manifest::{SparseSpec, SparseTerm};
+pub use crate::wordpiece::WordPiece;
 
 /// Keep document terms whose weight is at least this fraction of the
 /// document's largest weight (OpenSearch `prune_type: max_ratio` default).
@@ -38,32 +37,24 @@ pub fn tokenizer_json_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Parse a `tokenizer.json` for query-side sparse encoding: no padding,
-/// truncation at `max_seq_len`.
-pub fn sparse_tokenizer_from_bytes(bytes: &[u8], max_seq_len: usize) -> Result<Tokenizer> {
-    let mut tokenizer =
-        Tokenizer::from_bytes(bytes).map_err(|e| anyhow!("parsing tokenizer.json: {e}"))?;
-    prepare_tokenizer(&mut tokenizer, max_seq_len)?;
-    Ok(tokenizer)
+/// Parse a `tokenizer.json` for query-side sparse encoding with the pure
+/// [`WordPiece`] tokenizer (no `tokenizers` crate): special tokens are
+/// dropped and content tokens truncated to `max_seq_len` minus the special
+/// tokens the file's post-processor would add.
+pub fn sparse_tokenizer_from_bytes(bytes: &[u8], max_seq_len: usize) -> Result<WordPiece> {
+    WordPiece::from_tokenizer_json(bytes, max_seq_len)
 }
 
-/// Sparse query vector: WordPiece ids of `query` (special tokens dropped),
-/// weight = `idf(id)`, duplicates collapsed to the maximum, sorted by id.
-/// Ids without an IDF entry are dropped.
+/// Sparse query vector: WordPiece ids of `query`, weight = `idf(id)`,
+/// duplicates collapsed to the maximum, sorted by id. Ids without an IDF
+/// entry (special tokens included) are dropped.
 pub fn sparse_query_terms(
-    tokenizer: &Tokenizer,
+    tokenizer: &WordPiece,
     idf: &dyn Fn(u32) -> Option<f32>,
     query: &str,
 ) -> Vec<SparseTerm> {
-    let Ok(encoding) = tokenizer.encode(query, true) else {
-        return Vec::new();
-    };
     let mut weights: BTreeMap<u32, f32> = BTreeMap::new();
-    let special = encoding.get_special_tokens_mask();
-    for (i, &id) in encoding.get_ids().iter().enumerate() {
-        if special.get(i).copied().unwrap_or(0) == 1 {
-            continue;
-        }
+    for id in tokenizer.encode(query) {
         let Some(w) = idf(id) else { continue };
         if w.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
             continue;
@@ -128,7 +119,9 @@ mod native {
     };
     use tokenizers::Tokenizer;
 
-    use super::{DEFAULT_MAX_SEQ_LEN, DEFAULT_PRUNE_RATIO, prune_terms, tokenizer_json_sha256};
+    use super::{
+        DEFAULT_MAX_SEQ_LEN, DEFAULT_PRUNE_RATIO, WordPiece, prune_terms, tokenizer_json_sha256,
+    };
     use crate::embed::hub::{ModelRepo, revision_from_path};
     use crate::embed::prepare_tokenizer;
     use crate::manifest::{SparseSpec, SparseTerm};
@@ -187,6 +180,9 @@ mod native {
     pub struct SparseDocEncoder {
         model: MlmModel,
         tokenizer: Tokenizer,
+        /// The same vocabulary through the runtime's own tokenizer, so
+        /// `query_terms` produces exactly what the browser will.
+        query_tokenizer: WordPiece,
         tokenizer_sha256: String,
         idf: HashMap<u32, f32>,
         special_ids: Vec<u32>,
@@ -266,6 +262,10 @@ mod native {
             if max_pos < opts.max_seq_len {
                 prepare_tokenizer(&mut tokenizer, max_pos)?;
             }
+            let query_tokenizer = WordPiece::from_tokenizer_json(
+                &tokenizer_bytes,
+                opts.max_seq_len.min(DEFAULT_MAX_SEQ_LEN).min(max_pos),
+            )?;
 
             let idf_json = repo.read_string("idf.json")?;
             let idf_by_token: HashMap<String, f32> =
@@ -293,6 +293,7 @@ mod native {
             Ok(Self {
                 model: mlm,
                 tokenizer,
+                query_tokenizer,
                 tokenizer_sha256,
                 idf,
                 special_ids,
@@ -395,7 +396,12 @@ mod native {
         /// Query-side terms using this encoder's tokenizer and IDF table.
         pub fn query_terms(&self, query: &str) -> Vec<SparseTerm> {
             let idf = &self.idf;
-            super::sparse_query_terms(&self.tokenizer, &|id| idf.get(&id).copied(), query)
+            super::sparse_query_terms(&self.query_tokenizer, &|id| idf.get(&id).copied(), query)
+        }
+
+        /// The runtime-equivalent query tokenizer.
+        pub fn query_tokenizer(&self) -> &WordPiece {
+            &self.query_tokenizer
         }
 
         /// IDF weight per token id (from the repo's `idf.json`).
@@ -445,6 +451,7 @@ mod native {
                 revision: self.revision.clone(),
                 vocab_hash: self.tokenizer_sha256.clone(),
                 terms,
+                vocab: crate::manifest::SparseVocab::Fetch,
             }
         }
     }

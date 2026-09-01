@@ -1,6 +1,6 @@
 [package]
 name = "eddie"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Semantic search and simple Q&A for static sites — index at build time, query in the browser via WASM"
@@ -15,33 +15,39 @@ name = "eddie"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["dense-wasm"]
+# The CPU dense lane inside the WASM module (candle BERT + the `tokenizers`
+# crate). Native builds always have candle and tokenizers; this feature only
+# decides whether the wasm32 module carries them. `scripts/build-wasm-variants.sh`
+# builds `eddie-lite` with `--no-default-features` (index parsing, BM25,
+# sparse, RRF, QA ranking; no model code) and `eddie-dense` with the default.
+dense-wasm = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:tokenizers", "dep:getrandom"]
 # NVIDIA GPU inference at index time (native only). Requires the CUDA toolkit
 # at build time; see docs for the environment variables cudarc expects.
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 cudnn = ["cuda", "candle-core/cudnn", "candle-nn/cudnn", "candle-transformers/cudnn"]
 
-# --- Shared dependencies (all targets) ---
+# --- Shared dependencies (all targets, both WASM variants) ---
 [dependencies]
-candle-core = "0.11"
-candle-nn = "0.11"
-candle-transformers = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex = "1"
 anyhow = "1"
 brotli = "8"
-unicode-segmentation = "1"
 sha2 = "0.10"
 
 # --- Native-only dependencies ---
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+# 0.22 matches the pin inside candle-core 0.11 so only one copy is compiled.
+tokenizers = { version = "0.22", features = ["onig", "esaxx_fast"] }
+regex = "1"
+unicode-segmentation = "1"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 walkdir = "2"
 hf-hub = { version = "1", features = ["blocking"] }
-# 0.22 matches the pin inside candle-core 0.11 so only one copy is compiled.
-tokenizers = { version = "0.22", features = ["onig", "esaxx_fast"] }
 ureq = { version = "2", features = ["json"] }
 # HTML parsing for the `html` CMS profile (src/parse/html.rs). `tl` is a
 # forgiving, allocation-light HTML5-ish tokenizer with a small DOM/query-selector
@@ -54,13 +60,18 @@ tl = "0.7"
 
 # --- WASM dependencies ---
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-tokenizers = { version = "0.22", default-features = false, features = ["unstable_wasm"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console", "WorkerGlobalScope"] }
-# getrandom 0.3 needs the wasm_js backend on wasm32; the matching
-# `--cfg getrandom_backend="wasm_js"` lives in .cargo/config.toml.
-getrandom = { version = "0.3", features = ["wasm_js"] }
+# Model code, only with the `dense-wasm` feature (the eddie-dense module).
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
+tokenizers = { version = "0.22", default-features = false, features = ["unstable_wasm"], optional = true }
+# getrandom 0.3 (pulled in by candle's rand) needs the wasm_js backend on
+# wasm32; the matching `--cfg getrandom_backend="wasm_js"` lives in
+# .cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"], optional = true }
 
 [profile.release]
 opt-level = 3

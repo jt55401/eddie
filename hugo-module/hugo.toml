@@ -5,6 +5,11 @@
 [params.eddie]
   enabled = true
   indexUrl = "/eddie/index.ed"
+  # "boot" puts only eddie-boot.js (about 2 KB compressed: trigger button and
+  # keyboard shortcut) on each page and fetches the full widget on the first
+  # interaction, or after load for a visitor who used the search before.
+  # "full" loads eddie-widget.js on every page view.
+  loader = "boot"
   position = "bottom-right"
   theme = "auto"
   qaMode = "auto"
@@ -14,15 +19,31 @@
   # "off" disables the in-browser agent entirely; "auto" enables it when the
   # visitor's browser can run a WebLLM lane (see agentModel).
   agentMode = "auto"
-  # "auto" picks Qwen3.5-0.8B; "quality" picks Qwen3.5-2B; any other value is
-  # passed through as a literal WebLLM model id.
+  # "auto" picks by the adapter's buffer limit; "light" picks Qwen3.5-0.8B and
+  # "quality" Qwen3.5-2B; any other value is passed through as a literal
+  # WebLLM model id, which also becomes the only one the settings panel
+  # offers.
   agentModel = "auto"
   # "auto" picks WebGPU (transformers.js) when available, else the WASM
-  # candle lane; "wasm" and "webgpu" force one lane and skip the other.
+  # candle lane; "wasm" and "webgpu" force one lane and skip the other;
+  # "off" runs keyword and sparse only and downloads no model at all.
+  # Whatever is set here is the most a visitor can turn on in the widget's
+  # settings panel -- they can always choose less.
   denseRuntime = "auto"
   # Shown before the first model download (search or agent). Empty string
   # uses the widget's built-in default consent copy.
   consentText = ""
+  # "auto" keeps the search engine and the answer model in a service worker
+  # that outlives page navigations (falls back to page workers where service
+  # workers are unavailable); "off" always uses page workers.
+  persist = "auto"
+  # "auto" loads the search engine right after the page loads for a visitor
+  # who opened the search before on this browser, and the model too when it
+  # was consented to and its files are cached (never under Data Saver; a
+  # first-time visitor's page view fetches nothing beyond the loader);
+  # "always" also downloads an uncached model without asking; "off" waits
+  # for the first search.
+  warm = "auto"
 
 [module]
   [module.hugoVersion]

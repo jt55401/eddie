@@ -52,6 +52,10 @@ test("reads every documented attribute", () => {
   assert.equal(c.consentText, "Download {size}?");
 });
 
+test("data-dense-runtime accepts off, for a site that wants keyword and sparse only", () => {
+  assert.equal(from({ "data-dense-runtime": "off" }).denseRuntime, "off");
+});
+
 test("invalid values fall back", () => {
   const c = from({
     "data-position": "middle",
@@ -69,4 +73,16 @@ test("invalid values fall back", () => {
   assert.equal(c.agentMode, "auto");
   assert.equal(c.denseRuntime, "auto");
   assert.equal(c.offsetX, 0);
+});
+
+test("persist and warm attributes", () => {
+  const C = require("../src/lib/config.js");
+  const parse = (attrs) => C.parseWidgetConfig((n) => (n in attrs ? attrs[n] : null));
+  assert.equal(parse({}).persist, "auto");
+  assert.equal(parse({}).warm, "auto");
+  assert.equal(parse({ "data-persist": "off" }).persist, "off");
+  assert.equal(parse({ "data-persist": "yes" }).persist, "auto");
+  assert.equal(parse({ "data-warm": "always" }).warm, "always");
+  assert.equal(parse({ "data-warm": "OFF" }).warm, "off");
+  assert.equal(parse({ "data-warm": "eager" }).warm, "auto");
 });

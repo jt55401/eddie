@@ -16,6 +16,17 @@
 
   const HF_HOST = "https://huggingface.co";
 
+  /**
+   * `?v=` of the runtime assets (widget, workers, wasm, glue, service
+   * workers): a hash of the files that produced them, stamped into every
+   * bundle by widget/build.sh. Deliberately not the index's version, which
+   * changes on every content rebuild and so re-downloaded the whole engine
+   * on every deploy; see "Script tag" in widget/README.md. null outside a
+   * bundle (the Node tests), which just means no `?v=`.
+   */
+  const ASSET_VERSION =
+    typeof EDDIE_ASSET_VERSION === "string" && EDDIE_ASSET_VERSION ? EDDIE_ASSET_VERSION : null;
+
   /** Directory of an absolute URL, without query or hash, with a trailing slash. */
   function baseUrlOf(href) {
     const u = new URL(href);
@@ -83,6 +94,7 @@
 
   return {
     HF_HOST,
+    ASSET_VERSION,
     baseUrlOf,
     versionOf,
     withVersion,

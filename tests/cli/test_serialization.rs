@@ -21,6 +21,8 @@ fn spec() -> DenseSpec {
                 "tokenizer.json".into(),
                 "model.safetensors".into(),
             ],
+            base_url: None,
+            bytes: None,
         },
     }
 }

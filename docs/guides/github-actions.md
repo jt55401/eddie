@@ -32,21 +32,21 @@ five runners (no cross-compilation) and produces:
 - `eddie-macos-aarch64` (`macos-14`)
 - `eddie-macos-x86_64` (`macos-15-intel`)
 - `eddie-windows-x86_64.exe` (`windows-2022`)
-- `eddie.wasm`, `eddie.wasm.br`, `eddie.wasm.gz`
-- `eddie-wasm.js`, `eddie-wasm.js.br`, `eddie-wasm.js.gz`
-- `eddie-worker.js`, `eddie-worker.js.br`, `eddie-worker.js.gz`
-- `eddie-agent-worker.js`, `eddie-agent-worker.js.br`, `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
-- `eddie-widget.js`, `eddie-widget.js.br`, `eddie-widget.js.gz`
+- every widget runtime asset named in `widget/assets.list` (the single
+  source of truth for that file list), each with `.br`/`.gz` siblings where
+  `scripts/publish-hugo-module.sh` produced them
 - `ASSET_SIZES.md`, `asset-sizes.csv`
 - `eddie-hugo-module.tar.gz`
 - `SHA256SUMS`
 
 The `build` job runs the five platform builds in parallel and uploads each
 binary as a workflow artifact; the `assemble` job (Ubuntu only) downloads
-them, builds the widget, runs `wasm-opt -Oz` on the WASM artifact, computes
-`SHA256SUMS` over everything, and publishes the GitHub Release. A
-`workflow_dispatch` run does the same build and assembly as a dry run but
-skips the publish step (gated on `startsWith(github.ref, 'refs/tags/')`).
+them, builds the widget, runs `wasm-opt -Oz` on the lite and dense WASM
+artifacts, computes `SHA256SUMS` over everything, and publishes the GitHub
+Release (a single `release-assets/*` glob, so a new widget asset doesn't
+need a matching edit to the upload step). A `workflow_dispatch` run does the
+same build and assembly as a dry run but skips the publish step (gated on
+`startsWith(github.ref, 'refs/tags/')`).
 
 The npm, gem, and PyPI CLI launchers (`integrations/cli/*`) verify the
 downloaded binary against `SHA256SUMS` before marking it executable and
@@ -59,11 +59,18 @@ available.
 ## Size budgets
 
 `ci.yml` runs `scripts/report-asset-sizes.sh`, which reports raw/gzip/brotli
-sizes and enforces budgets for `eddie.wasm`:
+sizes for every asset in `widget/assets.list` and enforces budgets on the
+default page-load path (brotli) plus the opt-in dense WASM module (raw,
+gzip, brotli); see `docs/plans/2026-08-30-efficient-defaults.md` for the
+measurements behind these numbers:
 
-- `WASM_RAW_BUDGET_BYTES` (default `3400000`)
-- `WASM_GZIP_BUDGET_BYTES` (default `1100000`)
-- `WASM_BROTLI_BUDGET_BYTES` (default `800000`)
+- `BOOT_BROTLI_BUDGET_BYTES` (default `4096`) -- `eddie-boot.js`
+- `WIDGET_BROTLI_BUDGET_BYTES` (default `33500`) -- `eddie-widget.js`
+- `WORKER_BROTLI_BUDGET_BYTES` (default `16500`) -- `eddie-worker.js`
+- `LITE_WASM_BROTLI_BUDGET_BYTES` (default `230000`) -- `eddie-lite.wasm`
+- `WASM_RAW_BUDGET_BYTES` (default `3700000`) -- `eddie-dense.wasm`
+- `WASM_GZIP_BUDGET_BYTES` (default `1150000`) -- `eddie-dense.wasm`
+- `WASM_BROTLI_BUDGET_BYTES` (default `820000`) -- `eddie-dense.wasm`
 
 ## Hugo module publishing
 

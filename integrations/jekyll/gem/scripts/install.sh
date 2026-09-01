@@ -4,7 +4,6 @@ set -euo pipefail
 SITE_DIR="${1:?usage: install.sh <jekyll-site-dir>}"
 ASSET_ROOT="${2:-}"
 PACKAGE_ROOT="${EDDIE_PACKAGE_ROOT:-}"
-ASSETS=(eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm)
 
 if [[ -z "$ASSET_ROOT" && -n "$PACKAGE_ROOT" ]]; then
   ASSET_ROOT="$PACKAGE_ROOT/assets"
@@ -15,6 +14,17 @@ if [[ -z "$ASSET_ROOT" ]]; then
   echo "Pass an explicit asset-root or set EDDIE_PACKAGE_ROOT." >&2
   exit 1
 fi
+
+# widget/assets.list (copied alongside the runtime files by
+# scripts/sync-integration-assets.sh or the publish-*.yml workflows) is the
+# single source of truth for which files ship; read it instead of
+# hardcoding names here.
+ASSET_LIST="$ASSET_ROOT/assets.list"
+if [[ ! -f "$ASSET_LIST" ]]; then
+  echo "Missing asset manifest: $ASSET_LIST (asset root not populated?)" >&2
+  exit 1
+fi
+mapfile -t ASSETS < <(grep -v '^#' "$ASSET_LIST" | grep -v '^?' | grep -v '^$')
 
 require_asset() {
   local asset_name="$1"
@@ -30,17 +40,15 @@ for asset in "${ASSETS[@]}"; do
 done
 
 mkdir -p "$SITE_DIR/assets/eddie"
-cp "$ASSET_ROOT/eddie-widget.js" "$SITE_DIR/assets/eddie/eddie-widget.js"
-cp "$ASSET_ROOT/eddie-worker.js" "$SITE_DIR/assets/eddie/eddie-worker.js"
-cp "$ASSET_ROOT/eddie-agent-worker.js" "$SITE_DIR/assets/eddie/eddie-agent-worker.js"
-cp "$ASSET_ROOT/eddie-wasm.js" "$SITE_DIR/assets/eddie/eddie-wasm.js"
-cp "$ASSET_ROOT/eddie.wasm" "$SITE_DIR/assets/eddie/eddie.wasm"
+for asset in "${ASSETS[@]}"; do
+  cp "$ASSET_ROOT/$asset" "$SITE_DIR/assets/eddie/$asset"
+done
 
 mkdir -p "$SITE_DIR/_includes"
 HEAD_INCLUDE="$SITE_DIR/_includes/head.html"
 if [[ -f "$HEAD_INCLUDE" ]]; then
-  if ! grep -q "eddie-widget.js" "$HEAD_INCLUDE"; then
-    perl -0777 -i -pe 's#</head>#  <script defer src="/assets/eddie/eddie-widget.js" data-index-url="/assets/eddie/index.ed"></script>\n</head>#s' "$HEAD_INCLUDE"
+  if ! grep -q "eddie-boot.js" "$HEAD_INCLUDE"; then
+    perl -0777 -i -pe 's#</head>#  <script defer src="/assets/eddie/eddie-boot.js" data-index-url="/assets/eddie/index.ed"></script>\n</head>#s' "$HEAD_INCLUDE"
   fi
 else
   cat > "$HEAD_INCLUDE" <<'HTML'
@@ -54,7 +62,7 @@ else
   {%- if jekyll.environment == 'production' and site.google_analytics -%}
     {%- include google-analytics.html -%}
   {%- endif -%}
-  <script defer src="/assets/eddie/eddie-widget.js" data-index-url="/assets/eddie/index.ed"></script>
+  <script defer src="/assets/eddie/eddie-boot.js" data-index-url="/assets/eddie/index.ed"></script>
 </head>
 HTML
 fi

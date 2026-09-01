@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-// Dense-lane selection, download sizes, consent copy and degraded-arm notices.
-// Pure functions over the index manifest (see src/manifest.rs).
+// Dense-lane selection and download sizes. Pure functions over the index
+// manifest (see src/manifest.rs). The consent and notice copy lives in
+// copy.js so the widget bundle does not carry the engine-side lane logic.
 
 (function (factory) {
   const api = factory();
@@ -69,6 +70,45 @@
     return /\.(safetensors|bin|pt|gguf|onnx)$/i.test(String(file));
   }
 
+  /** Site-relative directory the lane's model files live in (`eddie index --bundle-model`), or null for HuggingFace. */
+  function laneBaseUrl(lane) {
+    const b = lane && lane.runtime && lane.runtime.base_url;
+    return typeof b === "string" && b.trim() ? b.trim() : null;
+  }
+
+  /** Where the lane's files are downloaded from: "site" (bundled next to the index) or "huggingface". */
+  function laneOrigin(lane) {
+    return laneBaseUrl(lane) ? "site" : "huggingface";
+  }
+
+  /** Absolute URL of a site-bundled model file, resolved against the index URL (no version parameter yet). */
+  function siteModelUrl(lane, file, indexUrl) {
+    const base = laneBaseUrl(lane);
+    if (!base) return null;
+    return new URL(base.replace(/\/?$/, "/") + String(file).replace(/^\//, ""), indexUrl).href;
+  }
+
+  /**
+   * Name a lane's file is cached under (see urls.js cacheKey): a bundled f16
+   * copy and the HuggingFace original differ, so site files get their own
+   * prefix and never collide with a repo download of the same name.
+   */
+  function laneFileName(lane, file) {
+    return laneBaseUrl(lane) ? "@site/" + file : String(file);
+  }
+
+  /** The sidecar entry that holds `scope`'s section of `laneId`, or null when the section is in the core file. */
+  function sidecarFor(manifest, scope, laneId) {
+    const list = manifest && Array.isArray(manifest.sidecars) ? manifest.sidecars : [];
+    return list.find((s) => s.scope === scope && s.lane === laneId) || null;
+  }
+
+  /** Bytes of the sidecar file(s) a lane's chunk vectors need, counted once per file. */
+  function laneSidecarBytes(manifest, laneId) {
+    const side = sidecarFor(manifest, "chunks", laneId);
+    return side && Number.isFinite(Number(side.bytes)) ? Number(side.bytes) : 0;
+  }
+
   /**
    * Why the WASM loader (init_dense_wasm) cannot run a wasm-candle lane, or
    * null when it can: it accepts BERT-family lanes with config.json,
@@ -96,6 +136,11 @@
     const lanes = (manifest && Array.isArray(manifest.dense)) ? manifest.dense : [];
     const runtime = (opts && opts.denseRuntime) || "auto";
     const hasWebGpu = !!(opts && opts.hasWebGpu);
+    // A pinned lane id (the visitor picked one in the settings panel, or the
+    // site set data-dense-lane): the choice narrows to that lane, and if it
+    // is not runnable here the result is no dense arm rather than a silently
+    // different model.
+    const pinned = (opts && opts.laneId) ? String(opts.laneId) : null;
     const webgpu = lanes.filter(isWebGpuLane);
     const skipped = [];
     const wasm = lanes.filter(isWasmLane).filter((lane) => {
@@ -106,6 +151,9 @@
     if (lanes.length === 0) {
       return { candidates: [], skipped, reason: "index has no dense lane" };
     }
+    if (runtime === "off") {
+      return { candidates: [], skipped, reason: "dense search is turned off" };
+    }
     let candidates;
     if (runtime === "wasm") {
       candidates = wasm;
@@ -114,9 +162,11 @@
     } else {
       candidates = hasWebGpu ? webgpu.concat(wasm) : wasm;
     }
+    if (pinned) candidates = candidates.filter((lane) => lane.id === pinned);
     let reason = null;
     if (candidates.length === 0) {
-      if (runtime === "wasm") reason = skipped.length ? "no wasm-candle lane the WASM loader can run" : "index has no wasm-candle lane";
+      if (pinned) reason = `lane ${pinned} cannot run here`;
+      else if (runtime === "wasm") reason = skipped.length ? "no wasm-candle lane the WASM loader can run" : "index has no wasm-candle lane";
       else if (!hasWebGpu && webgpu.length && !wasm.length) reason = "no WebGPU adapter";
       else if (runtime === "webgpu" && !hasWebGpu) reason = "no WebGPU adapter";
       else if (runtime === "webgpu") reason = "index has no webgpu-onnx lane";
@@ -131,61 +181,25 @@
     return runtime.dtype || "fp32";
   }
 
-  /** Approximate bytes a lane downloads on first use, or null when unknown. */
+  /** The exact byte count the manifest declares for a bundled model (`runtime.bytes`), or null. */
+  function laneDeclaredBytes(lane) {
+    const declared = lane && lane.runtime ? Number(lane.runtime.bytes) : NaN;
+    return Number.isFinite(declared) && declared > 0 ? declared : null;
+  }
+
+  /**
+   * Bytes a lane downloads on first use, or null when unknown: the exact
+   * count the manifest carries for a bundled model (`runtime.bytes`, written
+   * by `eddie index --bundle-model`), else the table estimate for known
+   * HuggingFace repos. The table describes the f32 originals; a bundled f16
+   * copy without `runtime.bytes` should be measured instead (the engine
+   * HEADs the files), never estimated from the table.
+   */
   function laneDownloadBytes(lane) {
+    const declared = laneDeclaredBytes(lane);
+    if (declared != null) return declared;
     const repo = (laneRepo(lane) || "").toLowerCase();
     return Object.prototype.hasOwnProperty.call(DOWNLOAD_SIZES, repo) ? DOWNLOAD_SIZES[repo] : null;
-  }
-
-  function formatBytes(n) {
-    if (n == null || !Number.isFinite(n)) return "unknown size";
-    if (n >= 1e9) {
-      const g = n / 1e9;
-      return (g >= 10 ? Math.round(g) : Math.round(g * 10) / 10) + " GB";
-    }
-    if (n >= 1e6) return Math.round(n / 1e6) + " MB";
-    if (n >= 1e3) return Math.round(n / 1e3) + " KB";
-    return n + " B";
-  }
-
-  /**
-   * Consent card copy for a model download. `consentText` (site override) may
-   * contain `{size}` and `{model}` placeholders.
-   */
-  function consentCopy(opts) {
-    const size = formatBytes(opts.sizeBytes);
-    const model = opts.model || "the search model";
-    if (opts.consentText) {
-      return opts.consentText.replace(/\{size\}/g, size).replace(/\{model\}/g, model);
-    }
-    const sized = opts.sizeBytes == null ? "a one-time download (size unknown)" : `a one-time ${size} download`;
-    let text = `Semantic search runs a language model in your browser. That needs ${sized} of ${model}, kept in your browser's cache for next time.`;
-    if (opts.saveData) {
-      text = "Data saver is on. " + text;
-    }
-    return text;
-  }
-
-  /**
-   * Drop degraded notes that describe the index design rather than a failure
-   * (an index without a dense lane or sparse arm is not "degraded").
-   */
-  function filterDesignDegraded(degraded) {
-    return (degraded || []).filter((d) => !/index has no (dense lane|sparse arm)/.test(d));
-  }
-
-  /** Human notice when a semantic arm is missing, or null when nothing to say. */
-  function degradedNotice(arms, degraded) {
-    const named = filterDesignDegraded(degraded).filter((d) => /^(dense|sparse)\b/.test(d));
-    if (named.length === 0) return null;
-    const a = arms || {};
-    if (!a.dense && !a.sparse) {
-      return "Keyword-only results: the semantic model isn't available.";
-    }
-    if (!a.dense) {
-      return "Keyword and sparse results only: the dense model isn't available.";
-    }
-    return "Results without the learned-sparse arm.";
   }
 
   return {
@@ -198,13 +212,16 @@
     laneRevision,
     laneFiles,
     isWeightsFile,
+    laneBaseUrl,
+    laneOrigin,
+    siteModelUrl,
+    laneFileName,
+    sidecarFor,
+    laneSidecarBytes,
     wasmLaneProblem,
     chooseDenseLanes,
     pickDtype,
+    laneDeclaredBytes,
     laneDownloadBytes,
-    formatBytes,
-    consentCopy,
-    filterDesignDegraded,
-    degradedNotice,
   };
 });

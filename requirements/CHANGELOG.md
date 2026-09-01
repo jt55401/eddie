@@ -8,8 +8,14 @@
 - Multi-platform release requirement covering the five-platform build matrix and launcher checksum verification (0500-integration/0200-github-actions/0220).
 - Model-download consent requirement, split out from download progress (0400-widget-ui/0300-download-progress/0320).
 - Inline retrieval answer blend requirement, split out from the (now agent-specific) Ask button story (0400-widget-ui/0400-qa-mode/0420).
+- Persistent-engine / tiered service-worker requirement covering `data-persist`, `data-warm`, the lite/dense/gpu service worker tiers, transport fallback to page-side workers, and state reuse across navigation (0400-widget-ui/0500-persistent-runtime/0510).
+- Runtime asset versioning requirement covering the build-derived `EDDIE_ASSET_VERSION` stamp, its separation from the index's `?v=`, and the `immutable` caching that follows (0400-widget-ui/0500-persistent-runtime/0520).
+- Visitor settings panel requirement: the gear menu, the four remembered preferences, the site config as a ceiling, `data-dense-runtime="off"`, lane pinning through `init`, and deleting downloaded models (0400-widget-ui/0500-persistent-runtime/0530).
 
 ### Changed
+
+- Tiered service-worker requirement updated from three tiers to four: the agent moves out of the gpu tier into its own `sw/agent` scope, so accepting a WebGPU search lane no longer fetches WebLLM and accepting the agent no longer fetches transformers.js (0400-widget-ui/0500-persistent-runtime/0510).
+- Hugo integration requirement updated to say that the partial's `?v=` reaches only the index, its sidecars and site-bundled model files; runtime assets carry their own build-derived version (0500-integration/0100-hugo/0110).
 
 - Indexing, search-runtime, and configuration requirements rewritten for three-arm hybrid retrieval (BM25 + learned sparse + dense), repeatable dense lanes, presets, and index format v5; all `--model`-flag and single-model-index language removed.
 - Chunking requirement rewritten for `--chunk-strategy heading|semantic` and per-lane tokenizer token budgets.
@@ -17,6 +23,9 @@
 - Search modal requirement corrected to debounced type-ahead search (not submit-triggered) with no mode tabs, matching the implemented widget.
 - Hugo and GitHub Actions integration requirements updated to remove all `eddie.toml` references (no config file exists) and to require pinned, checksum-verified CLI versions instead of `latest`.
 - Embedding model selection requirement updated to remove `nomic-ai/modernbert-embed-base` (architecturally incompatible with the Candle `bert` loader) and to describe the `wasm-candle`/`webgpu-onnx` lane split.
+- Hugo integration requirement updated for `eddie-boot.js` as the default widget embed script (`loader = "boot"`), with `eddie-widget.js` as the direct/always-on alternative (`loader = "full"`); the default page-view cost is now the boot script, not the full widget.
+- Floating trigger button requirement updated to describe `eddie-boot.js` drawing the button and Ctrl/Cmd+K shortcut on every page view by default, the hand-over to `eddie-widget.js` on first interaction, and the `data-warm` warm-up path for returning visitors.
+- Query embedding (dense lane selection) requirement updated to describe the `eddie-lite.wasm`/`eddie-dense.wasm` split: the base module ships with no embedding-model code, and `eddie-dense.wasm` is fetched only after a `wasm-candle` lane is accepted.
 
 ### Removed
 

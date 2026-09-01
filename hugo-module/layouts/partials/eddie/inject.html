@@ -14,6 +14,8 @@
 {{- $agentModel := $cfg.agentModel | default "auto" -}}
 {{- $denseRuntime := $cfg.denseRuntime | default "auto" -}}
 {{- $consentText := $cfg.consentText | default "" -}}
+{{- $persist := $cfg.persist | default "auto" -}}
+{{- $warm := $cfg.warm | default "auto" -}}
 {{/*
   relURL/absURL only prepend the site's baseURL path prefix (e.g. "/blog/"
   for a site served under https://example.com/blog/) to a *relative* path.
@@ -35,13 +37,29 @@
   the build timestamp, which busts the cache on every build instead of
   only on content changes -- acceptable since static/eddie/index.ed is
   typically rebuilt only when the site itself is rebuilt.
+
+  This value reaches only the index, its index.<lane>.ed sidecars and any
+  site-bundled model files: things one `eddie index` run writes together.
+  The runtime assets (eddie-widget.js, the workers, the wasm and its glue,
+  the service workers) carry their own `?v=`, a hash of the files that
+  built them, stamped into every bundle by widget/build.sh. Sharing this
+  one with them re-downloaded the whole engine on every deploy.
 */}}
 {{- $cacheBust := now.Unix -}}
 {{- with resources.Get $indexRelPath -}}
   {{- $cacheBust = substr (crypto.SHA256 .Content) 0 12 -}}
 {{- end -}}
 {{- $indexUrl = printf "%s?v=%v" $indexUrl $cacheBust -}}
-<script src="{{ "eddie/eddie-widget.js" | relURL }}"
+{{/*
+  loader = "boot" (default) puts the 2 KB eddie-boot.js on the page: it draws
+  the trigger and the Ctrl/Cmd+K shortcut and fetches eddie-widget.js on the
+  first interaction (or after load for a visitor who used the search
+  before). loader = "full" loads eddie-widget.js on every page view.
+*/}}
+{{- $loader := $cfg.loader | default "boot" -}}
+{{- $script := "eddie/eddie-boot.js" -}}
+{{- if eq $loader "full" -}}{{- $script = "eddie/eddie-widget.js" -}}{{- end -}}
+<script src="{{ $script | relURL }}"
         data-index-url="{{ $indexUrl }}"
         data-position="{{ $position }}"
         data-theme="{{ $theme }}"
@@ -55,5 +73,7 @@
         data-agent-model="{{ $agentModel }}"
         data-dense-runtime="{{ $denseRuntime }}"
         data-consent-text="{{ $consentText }}"
+        data-persist="{{ $persist }}"
+        data-warm="{{ $warm }}"
         defer></script>
 {{- end -}}

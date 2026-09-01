@@ -31,6 +31,20 @@ test("assetUrl joins base and busts cache", () => {
   assert.equal(u.assetUrl("", "eddie-wasm.js", null), "eddie-wasm.js");
 });
 
+test("ASSET_VERSION is the build stamp, absent outside a bundle", () => {
+  // widget/build.sh prepends `const EDDIE_ASSET_VERSION = "<hash>";` to every
+  // bundle; loaded straight from src/ there is no stamp and no `?v=`, which
+  // is also what a hand-assembled deployment gets.
+  assert.equal(u.ASSET_VERSION, null);
+  assert.equal(u.assetUrl("/eddie/", "eddie-lite.wasm", u.ASSET_VERSION), "/eddie/eddie-lite.wasm");
+
+  // The two versions are independent: runtime assets follow the build stamp,
+  // the index and its sidecars follow the index's own `?v=`.
+  const stamp = "90691e60079e";
+  assert.equal(u.assetUrl("/eddie/", "eddie-lite.wasm", stamp), "/eddie/eddie-lite.wasm?v=" + stamp);
+  assert.equal(u.withVersion("/eddie/index.qwen3e.ed", "1756700000"), "/eddie/index.qwen3e.ed?v=1756700000");
+});
+
 test("hfFileUrl pins the revision and encodes paths", () => {
   assert.equal(
     u.hfFileUrl("sentence-transformers/multi-qa-MiniLM-L6-cos-v1", "abc", "model.safetensors"),

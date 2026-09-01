@@ -22,6 +22,7 @@
 //! | `texts` | `u32 n`, then `n × (u32 len, UTF-8, u16 overlap_words)`; texts are stored **without** their overlap prefix |
 //! | `bm25` | `u32 num_docs, f32 avg_len, u32 doc_lengths[n], u32 terms`, per term `u16 len, bytes, u32 postings, (varint doc_delta, varint tf)*` (see [`crate::bm25`]) |
 //! | `sparse` | `u32 terms`, per term `u32 token_id, f32 idf, u32 postings, (varint doc_delta, u16 weight×1000)*` |
+//! | `sparse/vocab` | `u8 version=1, u8 flags (1 clean_text, 2 chinese chars, 4 strip accents, 8 lowercase), u32 unk_id, u32 cls_id, u32 sep_id (u32::MAX = none), u32 max_input_chars, u16 prefix_len, prefix, u16 added_count, per added `u32 id, u8 special, u16 len, bytes`, u32 vocab_count, per id `u16 len, bytes`` (empty = unused id); lets the runtime WordPiece queries without `tokenizer.json` |
 //! | `dense/<scope>/<lane_id>` | `u8 quant (0=f32, 1=int8), u32 dim, u32 rows`, rows×dim values, then for int8 `rows × f32 scale`; scope ∈ `chunks`, `qa`, `claims` |
 //! | `qa` | JSON `Vec<QaEntry>` |
 //! | `claims` | JSON `Vec<ClaimEntry>` |
@@ -31,6 +32,18 @@
 //! bm25/sparse document ids are validated against the chunk count. Output is
 //! deterministic: sections are written in a fixed order and every dictionary
 //! is sorted.
+//!
+//! ## Sidecars
+//!
+//! [`SearchIndex::to_ed_split`] moves selected `dense/<scope>/<lane>`
+//! sections out of the core file into one sidecar per lane
+//! (`<stem>.<lane>.ed`): the same `SAED` container with its own CRC, a
+//! payload holding only that lane's sections, and a manifest copy whose
+//! `sidecar_lane` names the lane. The core manifest lists them in
+//! `sidecars` and both carry the same `index_id`, so
+//! [`SearchIndex::attach_sidecar`] can refuse a sidecar from another build.
+//! A core index loads without its sidecars; searches that need an
+//! unattached lane degrade the way a missing embedder does.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Cursor, Read, Write};
@@ -38,14 +51,15 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use brotli::{CompressorReader, Decompressor};
+use sha2::{Digest, Sha256};
 
 use crate::bm25::{Bm25Index, ByteCursor, write_varint};
-use crate::chunk::ChunkMeta;
-use crate::claims::ClaimEntry;
 use crate::manifest::{
-    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SparseSpec, SparseTerm,
+    Bm25Params, DenseSpec, FORMAT_VERSION, FusionWeights, Manifest, Quant, SidecarSpec, SparseSpec,
+    SparseTerm,
 };
-use crate::qa::QaEntry;
+use crate::records::{ChunkMeta, ClaimEntry, QaEntry};
+use crate::wordpiece::{AddedToken, Normalizer, WordPiece, WordPieceConfig};
 
 const ED_MAGIC: &[u8; 4] = b"SAED";
 const ED_VERSION: u32 = 2;
@@ -56,6 +70,9 @@ const SECTION_META: &str = "meta";
 const SECTION_TEXTS: &str = "texts";
 const SECTION_BM25: &str = "bm25";
 const SECTION_SPARSE: &str = "sparse";
+const SECTION_SPARSE_VOCAB: &str = "sparse/vocab";
+const SPARSE_VOCAB_VERSION: u8 = 1;
+const NO_ID: u32 = u32::MAX;
 const SECTION_QA: &str = "qa";
 const SECTION_CLAIMS: &str = "claims";
 
@@ -569,6 +586,9 @@ pub struct SearchIndex {
     pub overlap_words: Vec<u16>,
     pub bm25: Bm25Index,
     pub sparse: Option<SparseIndex>,
+    /// The sparse query tokenizer, when the index embeds its vocabulary
+    /// (`manifest.sparse.vocab == Embedded`).
+    pub sparse_vocab: Option<WordPiece>,
     /// Chunk-scope dense lanes, in manifest order.
     pub dense: Vec<DenseLane>,
     pub qa: Vec<QaEntry>,
@@ -601,28 +621,276 @@ pub struct IndexInfo {
     pub sections: Vec<SectionInfo>,
 }
 
-impl SearchIndex {
-    /// Serialize the index as a `SAED` v2 container.
-    pub fn write_ed_to<W: Write>(&self, mut w: W) -> Result<()> {
-        let manifest_json = serde_json::to_vec(&self.manifest).context("serializing manifest")?;
-        let payload = self.payload_bytes()?;
-        let crc = crc32(&payload);
-        let compressed =
-            brotli_compress(&payload, BROTLI_QUALITY).context("compressing payload")?;
+/// One sidecar file produced by [`SearchIndex::to_ed_split`].
+#[derive(Debug, Clone)]
+pub struct SidecarFile {
+    /// File name relative to the core index.
+    pub file: String,
+    pub lane: String,
+    /// Scopes whose `dense/<scope>/<lane>` section the file carries.
+    pub scopes: Vec<String>,
+    pub bytes: Vec<u8>,
+}
 
-        w.write_all(ED_MAGIC)?;
-        w.write_all(&ED_VERSION.to_le_bytes())?;
-        w.write_all(&len_u32(manifest_json.len(), "manifest")?.to_le_bytes())?;
-        w.write_all(&manifest_json)?;
-        w.write_all(&len_u32(compressed.len(), "compressed payload")?.to_le_bytes())?;
-        w.write_all(&crc.to_le_bytes())?;
-        w.write_all(&len_u32(payload.len(), "payload")?.to_le_bytes())?;
-        w.write_all(&compressed)?;
+/// A core index and its sidecar files, ready to be written.
+#[derive(Debug, Clone)]
+pub struct SplitIndex {
+    pub core: Vec<u8>,
+    pub sidecars: Vec<SidecarFile>,
+}
+
+/// What [`SearchIndex::attach_sidecar`] loaded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AttachedSidecar {
+    pub lane: String,
+    pub scopes: Vec<String>,
+}
+
+impl SearchIndex {
+    /// Serialize the index as one `SAED` v2 container with every section
+    /// inline. Fails when a chunk lane the manifest lists is not loaded
+    /// (attach every sidecar first).
+    pub fn write_ed_to<W: Write>(&self, mut w: W) -> Result<()> {
+        for spec in &self.manifest.dense {
+            if !self.dense.iter().any(|l| l.spec.id == spec.id) {
+                bail!(
+                    "dense lane {:?} is not attached; attach its sidecar before writing a single-file index",
+                    spec.id
+                );
+            }
+        }
+        let mut manifest = self.manifest.clone();
+        manifest.sidecars.clear();
+        manifest.sidecar_lane = None;
+        manifest.index_id = Some(self.index_id()?);
+        let payload = self.payload_with(&|_, _| true)?;
+        w.write_all(&container_bytes(&manifest, &payload)?)?;
         Ok(())
     }
 
-    /// The uncompressed `SAGI` v5 payload.
+    /// Serialize as a core file plus one sidecar per lane for the
+    /// `(scope, lane)` sections `select` returns `true` for. Sidecar files
+    /// are named `<stem>.<lane>.ed`; the core manifest lists them in
+    /// `sidecars` and shares its `index_id` with them.
+    pub fn to_ed_split(
+        &self,
+        stem: &str,
+        select: &dyn Fn(&str, &DenseSpec) -> bool,
+    ) -> Result<SplitIndex> {
+        let mut base = self.manifest.clone();
+        base.sidecars.clear();
+        base.sidecar_lane = None;
+        base.index_id = Some(self.index_id()?);
+
+        let mut sidecars = Vec::new();
+        let mut entries = Vec::new();
+        for spec in &self.manifest.dense {
+            let scopes: Vec<String> = [
+                (SCOPE_CHUNKS, &self.dense),
+                (SCOPE_QA, &self.qa_dense),
+                (SCOPE_CLAIMS, &self.claims_dense),
+            ]
+            .into_iter()
+            .filter(|(scope, lanes)| {
+                lanes.iter().any(|l| l.spec.id == spec.id) && select(scope, spec)
+            })
+            .map(|(scope, _)| scope.to_string())
+            .collect();
+            if scopes.is_empty() {
+                continue;
+            }
+            let file = format!("{}.{}.ed", stem, spec.id);
+            let payload = self.lane_payload(&spec.id, &scopes)?;
+            let mut manifest = base.clone();
+            manifest.sidecar_lane = Some(spec.id.clone());
+            let bytes = container_bytes(&manifest, &payload)?;
+            for scope in &scopes {
+                entries.push(SidecarSpec {
+                    file: file.clone(),
+                    lane: spec.id.clone(),
+                    scope: scope.clone(),
+                    bytes: bytes.len() as u64,
+                });
+            }
+            sidecars.push(SidecarFile {
+                file,
+                lane: spec.id.clone(),
+                scopes,
+                bytes,
+            });
+        }
+
+        let mut core_manifest = base;
+        core_manifest.sidecars = entries;
+        let payload =
+            self.payload_with(&|scope, lane| core_manifest.sidecar_for(scope, lane).is_none())?;
+        let core = container_bytes(&core_manifest, &payload)?;
+        Ok(SplitIndex { core, sidecars })
+    }
+
+    /// Identity shared by a core index and its sidecars: the first 16 hex
+    /// digits of the SHA-256 of the chunk metadata, the texts and the dense
+    /// lane specs. Two builds of the same content with the same lanes agree;
+    /// anything else differs.
+    pub fn index_id(&self) -> Result<String> {
+        let mut h = Sha256::new();
+        h.update(serde_json::to_vec(&self.metadata).context("serializing chunk metadata")?);
+        for (text, overlap) in self.texts.iter().zip(&self.overlap_words) {
+            h.update((text.len() as u64).to_le_bytes());
+            h.update(text.as_bytes());
+            h.update(overlap.to_le_bytes());
+        }
+        h.update(serde_json::to_vec(&self.manifest.dense).context("serializing dense specs")?);
+        let digest = h.finalize();
+        let mut out = String::with_capacity(16);
+        for b in &digest[..8] {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        Ok(out)
+    }
+
+    /// Load a sidecar file's dense sections into this index. Checks that the
+    /// file is a sidecar, that its `index_id` and chunk count match, and that
+    /// every section matches the manifest lane (dim, quant, rows). Attaching
+    /// the same sidecar twice replaces the sections; chunk lanes keep
+    /// manifest order.
+    pub fn attach_sidecar(&mut self, bytes: &[u8]) -> Result<AttachedSidecar> {
+        let container = parse_container(bytes)?;
+        let lane_id = container.manifest.sidecar_lane.clone().context(
+            "not a sidecar file (its manifest has no sidecar_lane); sidecars are the <index>.<lane>.ed files written next to the core index",
+        )?;
+        match (&self.manifest.index_id, &container.manifest.index_id) {
+            (Some(core), Some(side)) if core == side => {}
+            (Some(core), Some(side)) => bail!(
+                "sidecar for lane {:?} belongs to another index build (index_id {} but this index is {})",
+                lane_id,
+                side,
+                core
+            ),
+            _ => bail!(
+                "cannot verify the sidecar for lane {:?}: the core index or the sidecar carries no index_id",
+                lane_id
+            ),
+        }
+        if container.manifest.chunks != self.manifest.chunks {
+            bail!(
+                "sidecar for lane {:?} has {} chunks but this index has {}",
+                lane_id,
+                container.manifest.chunks,
+                self.manifest.chunks
+            );
+        }
+        let spec = self
+            .manifest
+            .dense_lane(&lane_id)
+            .cloned()
+            .with_context(|| format!("sidecar lane {:?} is not in the manifest", lane_id))?;
+        let payload = brotli_decompress_exact(container.compressed, container.decompressed_len)
+            .context("decompressing sidecar payload")?;
+        if crc32(&payload) != container.crc32 {
+            bail!("sidecar payload CRC mismatch; the file is corrupt");
+        }
+
+        let counts = [
+            (SCOPE_CHUNKS, self.manifest.chunks, "chunks"),
+            (SCOPE_QA, self.qa.len(), "qa entries"),
+            (SCOPE_CLAIMS, self.claims.len(), "claims"),
+        ];
+        let mut scopes = Vec::new();
+        for (name, body) in iter_sections(&payload)? {
+            let Some((scope, lane)) = parse_lane_section_name(name) else {
+                continue;
+            };
+            if lane != lane_id {
+                bail!(
+                    "sidecar for lane {:?} carries section {:?} of another lane",
+                    lane_id,
+                    name
+                );
+            }
+            let Some(&(_, expected_rows, what)) = counts.iter().find(|(s, _, _)| *s == scope)
+            else {
+                continue;
+            };
+            let lane = DenseLane::from_bytes(spec.clone(), body)
+                .with_context(|| format!("reading sidecar section {:?}", name))?;
+            if lane.dim != spec.dim || lane.quant != spec.quant {
+                bail!(
+                    "sidecar section {:?} is {}-d {:?} but the manifest lane is {}-d {:?}",
+                    name,
+                    lane.dim,
+                    lane.quant,
+                    spec.dim,
+                    spec.quant
+                );
+            }
+            if lane.rows != expected_rows {
+                bail!(
+                    "sidecar section {:?} has {} rows but the index has {} {}",
+                    name,
+                    lane.rows,
+                    expected_rows,
+                    what
+                );
+            }
+            let target = match scope {
+                SCOPE_CHUNKS => &mut self.dense,
+                SCOPE_QA => &mut self.qa_dense,
+                _ => &mut self.claims_dense,
+            };
+            match target.iter().position(|l| l.spec.id == lane_id) {
+                Some(pos) => target[pos] = lane,
+                None => target.push(lane),
+            }
+            scopes.push(scope.to_string());
+        }
+        if scopes.is_empty() {
+            bail!("sidecar for lane {:?} has no dense sections", lane_id);
+        }
+        let order = &self.manifest.dense;
+        for lanes in [&mut self.dense, &mut self.qa_dense, &mut self.claims_dense] {
+            lanes.sort_by_key(|l| order.iter().position(|s| s.id == l.spec.id));
+        }
+        Ok(AttachedSidecar {
+            lane: lane_id,
+            scopes,
+        })
+    }
+
+    /// The uncompressed `SAGI` v5 payload with every section inline.
     pub fn payload_bytes(&self) -> Result<Vec<u8>> {
+        self.payload_with(&|_, _| true)
+    }
+
+    /// The `SAGI` payload holding only `lane_id`'s sections for `scopes`.
+    fn lane_payload(&self, lane_id: &str, scopes: &[String]) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PAYLOAD_MAGIC);
+        out.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
+        for scope in scopes {
+            let lanes = match scope.as_str() {
+                SCOPE_CHUNKS => &self.dense,
+                SCOPE_QA => &self.qa_dense,
+                SCOPE_CLAIMS => &self.claims_dense,
+                other => bail!("unknown dense scope {:?}", other),
+            };
+            let lane = lanes
+                .iter()
+                .find(|l| l.spec.id == lane_id)
+                .with_context(|| format!("no dense/{}/{} lane to split out", scope, lane_id))?;
+            write_section(
+                &mut out,
+                &lane_section_name(scope, lane_id),
+                &lane.to_bytes(),
+            )?;
+        }
+        Ok(out)
+    }
+
+    /// The `SAGI` payload with the dense sections `keep(scope, lane)`
+    /// accepts (the rest go to sidecars).
+    fn payload_with(&self, keep: &dyn Fn(&str, &str) -> bool) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         out.extend_from_slice(PAYLOAD_MAGIC);
         out.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
@@ -646,13 +914,22 @@ impl SearchIndex {
         write_section(&mut out, SECTION_BM25, &self.bm25.to_bytes()?)?;
         if let Some(sparse) = &self.sparse {
             write_section(&mut out, SECTION_SPARSE, &sparse.to_bytes()?)?;
+            if let Some(vocab) = &self.sparse_vocab {
+                write_section(
+                    &mut out,
+                    SECTION_SPARSE_VOCAB,
+                    &sparse_vocab_to_bytes(vocab)?,
+                )?;
+            }
         }
         for lane in &self.dense {
-            write_section(
-                &mut out,
-                &lane_section_name(SCOPE_CHUNKS, &lane.spec.id),
-                &lane.to_bytes(),
-            )?;
+            if keep(SCOPE_CHUNKS, &lane.spec.id) {
+                write_section(
+                    &mut out,
+                    &lane_section_name(SCOPE_CHUNKS, &lane.spec.id),
+                    &lane.to_bytes(),
+                )?;
+            }
         }
         if !self.qa.is_empty() {
             write_section(
@@ -661,11 +938,13 @@ impl SearchIndex {
                 &serde_json::to_vec(&self.qa).context("serializing qa entries")?,
             )?;
             for lane in &self.qa_dense {
-                write_section(
-                    &mut out,
-                    &lane_section_name(SCOPE_QA, &lane.spec.id),
-                    &lane.to_bytes(),
-                )?;
+                if keep(SCOPE_QA, &lane.spec.id) {
+                    write_section(
+                        &mut out,
+                        &lane_section_name(SCOPE_QA, &lane.spec.id),
+                        &lane.to_bytes(),
+                    )?;
+                }
             }
         }
         if !self.claims.is_empty() {
@@ -675,11 +954,13 @@ impl SearchIndex {
                 &serde_json::to_vec(&self.claims).context("serializing claims")?,
             )?;
             for lane in &self.claims_dense {
-                write_section(
-                    &mut out,
-                    &lane_section_name(SCOPE_CLAIMS, &lane.spec.id),
-                    &lane.to_bytes(),
-                )?;
+                if keep(SCOPE_CLAIMS, &lane.spec.id) {
+                    write_section(
+                        &mut out,
+                        &lane_section_name(SCOPE_CLAIMS, &lane.spec.id),
+                        &lane.to_bytes(),
+                    )?;
+                }
             }
         }
         Ok(out)
@@ -690,9 +971,16 @@ impl SearchIndex {
         Ok(parse_container(bytes)?.manifest)
     }
 
-    /// Parse and validate a whole `.ed` file.
+    /// Parse and validate a whole `.ed` file (a core index or a 0.4.1
+    /// single-file index; sidecar files are rejected with a hint).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let container = parse_container(bytes)?;
+        if let Some(lane) = &container.manifest.sidecar_lane {
+            bail!(
+                "this file is the sidecar for dense lane {:?}; load the core index first and attach it with attach_sidecar",
+                lane
+            );
+        }
         let payload = brotli_decompress_exact(container.compressed, container.decompressed_len)
             .context("decompressing index payload")?;
         let actual_crc = crc32(&payload);
@@ -753,6 +1041,7 @@ impl SearchIndex {
         let mut texts: Option<(Vec<String>, Vec<u16>)> = None;
         let mut bm25: Option<Bm25Index> = None;
         let mut sparse: Option<SparseIndex> = None;
+        let mut sparse_vocab: Option<WordPiece> = None;
         let mut qa: Vec<QaEntry> = Vec::new();
         let mut claims: Vec<ClaimEntry> = Vec::new();
         let mut lanes: Vec<(String, DenseLane)> = Vec::new();
@@ -801,6 +1090,10 @@ impl SearchIndex {
                 }
                 SECTION_SPARSE => {
                     sparse = Some(SparseIndex::from_bytes(body, chunks)?);
+                }
+                SECTION_SPARSE_VOCAB => {
+                    sparse_vocab =
+                        Some(sparse_vocab_from_bytes(body).context("reading sparse/vocab")?);
                 }
                 SECTION_QA => {
                     qa = serde_json::from_slice(body).context("parsing qa section JSON")?;
@@ -866,6 +1159,15 @@ impl SearchIndex {
             (None, Some(_)) => bail!("payload has a sparse section the manifest does not declare"),
             (None, None) => {}
         }
+        match (&manifest.sparse, &sparse_vocab) {
+            (Some(spec), None) if spec.vocab == crate::manifest::SparseVocab::Embedded => {
+                bail!(
+                    "manifest says the sparse vocab is embedded but the payload has no sparse/vocab section"
+                )
+            }
+            (None, Some(_)) => bail!("payload has a sparse/vocab section but no sparse arm"),
+            _ => {}
+        }
 
         let mut dense = Vec::new();
         let mut qa_dense = Vec::new();
@@ -893,10 +1195,13 @@ impl SearchIndex {
                 _ => claims_dense.push(lane),
             }
         }
-        // Keep chunk lanes in manifest order and require one section per lane.
+        // Keep chunk lanes in manifest order and require one section per
+        // lane unless the manifest says the section lives in a sidecar.
         dense.sort_by_key(|l| manifest.dense.iter().position(|s| s.id == l.spec.id));
         for spec in &manifest.dense {
-            if !dense.iter().any(|l| l.spec.id == spec.id) {
+            if !dense.iter().any(|l| l.spec.id == spec.id)
+                && manifest.sidecar_for(SCOPE_CHUNKS, &spec.id).is_none()
+            {
                 bail!(
                     "manifest lane {:?} has no dense/chunks/{} section",
                     spec.id,
@@ -912,6 +1217,7 @@ impl SearchIndex {
             overlap_words,
             bm25,
             sparse,
+            sparse_vocab,
             dense,
             qa,
             qa_dense,
@@ -1028,6 +1334,7 @@ pub struct IndexBuilder {
     overlap_words: Vec<u16>,
     bm25_params: Bm25Params,
     sparse: Option<(SparseIndex, SparseSpec)>,
+    sparse_vocab: Option<WordPiece>,
     dense: Vec<DenseLane>,
     qa: Vec<QaEntry>,
     qa_dense: Vec<DenseLane>,
@@ -1139,6 +1446,14 @@ impl IndexBuilder {
         Ok(self)
     }
 
+    /// Embed the sparse query tokenizer's vocabulary (`sparse/vocab`
+    /// section) so the runtime needs no `tokenizer.json`; sets the manifest's
+    /// `sparse.vocab` to `embedded`. Needs [`IndexBuilder::add_sparse`].
+    pub fn sparse_vocab(&mut self, tokenizer: WordPiece) -> &mut Self {
+        self.sparse_vocab = Some(tokenizer);
+        self
+    }
+
     /// Add a dense lane for `scope` (`chunks`, `qa`, or `claims`). Row counts
     /// are checked against the scope's entries in [`IndexBuilder::finish`], so
     /// lanes and entries may be added in any order. Lanes for `qa`/`claims`
@@ -1219,9 +1534,21 @@ impl IndexBuilder {
         manifest.built_at = self.built_at;
         manifest.title_context = self.title_context;
         manifest.fusion = self.fusion;
-        let (sparse, sparse_spec) = match self.sparse {
+        let (sparse, mut sparse_spec) = match self.sparse {
             Some((idx, spec)) => (Some(idx), Some(spec)),
             None => (None, None),
+        };
+        let sparse_vocab = match (&mut sparse_spec, self.sparse_vocab) {
+            (Some(spec), Some(vocab)) => {
+                spec.vocab = crate::manifest::SparseVocab::Embedded;
+                Some(vocab)
+            }
+            (None, Some(_)) => bail!("sparse_vocab needs a sparse arm (call add_sparse first)"),
+            (Some(spec), None) => {
+                spec.vocab = crate::manifest::SparseVocab::Fetch;
+                None
+            }
+            (None, None) => None,
         };
         manifest.sparse = sparse_spec;
         if !self.qa.is_empty() {
@@ -1238,6 +1565,7 @@ impl IndexBuilder {
             overlap_words: self.overlap_words,
             bm25,
             sparse,
+            sparse_vocab,
             dense: self.dense,
             qa: self.qa,
             qa_dense: self.qa_dense,
@@ -1252,6 +1580,7 @@ impl IndexBuilder {
         if index.claims.is_empty() {
             index.claims_dense.clear();
         }
+        index.manifest.index_id = Some(index.index_id()?);
         Ok(index)
     }
 }
@@ -1443,6 +1772,110 @@ fn write_section(out: &mut Vec<u8>, name: &str, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// `sparse/vocab` section body (see the module docs).
+fn sparse_vocab_to_bytes(tokenizer: &WordPiece) -> Result<Vec<u8>> {
+    let (tokens, config) = tokenizer.to_vocab();
+    let n = &config.normalizer;
+    let flags = (n.clean_text as u8)
+        | ((n.handle_chinese_chars as u8) << 1)
+        | ((n.strip_accents as u8) << 2)
+        | ((n.lowercase as u8) << 3);
+    let mut out = Vec::with_capacity(tokens.len() * 8);
+    out.push(SPARSE_VOCAB_VERSION);
+    out.push(flags);
+    out.extend_from_slice(&config.unk_id.to_le_bytes());
+    out.extend_from_slice(&config.cls_id.unwrap_or(NO_ID).to_le_bytes());
+    out.extend_from_slice(&config.sep_id.unwrap_or(NO_ID).to_le_bytes());
+    out.extend_from_slice(&len_u32(config.max_input_chars, "max_input_chars")?.to_le_bytes());
+    out.extend_from_slice(&len_u16(config.prefix.len(), "vocab prefix")?.to_le_bytes());
+    out.extend_from_slice(config.prefix.as_bytes());
+    out.extend_from_slice(&len_u16(config.added.len(), "added tokens")?.to_le_bytes());
+    for tok in &config.added {
+        out.extend_from_slice(&tok.id.to_le_bytes());
+        out.push(tok.special as u8);
+        out.extend_from_slice(&len_u16(tok.content.len(), "added token")?.to_le_bytes());
+        out.extend_from_slice(tok.content.as_bytes());
+    }
+    out.extend_from_slice(&len_u32(tokens.len(), "vocab")?.to_le_bytes());
+    for token in &tokens {
+        out.extend_from_slice(&len_u16(token.len(), "vocab token")?.to_le_bytes());
+        out.extend_from_slice(token.as_bytes());
+    }
+    Ok(out)
+}
+
+fn sparse_vocab_from_bytes(body: &[u8]) -> Result<WordPiece> {
+    let mut c = ByteCursor::new(body);
+    let version = c.u8().context("vocab version")?;
+    if version != SPARSE_VOCAB_VERSION {
+        bail!("unsupported sparse/vocab version {}", version);
+    }
+    let flags = c.u8().context("vocab flags")?;
+    let normalizer = Normalizer {
+        clean_text: flags & 1 != 0,
+        handle_chinese_chars: flags & 2 != 0,
+        strip_accents: flags & 4 != 0,
+        lowercase: flags & 8 != 0,
+    };
+    let unk_id = c.u32().context("unk id")?;
+    let opt = |v: u32| (v != NO_ID).then_some(v);
+    let cls_id = opt(c.u32().context("cls id")?);
+    let sep_id = opt(c.u32().context("sep id")?);
+    let max_input_chars = c.u32().context("max_input_chars")? as usize;
+    let prefix_len = c.u16().context("prefix length")? as usize;
+    let prefix = std::str::from_utf8(c.bytes(prefix_len).context("prefix")?)
+        .context("prefix is not UTF-8")?
+        .to_string();
+    let added_count = c.u16().context("added token count")? as usize;
+    let mut added = Vec::with_capacity(added_count);
+    for i in 0..added_count {
+        let id = c.u32().with_context(|| format!("added token {} id", i))?;
+        let special = c.u8().with_context(|| format!("added token {} flag", i))? != 0;
+        let len = c
+            .u16()
+            .with_context(|| format!("added token {} length", i))? as usize;
+        let content = std::str::from_utf8(c.bytes(len).context("added token")?)
+            .with_context(|| format!("added token {} is not UTF-8", i))?
+            .to_string();
+        added.push(AddedToken {
+            content,
+            id,
+            special,
+        });
+    }
+    let count = c.u32().context("vocab count")? as usize;
+    // Every entry costs at least its 2-byte length.
+    let mut tokens = Vec::with_capacity(count.min(c.remaining() / 2));
+    for i in 0..count {
+        let len = c
+            .u16()
+            .with_context(|| format!("vocab token {} length", i))? as usize;
+        let token = std::str::from_utf8(c.bytes(len).context("vocab token")?)
+            .with_context(|| format!("vocab token {} is not UTF-8", i))?;
+        tokens.push(token.to_string());
+    }
+    if c.remaining() != 0 {
+        bail!("sparse/vocab section has {} trailing bytes", c.remaining());
+    }
+    WordPiece::from_vocab(
+        tokens,
+        WordPieceConfig {
+            normalizer,
+            unk_id,
+            cls_id,
+            sep_id,
+            max_input_chars,
+            prefix,
+            added,
+            max_tokens: crate::sparse::DEFAULT_MAX_SEQ_LEN.saturating_sub(2),
+        },
+    )
+}
+
+fn len_u16(len: usize, what: &str) -> Result<u16> {
+    u16::try_from(len).with_context(|| format!("{} exceeds 64 KiB", what))
+}
+
 fn lane_section_name(scope: &str, lane_id: &str) -> String {
     format!("dense/{}/{}", scope, lane_id)
 }
@@ -1458,6 +1891,24 @@ fn parse_lane_section_name(name: &str) -> Option<(&str, &str)> {
 
 fn len_u32(len: usize, what: &str) -> Result<u32> {
     u32::try_from(len).with_context(|| format!("{} exceeds 4 GiB", what))
+}
+
+/// A `SAED` v2 container around `payload` (brotli-compressed, CRC-32 of the
+/// uncompressed bytes in the header).
+fn container_bytes(manifest: &Manifest, payload: &[u8]) -> Result<Vec<u8>> {
+    let manifest_json = serde_json::to_vec(manifest).context("serializing manifest")?;
+    let crc = crc32(payload);
+    let compressed = brotli_compress(payload, BROTLI_QUALITY).context("compressing payload")?;
+    let mut out = Vec::with_capacity(24 + manifest_json.len() + compressed.len());
+    out.extend_from_slice(ED_MAGIC);
+    out.extend_from_slice(&ED_VERSION.to_le_bytes());
+    out.extend_from_slice(&len_u32(manifest_json.len(), "manifest")?.to_le_bytes());
+    out.extend_from_slice(&manifest_json);
+    out.extend_from_slice(&len_u32(compressed.len(), "compressed payload")?.to_le_bytes());
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&len_u32(payload.len(), "payload")?.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
 }
 
 fn brotli_compress(input: &[u8], quality: u32) -> Result<Vec<u8>> {
@@ -1587,6 +2038,8 @@ pub(crate) mod testutil {
                     "tokenizer.json".into(),
                     "model.safetensors".into(),
                 ],
+                base_url: None,
+                bytes: None,
             },
         }
     }
@@ -1733,6 +2186,7 @@ pub(crate) mod testutil {
                         revision: None,
                         vocab_hash: "00".into(),
                         terms: 0,
+                        vocab: crate::manifest::SparseVocab::Fetch,
                     },
                 )
                 .unwrap();
@@ -1745,6 +2199,7 @@ pub(crate) mod testutil {
 mod tests {
     use super::testutil::*;
     use super::*;
+    use crate::manifest::{Family, RuntimeSpec};
 
     fn meta(url: &str, idx: usize, gran: &str) -> ChunkMeta {
         ChunkMeta {
@@ -1810,6 +2265,7 @@ mod tests {
                 revision: Some("abc".into()),
                 vocab_hash: "ff".into(),
                 terms: 0,
+                vocab: crate::manifest::SparseVocab::Fetch,
             },
         )
         .unwrap();
@@ -2499,6 +2955,309 @@ mod tests {
                 assert_eq!(a.1.to_bits(), b.1.to_bits());
             }
         }
+    }
+
+    fn webgpu_spec(id: &str, dim: usize) -> DenseSpec {
+        let mut spec = wasm_spec(id, dim, Quant::F32);
+        spec.model = "Qwen/Qwen3-Embedding-0.6B".into();
+        spec.family = Family::Qwen3;
+        spec.runtime = RuntimeSpec::WebgpuOnnx {
+            repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX".into(),
+            dtype: "q4".into(),
+            dtype_f16: None,
+            pooling: "last_token".into(),
+            base_url: None,
+        };
+        spec
+    }
+
+    /// `sample_index` plus a second (webgpu) chunk lane.
+    fn two_lane_index() -> SearchIndex {
+        let base = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(
+            base.metadata.clone(),
+            base.texts.clone(),
+            base.overlap_words.clone(),
+        )
+        .unwrap();
+        for lane in &base.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(
+                webgpu_spec("qwen3e", 2),
+                2,
+                3,
+                &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                Quant::F32,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        b.add_qa(base.qa.clone());
+        for lane in &base.qa_dense {
+            b.add_dense_lane(SCOPE_QA, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_QA,
+            DenseLane::from_f32(webgpu_spec("qwen3e", 2), 2, 1, &[0.0, 1.0], Quant::F32).unwrap(),
+        )
+        .unwrap();
+        b.add_claims(base.claims.clone());
+        for lane in &base.claims_dense {
+            b.add_dense_lane(SCOPE_CLAIMS, lane.clone()).unwrap();
+        }
+        b.finish().unwrap()
+    }
+
+    /// The default CLI policy: webgpu chunk lanes and every qa/claims lane
+    /// go to sidecars, wasm-candle chunk lanes stay in the core.
+    fn default_split(scope: &str, spec: &DenseSpec) -> bool {
+        scope != SCOPE_CHUNKS || matches!(spec.runtime, RuntimeSpec::WebgpuOnnx { .. })
+    }
+
+    #[test]
+    fn split_writes_one_sidecar_per_lane_and_attach_restores_them() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let names: Vec<&str> = split.sidecars.iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(names, vec!["site.minilm.ed", "site.qwen3e.ed"]);
+        assert_eq!(split.sidecars[0].scopes, vec!["qa", "claims"]);
+        assert_eq!(split.sidecars[1].scopes, vec!["chunks", "qa"]);
+
+        let core = SearchIndex::from_bytes(&split.core).unwrap();
+        let m = &core.manifest;
+        assert_eq!(m.dense.len(), 2, "manifest still lists both lanes");
+        assert_eq!(core.dense.len(), 1, "only the wasm lane is inline");
+        assert_eq!(core.dense[0].spec.id, "minilm");
+        assert!(core.qa_dense.is_empty() && core.claims_dense.is_empty());
+        assert_eq!(core.qa.len(), 1, "qa entries stay in the core");
+        assert_eq!(m.sidecars.len(), 4);
+        for s in &m.sidecars {
+            let file = split.sidecars.iter().find(|f| f.file == s.file).unwrap();
+            assert_eq!(s.bytes as usize, file.bytes.len(), "{}", s.file);
+        }
+        assert_eq!(
+            m.sidecar_for("chunks", "qwen3e").unwrap().file,
+            "site.qwen3e.ed"
+        );
+        assert!(m.sidecar_for("chunks", "minilm").is_none());
+        assert_eq!(m.sidecar_files(), vec!["site.minilm.ed", "site.qwen3e.ed"]);
+        assert_eq!(
+            m.index_id.as_deref(),
+            Some(index.index_id().unwrap().as_str())
+        );
+        assert!(m.sidecar_lane.is_none());
+        // The core still searches with what it has.
+        assert!(core.dense_lane("qwen3e").is_none());
+        assert_eq!(core.dense_lane("minilm"), Some(0));
+
+        // A sidecar is not an index.
+        let err = SearchIndex::from_bytes(&split.sidecars[1].bytes).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sidecar for dense lane \"qwen3e\"")
+        );
+        // The sidecar's header is readable on its own.
+        let side = SearchIndex::manifest_from_bytes(&split.sidecars[1].bytes).unwrap();
+        assert_eq!(side.sidecar_lane.as_deref(), Some("qwen3e"));
+        assert_eq!(side.index_id, m.index_id);
+        assert!(side.sidecars.is_empty());
+
+        // Attach in the "wrong" order: chunk lanes end up in manifest order.
+        let mut core = core;
+        let att = core.attach_sidecar(&split.sidecars[1].bytes).unwrap();
+        assert_eq!(att.lane, "qwen3e");
+        assert_eq!(att.scopes, vec!["chunks", "qa"]);
+        assert_eq!(core.dense_lane("minilm"), Some(0));
+        assert_eq!(core.dense_lane("qwen3e"), Some(1));
+        assert!(core.qa_lane("qwen3e").is_some());
+        let att = core.attach_sidecar(&split.sidecars[0].bytes).unwrap();
+        assert_eq!(att.scopes, vec!["qa", "claims"]);
+        assert_eq!(core.dense, index.dense);
+        assert_eq!(core.qa_dense, index.qa_dense);
+        assert_eq!(core.claims_dense, index.claims_dense);
+        // Attaching again is idempotent.
+        core.attach_sidecar(&split.sidecars[0].bytes).unwrap();
+        assert_eq!(core.qa_dense.len(), 2);
+        // Fully attached, it round-trips to a single file again.
+        let mut single = Vec::new();
+        core.write_ed_to(&mut single).unwrap();
+        let back = SearchIndex::from_bytes(&single).unwrap();
+        assert!(back.manifest.sidecars.is_empty());
+        assert_eq!(back.dense, index.dense);
+    }
+
+    #[test]
+    fn attach_rejects_foreign_and_corrupt_sidecars() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let mut core = SearchIndex::from_bytes(&split.core).unwrap();
+
+        // The core file itself is not a sidecar.
+        let err = core.attach_sidecar(&split.core).unwrap_err();
+        assert!(err.to_string().contains("not a sidecar file"), "{err}");
+
+        // A sidecar from another build (different texts) is refused.
+        let other = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(
+            other.metadata.clone(),
+            vec!["x".into(), "y".into(), "z".into()],
+            vec![0, 0, 0],
+        )
+        .unwrap();
+        for lane in &other.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        b.add_dense_lane(
+            SCOPE_CHUNKS,
+            DenseLane::from_f32(webgpu_spec("qwen3e", 2), 2, 3, &[0.0; 6], Quant::F32).unwrap(),
+        )
+        .unwrap();
+        let foreign = b
+            .finish()
+            .unwrap()
+            .to_ed_split("site", &default_split)
+            .unwrap();
+        let err = core.attach_sidecar(&foreign.sidecars[0].bytes).unwrap_err();
+        assert!(err.to_string().contains("another index build"), "{err}");
+        assert!(core.dense_lane("qwen3e").is_none());
+
+        // A flipped payload byte fails the CRC.
+        let mut corrupt = split.sidecars[1].bytes.clone();
+        let last = corrupt.len() - 1;
+        corrupt[last] ^= 0xFF;
+        let err = core.attach_sidecar(&corrupt).unwrap_err();
+        assert!(
+            err.to_string().contains("CRC") || err.to_string().contains("decompress"),
+            "{err}"
+        );
+
+        // A single-file index (0.4.1 layout) has no sidecars and refuses one.
+        let mut single = SearchIndex::from_bytes(&ed_bytes(&index)).unwrap();
+        assert!(single.manifest.sidecars.is_empty());
+        assert_eq!(single.dense.len(), 2);
+        let err = single.attach_sidecar(&split.core).unwrap_err();
+        assert!(err.to_string().contains("not a sidecar file"), "{err}");
+    }
+
+    #[test]
+    fn writing_a_single_file_needs_every_chunk_lane() {
+        let index = two_lane_index();
+        let split = index.to_ed_split("site", &default_split).unwrap();
+        let core = SearchIndex::from_bytes(&split.core).unwrap();
+        let err = core.write_ed_to(&mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("not attached"), "{err}");
+        // Nothing selected means no sidecars and a core equal to the single file.
+        let none = index.to_ed_split("site", &|_, _| false).unwrap();
+        assert!(none.sidecars.is_empty());
+        let m = SearchIndex::manifest_from_bytes(&none.core).unwrap();
+        assert!(m.sidecars.is_empty());
+        assert_eq!(
+            SearchIndex::from_bytes(&none.core).unwrap().dense,
+            index.dense
+        );
+    }
+
+    #[test]
+    fn embedded_sparse_vocab_round_trips_and_tokenizes() {
+        const JSON: &str = r###"{
+          "added_tokens": [
+            {"id": 0, "content": "[PAD]", "special": true},
+            {"id": 1, "content": "[CLS]", "special": true},
+            {"id": 2, "content": "[SEP]", "special": true},
+            {"id": 3, "content": "[UNK]", "special": true}
+          ],
+          "normalizer": {"type": "BertNormalizer", "clean_text": true, "handle_chinese_chars": true, "strip_accents": null, "lowercase": true},
+          "pre_tokenizer": {"type": "BertPreTokenizer"},
+          "post_processor": {"type": "BertProcessing", "sep": ["[SEP]", 2], "cls": ["[CLS]", 1]},
+          "model": {"type": "WordPiece", "unk_token": "[UNK]", "continuing_subword_prefix": "##", "max_input_chars_per_word": 100,
+            "vocab": {"[PAD]": 0, "[CLS]": 1, "[SEP]": 2, "[UNK]": 3, "rust": 4, "##y": 5, "python": 7, "é": 9}}
+        }"###;
+        let tokenizer = WordPiece::from_tokenizer_json(JSON.as_bytes(), 512).unwrap();
+        let base = sample_index();
+        let mut b = IndexBuilder::new();
+        b.add_chunks(base.metadata.clone(), base.texts.clone(), vec![0, 0, 0])
+            .unwrap();
+        for lane in &base.dense {
+            b.add_dense_lane(SCOPE_CHUNKS, lane.clone()).unwrap();
+        }
+        let mut idf = HashMap::new();
+        idf.insert(4u32, 1.5f32);
+        b.add_sparse(
+            &[
+                vec![SparseTerm {
+                    token_id: 4,
+                    weight: 1.0,
+                }],
+                vec![],
+                vec![],
+            ],
+            &idf,
+            base.manifest.sparse.clone().unwrap(),
+        )
+        .unwrap();
+        b.sparse_vocab(tokenizer.clone());
+        let index = b.finish().unwrap();
+        assert_eq!(
+            index.manifest.sparse.as_ref().unwrap().vocab,
+            crate::manifest::SparseVocab::Embedded
+        );
+        let bytes = ed_bytes(&index);
+        let back = SearchIndex::from_bytes(&bytes).unwrap();
+        let vocab = back.sparse_vocab.as_ref().expect("vocab section");
+        for text in ["Rusty Python café", "[SEP] rust", "中文"] {
+            assert_eq!(vocab.encode(text), tokenizer.encode(text), "{:?}", text);
+        }
+        let terms = crate::sparse::sparse_query_terms(
+            vocab,
+            &|id| back.sparse.as_ref().unwrap().idf_of(id),
+            "Rust!",
+        );
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].token_id, 4);
+        // The section survives the sidecar split (it belongs to the core).
+        let split = index.to_ed_split("s", &|_, _| true).unwrap();
+        assert!(
+            SearchIndex::from_bytes(&split.core)
+                .unwrap()
+                .sparse_vocab
+                .is_some()
+        );
+        // A manifest that promises an embedded vocab without the section is rejected.
+        let info = SearchIndex::inspect(&bytes, None).unwrap();
+        assert!(info.sections.iter().any(|s| s.name == "sparse/vocab"));
+        // Without the vocab the manifest says fetch (0.4.1 behaviour).
+        assert_eq!(
+            base.manifest.sparse.as_ref().unwrap().vocab,
+            crate::manifest::SparseVocab::Fetch
+        );
+        assert!(
+            SearchIndex::from_bytes(&ed_bytes(&base))
+                .unwrap()
+                .sparse_vocab
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn index_id_tracks_content_and_lanes() {
+        let a = sample_index();
+        let b = sample_index();
+        assert_eq!(a.index_id().unwrap(), b.index_id().unwrap());
+        assert_eq!(a.index_id().unwrap().len(), 16);
+        let mut c = sample_index();
+        c.manifest.dense[0].revision = Some("other".into());
+        assert_ne!(a.index_id().unwrap(), c.index_id().unwrap());
+        let mut d = sample_index();
+        d.texts[0].push('!');
+        assert_ne!(a.index_id().unwrap(), d.index_id().unwrap());
+        // Written single files carry the id too.
+        let m = SearchIndex::manifest_from_bytes(&ed_bytes(&a)).unwrap();
+        assert_eq!(m.index_id.as_deref(), Some(a.index_id().unwrap().as_str()));
     }
 
     #[test]

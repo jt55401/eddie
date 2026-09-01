@@ -34,8 +34,13 @@ eddie index --content-dir content/ --cms hugo --output static/eddie/index.ed --p
 ### 2. Embed the widget
 
 ```html
-<script src="/eddie-widget.js"></script>
+<script src="/eddie-boot.js"></script>
 ```
+
+`eddie-boot.js` (about 3 KB) draws the trigger button and Ctrl/Cmd+K
+shortcut on every page and fetches the full widget on first interaction.
+Load `eddie-widget.js` directly instead if you want it on every page view
+with nothing lazy about it; both read the same `data-*` attributes.
 
 Using Hugo? The [`eddie-hugo` module](docs/guides/hugo.md) wires this up
 for you, including every `data-*` attribute, from `[params.eddie]` in your
@@ -213,7 +218,7 @@ widget reads `data-*` attributes on its `<script>` tag (or, on Hugo,
 same attributes for you):
 
 ```html
-<script src="/eddie-widget.js"
+<script src="/eddie-boot.js"
         data-index-url="/eddie/index.ed"
         data-position="bottom-right"
         data-theme="auto"
@@ -395,15 +400,24 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  A[Visitor Opens Widget] --> B[Fetch index.ed manifest]
-  B --> C[Pick dense lane:<br/>WebGPU or WASM candle]
-  C --> D[Load Model Files<br/>cached in browser]
-  D --> E[Query]
-  E --> F[BM25 + Sparse + Dense]
-  F --> G[Weighted RRF + Page Grouping]
-  G --> H[Ranked Results]
-  H -.optional, WebGPU only.-> I[Agent: plan / search / answer]
+  A[Page load + idle] --> B[Service worker or page workers]
+  B --> C[Fetch index.ed manifest]
+  C --> D[Pick dense lane:<br/>WebGPU or WASM candle]
+  D --> E[Load Model Files<br/>cached in browser]
+  E --> F[Query]
+  F --> G[BM25 + Sparse + Dense]
+  G --> H[Weighted RRF + Page Grouping]
+  H --> I[Ranked Results]
+  I -.optional, WebGPU only.-> J[Agent: plan / search / answer]
 ```
+
+The engines live in a module service worker scoped to the asset directory
+when the browser allows it, so a navigation within the site keeps the
+loaded index, the dense model and the WebLLM engine; otherwise (or with
+`persist = "off"`) they run in page-side workers as before. With
+`warm = "auto"` the search engine initialises right after page load when
+the visitor already consented to the model on this browser and its files
+are cached. Details and the message protocol: [widget/README.md](widget/README.md).
 
 ML inference uses [Candle](https://github.com/huggingface/candle)
 (HuggingFace's Rust ML framework) for the WASM lane, and
@@ -445,16 +459,13 @@ See [docs/guides/cms-gallery.md](docs/guides/cms-gallery.md) for the full workfl
 
 ### Precompressed runtime assets
 
-The release pipeline emits sidecar assets for every runtime file:
+The release pipeline emits a `.br` and a `.gz` sidecar for every runtime
+file named in [`widget/assets.list`](widget/assets.list) -- the single
+source of truth for the current asset list (boot loader, full widget,
+page-worker fallbacks, lite/dense WASM + glue, tiered service workers).
 
-- `eddie.wasm.br` / `eddie.wasm.gz`
-- `eddie-wasm.js.br` / `eddie-wasm.js.gz`
-- `eddie-worker.js.br` / `eddie-worker.js.gz`
-- `eddie-agent-worker.js.br` / `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
-- `eddie-widget.js.br` / `eddie-widget.js.gz`
-
-Use the plain filenames in HTML (`eddie-widget.js`, `eddie.wasm`, etc). Your
-host should serve compressed bytes via standard `Accept-Encoding`
+Use the plain filenames in HTML (`eddie-boot.js`, `eddie-lite.wasm`, etc).
+Your host should serve compressed bytes via standard `Accept-Encoding`
 negotiation. Browser JS should not switch to the `.br`/`.gz` filenames
 directly unless your host also sets `Content-Encoding` and the correct
 content type on them. Without those headers, they're just opaque bytes.

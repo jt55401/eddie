@@ -25,7 +25,9 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
   bash "$PROJECT_ROOT/widget/build.sh"
 fi
 
-ASSETS=(eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm)
+# widget/assets.list is the single source of truth for dist/'s file list;
+# read it instead of hardcoding names here.
+mapfile -t ASSETS < <(grep -v '^#' "$PROJECT_ROOT/widget/assets.list" | grep -v '^?' | grep -v '^$')
 for asset in "${ASSETS[@]}"; do
   if [[ ! -f "$DIST_DIR/$asset" ]]; then
     echo "Missing built asset: $DIST_DIR/$asset (run without --no-build first)" >&2
@@ -59,6 +61,10 @@ while IFS= read -r rel_dir; do
   for asset in "${ASSETS[@]}"; do
     cp "$DIST_DIR/$asset" "$target_dir/$asset"
   done
+  # Ship the manifest alongside the runtime files so each package's
+  # install.sh can read it too, even after publish when widget/ itself
+  # isn't checked out.
+  cp "$PROJECT_ROOT/widget/assets.list" "$target_dir/assets.list"
 done <<<"$ASSET_DIRS"
 
 echo "==> Done."

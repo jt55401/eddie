@@ -362,6 +362,8 @@ pub fn bert_spec_skeleton(model: &str) -> DenseSpec {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            base_url: None,
+            bytes: None,
         },
     }
 }
@@ -634,7 +636,8 @@ pub mod hub {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use std::path::PathBuf;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::embed::hub::{ModelRepo, revision_from_path};
@@ -925,6 +928,75 @@ mod native {
         }
     }
 
+    /// What [`bundle_model_files`] wrote.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct BundledModel {
+        /// File names under the bundle directory, in `runtime.files` order.
+        pub files: Vec<String>,
+        /// Total bytes written.
+        pub bytes: u64,
+    }
+
+    /// Copy a `wasm-candle` lane's model into `dir` so a site can serve it
+    /// itself: `config.json` and `tokenizer.json` verbatim, and the weights
+    /// (one safetensors file, sharded safetensors or `pytorch_model.bin`)
+    /// merged into a single `model.safetensors` with every float tensor
+    /// stored as f16. That halves the download; candle converts f16 back to
+    /// f32 when the WASM module loads it, so scores stay within float
+    /// rounding of the originals (see the `bundled_f16_weights_match_f32`
+    /// test). Integer buffers (position ids) keep their dtype.
+    pub fn bundle_model_files(spec: &DenseSpec, dir: &Path) -> Result<BundledModel> {
+        let repo = ModelRepo::open(&spec.model, spec.revision.as_deref())?;
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating bundle directory {}", dir.display()))?;
+        let mut bytes = 0u64;
+        let mut files = Vec::new();
+        for name in ["config.json", "tokenizer.json"] {
+            let src = repo.get(name)?;
+            let dst = dir.join(name);
+            bytes += std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+            files.push(name.to_string());
+        }
+        let weights = fetch_weights(&repo)?;
+        let tensors = load_all_tensors(&weights)?;
+        let mut out: HashMap<String, Tensor> = HashMap::with_capacity(tensors.len());
+        for (name, tensor) in tensors {
+            let tensor = if tensor.dtype().is_float() {
+                tensor
+                    .to_dtype(DType::F16)
+                    .with_context(|| format!("converting {} to f16", name))?
+            } else {
+                tensor
+            };
+            out.insert(name, tensor);
+        }
+        let path = dir.join("model.safetensors");
+        candle_core::safetensors::save(&out, &path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        bytes += std::fs::metadata(&path)?.len();
+        files.push("model.safetensors".to_string());
+        Ok(BundledModel { files, bytes })
+    }
+
+    /// Every tensor of a checkpoint on the CPU, whatever its file layout.
+    fn load_all_tensors(weights: &Weights) -> Result<Vec<(String, Tensor)>> {
+        match weights {
+            Weights::Safetensors(paths) => {
+                let mut all = Vec::new();
+                for path in paths {
+                    let map = candle_core::safetensors::load(path, &Device::Cpu)
+                        .with_context(|| format!("reading {}", path.display()))?;
+                    all.extend(map);
+                }
+                all.sort_by(|a, b| a.0.cmp(&b.0));
+                Ok(all)
+            }
+            Weights::Pth(path) => candle_core::pickle::read_all(path)
+                .with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
     /// Pooling from a sentence-transformers `1_Pooling/config.json`.
     fn pooling_from_config(json: &str) -> Option<Pooling> {
         let v: serde_json::Value = serde_json::from_str(json).ok()?;
@@ -1034,7 +1106,7 @@ mod native {
 
         let batch_size = overrides.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
         let weights = fetch_weights(&repo)?;
-        if let RuntimeSpec::WasmCandle { files } = &mut runtime {
+        if let RuntimeSpec::WasmCandle { files, .. } = &mut runtime {
             // Record what the repo actually provides so the manifest never
             // promises a model.safetensors that is not there.
             *files = wasm_candle_files(&weights);
@@ -1164,7 +1236,9 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Qwen3Encoder, XlmRobertaEncoder, load_dense, qwen3_dtype};
+pub use native::{
+    BundledModel, Qwen3Encoder, XlmRobertaEncoder, bundle_model_files, load_dense, qwen3_dtype,
+};
 
 #[cfg(test)]
 mod tests {
@@ -1267,6 +1341,57 @@ mod tests {
         assert!(cosine(&vecs[0], &vecs[1]) > cosine(&vecs[0], &vecs[2]));
         assert!((vecs[0].iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4);
         assert_eq!(enc.truncated_count(), 0);
+    }
+
+    /// A model bundled with f16 weights (`eddie index --bundle-model`) must
+    /// embed like the f32 original: cosine >= 0.999 on five sentences, as
+    /// documents and as queries. Run with
+    /// `cargo test --release -- --ignored bundled_f16_weights_match_f32`.
+    #[test]
+    #[ignore] // requires network access and the HuggingFace cache
+    fn bundled_f16_weights_match_f32() {
+        let model = std::env::var("EDDIE_BUNDLE_MODEL")
+            .unwrap_or_else(|_| "BAAI/bge-small-en-v1.5".to_string());
+        let original = load_dense(&model, &Device::Cpu, &DenseOverrides::default()).unwrap();
+        let spec = original.spec().clone();
+        let dir = std::env::temp_dir().join(format!(
+            "eddie-bundle-test-{}-{}",
+            std::process::id(),
+            spec.id
+        ));
+        let bundled = bundle_model_files(&spec, &dir).unwrap();
+        assert_eq!(
+            bundled.files,
+            vec!["config.json", "tokenizer.json", "model.safetensors"]
+        );
+        let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+        let weights = read("model.safetensors");
+        eprintln!(
+            "bundle {}: {} bytes total, model.safetensors {} bytes (f16)",
+            spec.id,
+            bundled.bytes,
+            weights.len()
+        );
+        let f16 = bert_from_bytes(
+            spec.clone(),
+            &read("config.json"),
+            &read("tokenizer.json"),
+            weights,
+        )
+        .unwrap();
+        assert_eq!(f16.dim(), original.dim());
+        let mut worst = 1.0f32;
+        for kind in [TextKind::Document, TextKind::Query] {
+            let a = original.embed(&VERIFY_TEXTS, kind).unwrap();
+            let b = f16.embed(&VERIFY_TEXTS, kind).unwrap();
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                let c = cosine(x, y);
+                eprintln!("{:?} text[{}]: cosine f32 vs f16 = {:.6}", kind, i, c);
+                worst = worst.min(c);
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(worst >= 0.999, "worst cosine {}", worst);
     }
 
     /// Sentences shared with `scripts/verify_embeddings.py`.
