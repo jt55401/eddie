@@ -1,6 +1,20 @@
 # CMS Gallery Refresh
 
-This guide refreshes the README screenshot gallery by running every CMS integration in Docker and capturing an in-progress Eddie search with visible results.
+Eddie running on each supported site generator. A search is in progress in
+every shot, with results showing.
+
+| Hugo | Astro | Docusaurus |
+| --- | --- | --- |
+| <img src="../../assets/gallery/hugo-search-readme.png" alt="Eddie search on Hugo" width="320"> | <img src="../../assets/gallery/astro-search-readme.png" alt="Eddie search on Astro" width="320"> | <img src="../../assets/gallery/docusaurus-search-readme.png" alt="Eddie search on Docusaurus" width="320"> |
+
+| MkDocs | Eleventy | Jekyll |
+| --- | --- | --- |
+| <img src="../../assets/gallery/mkdocs-search-readme.png" alt="Eddie search on MkDocs" width="320"> | <img src="../../assets/gallery/eleventy-search-readme.png" alt="Eddie search on Eleventy" width="320"> | <img src="../../assets/gallery/jekyll-search-readme.png" alt="Eddie search on Jekyll" width="320"> |
+
+## Refreshing the screenshots
+
+This runs every CMS integration in Docker and captures an in-progress Eddie
+search with visible results.
 
 ## Prerequisites
 
