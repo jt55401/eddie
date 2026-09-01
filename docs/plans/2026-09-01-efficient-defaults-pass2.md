@@ -27,7 +27,7 @@ had in cache.
    lane copy it never rendered. Splitting `lib/agent.js` into
    `agent.js` + `agent-llm.js`, lifting the shared consent and status copy
    into `lib/copy.js`, and trimming `lib/lanes.js` took `eddie-widget.js`
-   from 29,225 to 25,943 bytes brotli, below the 26,167 it weighed in
+   from 29,225 to 25,943 bytes brotli, below the 26.2 KB it weighed in
    0.4.1 before any of this work.
 3. **Two `?v=` values instead of one.** Every runtime asset URL used to
    carry the *index's* `?v=`. On a static/ Hugo site that value is the
@@ -60,23 +60,27 @@ had in cache.
 
 | File | Role | pass 1 | now |
 |---|---|---:|---:|
-| `eddie-boot.js` | default loader, every page view | 3,172 | 3,330 |
-| `eddie-widget.js` | full widget, first interaction | 29,225 | 25,943 |
-| `eddie-worker.js` | search engine, page-worker host | 14,494 | 15,056 |
-| `eddie-agent-worker.js` | agent, page-worker host | 6,547 | 6,733 |
+| `eddie-boot.js` | default loader, every page view | 3,172 | 3,331 |
+| `eddie-widget.js` | full widget, first interaction | 29,225 | 26,219 |
+| `eddie-worker.js` | search engine, page-worker host | 14,494 | 15,048 |
+| `eddie-agent-worker.js` | agent, page-worker host | 6,547 | 6,762 |
 | `eddie-lite.wasm` | retriever without model code | 200,075 | 200,086 |
-| `eddie-lite.js` / `-esm.js` | classic / module glue | 3,929 / 3,814 | 3,929 / 3,814 |
+| `eddie-lite.js` / `-esm.js` | classic / module glue | 3,929 / 3,814 | 3,929 / 3,815 |
 | `eddie-dense.wasm` | retriever + candle embedder | 732,643 | 731,823 |
 | `eddie-dense.js` / `-esm.js` | classic / module glue | 4,212 / 4,081 | 4,212 / 4,081 |
-| `eddie-sw-lite.js` | scope `sw/lite/` | ~16,000 | 16,616 |
-| `eddie-sw-dense.js` | scope `sw/dense/` | ~15,900 | 16,612 |
-| `eddie-sw-gpu.js` | scope `sw/gpu/`, no WebLLM | 21,187 | 16,622 |
-| `eddie-sw-agent.js` | scope `sw/agent/`, WebLLM only | — | 8,724 |
+| `eddie-sw-lite.js` | scope `sw/lite/` | ~16,000 | 16,614 |
+| `eddie-sw-dense.js` | scope `sw/dense/` | ~15,900 | 16,610 |
+| `eddie-sw-gpu.js` | scope `sw/gpu/`, no WebLLM | 21,187 | 16,621 |
+| `eddie-sw-agent.js` | scope `sw/agent/`, WebLLM only | — | 8,746 |
 | `eddie-transformers-sw.js` | transformers.js copy | 168,074 | 168,074 |
 
-The boot loader, widget and worker each carry about 200 bytes more than
-their pass-2 low point: that is the `EDDIE_ASSET_VERSION` constant and the
-comments explaining the two versions. It buys the redeploy row below.
+The boot loader, widget and worker each carry a couple of hundred bytes
+more than their pass-2 low point (the widget: 25,943 before, 26,219 after):
+that is the `EDDIE_ASSET_VERSION` constant and the comments explaining the
+two versions. It buys the redeploy row below. The measurements further down
+were taken at asset version `8ce03d3daec9`, a few bytes before the last
+service-worker fix, so a row's per-file figures can differ from this table
+by tens of bytes.
 
 ## Measurements
 
