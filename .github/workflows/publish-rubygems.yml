@@ -113,9 +113,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${{ matrix.assets_dir }}"
-          for asset in eddie-widget.js eddie-worker.js eddie-agent-worker.js eddie-wasm.js eddie.wasm; do
+          # widget/assets.list is the single source of truth for the widget
+          # runtime file list; read it instead of hardcoding names here.
+          mapfile -t WIDGET_ASSETS < <(grep -v '^#' widget/assets.list | grep -v '^?' | grep -v '^$')
+          for asset in "${WIDGET_ASSETS[@]}"; do
             cp "/tmp/widget-dist/$asset" "${{ matrix.assets_dir }}/$asset"
           done
+          cp widget/assets.list "${{ matrix.assets_dir }}/assets.list"
           ls -l "${{ matrix.assets_dir }}"
 
       - name: Validate package path

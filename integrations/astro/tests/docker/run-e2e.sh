@@ -106,10 +106,10 @@ if ! curl -fsS http://127.0.0.1:4321 >/tmp/astro-home.html; then
   tail -n 120 /tmp/astro-server.log >&2 || true
   exit 1
 fi
-grep -q "eddie-widget.js" /tmp/astro-home.html
+grep -q "eddie-boot.js" /tmp/astro-home.html
 curl -fsS http://127.0.0.1:4321/eddie/eddie-worker.js >/tmp/astro-worker.js
 curl -fsS http://127.0.0.1:4321/eddie/eddie-agent-worker.js >/tmp/astro-agent-worker.js
-curl -fsS http://127.0.0.1:4321/eddie/eddie-wasm.js >/tmp/astro-wasm.js
-curl -fsS http://127.0.0.1:4321/eddie/eddie.wasm >/tmp/astro-engine.wasm
+curl -fsS http://127.0.0.1:4321/eddie/eddie-lite.js >/tmp/astro-lite.js
+curl -fsS http://127.0.0.1:4321/eddie/eddie-lite.wasm >/tmp/astro-lite-engine.wasm
 
 echo "Astro E2E passed"

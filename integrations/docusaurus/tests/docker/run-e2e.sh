@@ -101,10 +101,10 @@ for _ in $(seq 1 60); do
 done
 
 curl -fsS http://127.0.0.1:3000 >/tmp/docusaurus-home.html
-grep -q "eddie-widget.js" /tmp/docusaurus-home.html
+grep -q "eddie-boot.js" /tmp/docusaurus-home.html
 curl -fsS http://127.0.0.1:3000/eddie/eddie-worker.js >/tmp/docusaurus-worker.js
 curl -fsS http://127.0.0.1:3000/eddie/eddie-agent-worker.js >/tmp/docusaurus-agent-worker.js
-curl -fsS http://127.0.0.1:3000/eddie/eddie-wasm.js >/tmp/docusaurus-wasm.js
-curl -fsS http://127.0.0.1:3000/eddie/eddie.wasm >/tmp/docusaurus-engine.wasm
+curl -fsS http://127.0.0.1:3000/eddie/eddie-lite.js >/tmp/docusaurus-lite.js
+curl -fsS http://127.0.0.1:3000/eddie/eddie-lite.wasm >/tmp/docusaurus-lite-engine.wasm
 
 echo "Docusaurus E2E passed"

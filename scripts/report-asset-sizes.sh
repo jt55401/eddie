@@ -21,22 +21,12 @@ DIST_DIR="$ROOT_DIR/dist"
 REPORT_MD="$DIST_DIR/ASSET_SIZES.md"
 REPORT_CSV="$DIST_DIR/asset-sizes.csv"
 
-FILES=(
-  "eddie-boot.js"
-  "eddie-widget.js"
-  "eddie-worker.js"
-  "eddie-agent-worker.js"
-  "eddie-lite.js"
-  "eddie-lite-esm.js"
-  "eddie-lite.wasm"
-  "eddie-dense.js"
-  "eddie-dense-esm.js"
-  "eddie-dense.wasm"
-  "eddie-sw-lite.js"
-  "eddie-sw-dense.js"
-  "eddie-sw-gpu.js"
-  "eddie-transformers-sw.js"
-)
+# widget/assets.list is the single source of truth for dist/'s file list;
+# every consumer (this script included) reads it instead of hardcoding
+# names. Only the required entries are reported here -- the two
+# conditionally-produced esm-wasm variants (marked with a leading "?" in
+# the list) are not part of the default-path or dense-lane budgets below.
+mapfile -t FILES < <(grep -v '^#' "$ROOT_DIR/widget/assets.list" | grep -v '^?' | grep -v '^$')
 
 has_brotli=0
 if command -v brotli >/dev/null 2>&1; then

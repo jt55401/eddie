@@ -48,36 +48,29 @@ compress_asset() {
 echo "==> Building WASM widget..."
 bash "$PROJECT_ROOT/widget/build.sh"
 
+# widget/assets.list is the single source of truth for dist/'s file list;
+# read it instead of hardcoding names here. The Hugo module distributes via
+# git with no build step downstream, so it ships every required asset
+# (plus precompressed .br/.gz siblings), not a curated subset.
+mapfile -t WIDGET_ASSETS < <(grep -v '^#' "$PROJECT_ROOT/widget/assets.list" | grep -v '^?' | grep -v '^$')
+
 echo "==> Generating precompressed assets (.br/.gz)..."
-compress_asset "$PROJECT_ROOT/dist/eddie.wasm"
-compress_asset "$PROJECT_ROOT/dist/eddie-wasm.js"
-compress_asset "$PROJECT_ROOT/dist/eddie-worker.js"
-compress_asset "$PROJECT_ROOT/dist/eddie-agent-worker.js"
-compress_asset "$PROJECT_ROOT/dist/eddie-widget.js"
+for asset in "${WIDGET_ASSETS[@]}"; do
+  compress_asset "$PROJECT_ROOT/dist/$asset"
+done
 
 # 2. Copy dist/ into hugo-module/static/eddie/
 echo "==> Assembling Hugo module..."
 mkdir -p "$STATIC_DIR"
-for asset in \
-  eddie.wasm \
-  eddie.wasm.br \
-  eddie.wasm.gz \
-  eddie-wasm.js \
-  eddie-wasm.js.br \
-  eddie-wasm.js.gz \
-  eddie-worker.js \
-  eddie-worker.js.br \
-  eddie-worker.js.gz \
-  eddie-agent-worker.js \
-  eddie-agent-worker.js.br \
-  eddie-agent-worker.js.gz \
-  eddie-widget.js \
-  eddie-widget.js.br \
-  eddie-widget.js.gz
-do
-  if [[ -f "$PROJECT_ROOT/dist/$asset" ]]; then
-    cp "$PROJECT_ROOT/dist/$asset" "$STATIC_DIR/"
-  fi
+# Clear out anything from a previous run first: an older asset list may
+# have left stale, renamed, or retired files behind.
+rm -f "$STATIC_DIR"/*
+for asset in "${WIDGET_ASSETS[@]}"; do
+  for f in "$PROJECT_ROOT/dist/$asset" "$PROJECT_ROOT/dist/$asset.br" "$PROJECT_ROOT/dist/$asset.gz"; do
+    if [[ -f "$f" ]]; then
+      cp "$f" "$STATIC_DIR/"
+    fi
+  done
 done
 
 echo "==> Hugo module assembled at: $HUGO_MODULE_DIR"
@@ -101,6 +94,7 @@ if [[ -n "$TARGET_REPO" ]]; then
      "$TARGET_REPO/layouts/partials/eddie/inject.html"
 
   mkdir -p "$TARGET_REPO/static/eddie"
+  rm -f "$TARGET_REPO/static/eddie"/*
   cp "$STATIC_DIR"/* "$TARGET_REPO/static/eddie/"
 
   mkdir -p "$TARGET_REPO/scripts"

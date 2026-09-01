@@ -34,8 +34,13 @@ eddie index --content-dir content/ --cms hugo --output static/eddie/index.ed --p
 ### 2. Embed the widget
 
 ```html
-<script src="/eddie-widget.js"></script>
+<script src="/eddie-boot.js"></script>
 ```
+
+`eddie-boot.js` (about 3 KB) draws the trigger button and Ctrl/Cmd+K
+shortcut on every page and fetches the full widget on first interaction.
+Load `eddie-widget.js` directly instead if you want it on every page view
+with nothing lazy about it; both read the same `data-*` attributes.
 
 Using Hugo? The [`eddie-hugo` module](docs/guides/hugo.md) wires this up
 for you, including every `data-*` attribute, from `[params.eddie]` in your
@@ -213,7 +218,7 @@ widget reads `data-*` attributes on its `<script>` tag (or, on Hugo,
 same attributes for you):
 
 ```html
-<script src="/eddie-widget.js"
+<script src="/eddie-boot.js"
         data-index-url="/eddie/index.ed"
         data-position="bottom-right"
         data-theme="auto"
@@ -454,16 +459,13 @@ See [docs/guides/cms-gallery.md](docs/guides/cms-gallery.md) for the full workfl
 
 ### Precompressed runtime assets
 
-The release pipeline emits sidecar assets for every runtime file:
+The release pipeline emits a `.br` and a `.gz` sidecar for every runtime
+file named in [`widget/assets.list`](widget/assets.list) -- the single
+source of truth for the current asset list (boot loader, full widget,
+page-worker fallbacks, lite/dense WASM + glue, tiered service workers).
 
-- `eddie.wasm.br` / `eddie.wasm.gz`
-- `eddie-wasm.js.br` / `eddie-wasm.js.gz`
-- `eddie-worker.js.br` / `eddie-worker.js.gz`
-- `eddie-agent-worker.js.br` / `eddie-agent-worker.js.gz` (loaded only when a visitor clicks Ask)
-- `eddie-widget.js.br` / `eddie-widget.js.gz`
-
-Use the plain filenames in HTML (`eddie-widget.js`, `eddie.wasm`, etc). Your
-host should serve compressed bytes via standard `Accept-Encoding`
+Use the plain filenames in HTML (`eddie-boot.js`, `eddie-lite.wasm`, etc).
+Your host should serve compressed bytes via standard `Accept-Encoding`
 negotiation. Browser JS should not switch to the `.br`/`.gz` filenames
 directly unless your host also sets `Content-Encoding` and the correct
 content type on them. Without those headers, they're just opaque bytes.

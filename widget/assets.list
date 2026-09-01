@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Single source of truth for widget/build.sh's dist/ output. Every piece of
+# release and integration plumbing that copies, verifies, or uploads widget
+# runtime assets reads this file instead of hardcoding filenames:
+#   widget/build.sh                     verifies dist/ against this list
+#                                        and copies it to dist/assets.list
+#   scripts/report-asset-sizes.sh       size budgets, by name
+#   scripts/sync-integration-assets.sh  copies dist/ (+ this file) into every
+#                                        CMS package's assets_dir
+#   scripts/publish-hugo-module.sh      compresses + copies into
+#                                        hugo-module/static/eddie/
+#   .github/workflows/release.yml       release-asset collection + upload
+#   .github/workflows/ci.yml            packaging + build verification
+#   .github/workflows/publish-{npm,pypi,rubygems}.yml
+#                                        populates each assets_dir
+#   integrations/*/plugin/install.sh and
+#   integrations/*/{npm,gem,pypi}/.../install.sh
+#                                        read "$ASSET_ROOT/assets.list"
+#
+# Format: one filename per line. Blank lines and lines starting with "#"
+# are ignored. A line starting with "?" names an asset build.sh produces
+# only conditionally (see the "different eddie-<variant> binary" note in
+# build.sh); readers must copy/verify it only when present, never require
+# it.
+#
+# Roles, sizes and the loading story: widget/README.md's asset table and
+# docs/plans/2026-08-30-efficient-defaults.md.
+
+eddie-boot.js
+eddie-widget.js
+eddie-worker.js
+eddie-agent-worker.js
+eddie-lite.wasm
+eddie-lite.js
+eddie-lite-esm.js
+eddie-dense.wasm
+eddie-dense.js
+eddie-dense-esm.js
+eddie-sw-lite.js
+eddie-sw-dense.js
+eddie-sw-gpu.js
+eddie-transformers-sw.js
+?eddie-lite-esm.wasm
+?eddie-dense-esm.wasm

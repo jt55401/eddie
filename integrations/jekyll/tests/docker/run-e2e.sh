@@ -103,12 +103,12 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
   exit 1
 fi
 
-grep -q "eddie-widget.js" "$SITE_ROOT/_site/index.html"
+grep -q "eddie-boot.js" "$SITE_ROOT/_site/index.html"
 grep -q 'data-index-url="/assets/eddie/index.ed"' "$SITE_ROOT/_site/index.html"
 curl -fsS http://127.0.0.1:4000/assets/eddie/index.ed >/tmp/jekyll-index.ed
 curl -fsS http://127.0.0.1:4000/assets/eddie/eddie-worker.js >/tmp/jekyll-worker.js
 curl -fsS http://127.0.0.1:4000/assets/eddie/eddie-agent-worker.js >/tmp/jekyll-agent-worker.js
-curl -fsS http://127.0.0.1:4000/assets/eddie/eddie-wasm.js >/tmp/jekyll-wasm.js
-curl -fsS http://127.0.0.1:4000/assets/eddie/eddie.wasm >/tmp/jekyll-engine.wasm
+curl -fsS http://127.0.0.1:4000/assets/eddie/eddie-lite.js >/tmp/jekyll-lite.js
+curl -fsS http://127.0.0.1:4000/assets/eddie/eddie-lite.wasm >/tmp/jekyll-lite-engine.wasm
 
 echo "Jekyll E2E passed"

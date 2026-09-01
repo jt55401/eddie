@@ -15,3 +15,4 @@ inline retrieval-based answer blend, and an optional in-browser agent.
 - [0320 Model Download Consent](0300-download-progress/0320-download-consent.md)
 - [0410 Agent Ask Button and Answer Card](0400-qa-mode/0410-qa-mode.md)
 - [0420 Inline Retrieval Answer Blend](0400-qa-mode/0420-inline-retrieval-answer-blend.md)
+- [0510 Persistent Engines and Tiered Service Workers](0500-persistent-runtime/0510-tiered-service-workers.md)
