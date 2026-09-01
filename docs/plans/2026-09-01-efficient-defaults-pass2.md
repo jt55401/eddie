@@ -128,6 +128,15 @@ cannot fetch it; the agent worker has no wasm and no transformers.js.
 | (a) plain page view, first visit | **3,330** (`eddie-boot.js`, the whole cost) | 0 |
 | (b) first open + one keyword/sparse search, no consent | **791,841** (index 541,846, lite wasm 200,086, widget 26,149, `eddie-sw-lite.js` 16,616, glue 3,814, boot 3,330) | 0 |
 | (c) CPU dense lane accepted, browser without WebGPU | **47,216,790** (f16 weights 45,441,912, `eddie-dense.wasm` 731,823, tokenizer 148,046, `index.minilm.ed` 82,172, `eddie-sw-dense.js` 16,612, dense glue 4,081, config 303, on top of (b) minus the sidecar) | 0 |
+| (d) WebGPU search lane accepted, no agent | **1,169,013** ((b) plus `index.bge-small.ed` 192,476, `eddie-transformers-sw.js` 168,074, `eddie-sw-gpu.js` 16,622) | **39,100,991** (ONNX q8 weights 34,084,532 from `us.aws.cdn.hf.co`, ORT asyncify wasm 4,793,017 from jsDelivr, 223,442 of config/tokenizer/api from huggingface.co) |
+
+Row (d) really ran the lane: `data-lane="bge-small"`, `data-runtime="webgpu"`,
+`data-arms="dense,sparse,bm25"`, ready 23 s after the click. What is not in
+it is WebLLM. In pass 1 the same click also pulled 1.82 MB of WebLLM plus a
+38 KB ORT bundle from jsDelivr, because `sw/gpu` imported them; the 4.79 MB
+of jsDelivr traffic above is the ORT asyncify wasm transformers.js needs and
+nothing else.
+
 
 ### Caching: what a returning visitor pays
 

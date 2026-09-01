@@ -169,6 +169,10 @@ bundled CPU lane, "a one-time 900 MB download from huggingface.co, plus
 
 ## Follow-ups (pass 2 candidates)
 
+All five were taken up; see
+[2026-09-01-efficient-defaults-pass2.md](2026-09-01-efficient-defaults-pass2.md)
+for what happened to each.
+
 - The service worker import URLs (`./eddie-lite-esm.js`,
   `./eddie-transformers-sw.js`) carry no `?v=`; `updateViaCache: "none"`
   keeps them correct (fetched from the network at install) at the cost of
