@@ -396,6 +396,39 @@ fn days_from_date(raw: &str) -> Option<i64> {
     Some(era * 146_097 + doe - 719_468)
 }
 
+/// Does this query ask something, rather than name a topic to browse?
+///
+/// The same rule the widget uses to decide whether to show a FAQ answer
+/// (`looksFactualQuery` in eddie-widget.js): a question mark, an opening
+/// question word, or five or more words.
+///
+/// The two kinds of query want opposite things from a date. "when did jason
+/// start at kagi" has one right answer and it is whichever page states the
+/// fact, however old. "java" has no right answer -- it names a topic, the
+/// scores bunch up, and of two pages that mention Java about equally the
+/// recent one is nearly always the one worth reading. So the recency boost
+/// applies to the second kind only.
+pub fn looks_like_question(text: &str) -> bool {
+    let q = text.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    if q.contains('?') {
+        return true;
+    }
+    const OPENERS: [&str; 13] = [
+        "who", "what", "when", "where", "why", "how", "does", "do", "is", "are", "can", "could",
+        "should",
+    ];
+    let mut words = q.split_whitespace();
+    if let Some(first) = words.next()
+        && OPENERS.contains(&first.trim_matches(|c: char| !c.is_alphanumeric()))
+    {
+        return true;
+    }
+    q.split_whitespace().count() >= 5
+}
+
 /// The recency boost in force for a search: how much a page's age moves it
 /// in the final ranking. Built from the index's [`RecencySpec`], or
 /// overridden for tuning (`eddie eval --recency`).
@@ -426,6 +459,25 @@ impl Recency {
             .unwrap_or(Recency::OFF)
     }
 
+    /// The boost as it applies to one query: what the index asks for on a
+    /// browse-style query, and nothing at all on a question (see
+    /// [`looks_like_question`]).
+    pub fn for_query(index: &SearchIndex, text: &str) -> Recency {
+        if looks_like_question(text) {
+            return Recency::OFF;
+        }
+        Recency::for_index(index)
+    }
+
+    /// This boost, silenced on a question.
+    pub fn gate(self, text: &str) -> Recency {
+        if looks_like_question(text) {
+            Recency::OFF
+        } else {
+            self
+        }
+    }
+
     pub fn from_spec(spec: &crate::manifest::RecencySpec) -> Recency {
         Recency {
             strength: spec.strength,
@@ -450,6 +502,9 @@ impl Recency {
     }
 }
 
+/// Group and rank with the index's recency boost ungated. Callers that have
+/// the raw query text should use [`group_pages_with`] and [`Recency::for_query`]
+/// so a question is not reordered by date.
 pub fn group_pages(
     index: &SearchIndex,
     ranked: &[RankedChunk],
@@ -1658,5 +1713,39 @@ mod recency_tests {
         );
         // A page that is far ahead on relevance keeps its place.
         assert!(0.30 * r.multiplier(Some("2020-01-01")) > 0.05 * r.multiplier(Some("2026-03-18")));
+    }
+}
+
+#[cfg(test)]
+mod query_kind_tests {
+    use super::looks_like_question;
+
+    #[test]
+    fn questions_and_topics_are_told_apart() {
+        for q in [
+            "how long has jason been programming?",
+            "When did Jason start consulting for Kagi?",
+            "what programming languages does Jason know",
+            "Where is Jason located",
+            "has jason ever spoke anywhere or given talks lol",
+            "does eddie support mkdocs",
+            "java?",
+        ] {
+            assert!(looks_like_question(q), "{q:?} should read as a question");
+        }
+        for q in [
+            "java",
+            "rust",
+            "kagi",
+            "enterprise rust",
+            "common crawl checker",
+            "hugo module",
+            "  Python  ",
+        ] {
+            assert!(!looks_like_question(q), "{q:?} should read as a topic");
+        }
+        // Empty is neither; the boost has nothing to act on anyway.
+        assert!(!looks_like_question(""));
+        assert!(!looks_like_question("   "));
     }
 }

@@ -9,8 +9,8 @@ are still accurate". This is the accuracy half.
 
 `manifest.recency` (a [`RecencySpec`]) carries a `strength` and a
 `half_life_days`, baked in by `eddie index --recency` / `--recency-half-life`
-and left out entirely by `--no-recency`. `group_pages` multiplies each page's
-fused score by
+and left out entirely by `--no-recency`. On a browse-style query (see "The
+gate" below) `group_pages` multiplies each page's fused score by
 
 ```
 1 + strength * 0.5 ^ (age_days / half_life_days)
@@ -26,10 +26,10 @@ an index ranks the same way whenever it is searched. `eddie search` and
 `eddie eval` take `--recency` / `--recency-half-life` to override what the
 index carries, which is how the numbers below were produced.
 
-## What it does to jason-grey.com
+## First attempt: ungated, and it made answers worse
 
-45 labelled questions, graded nDCG, the site's own index and weights
-(1.2/0.8/0.6), half-life 240 days:
+Applied to every query regardless of kind. 45 labelled questions, graded
+nDCG, the site's own index and weights (1.2/0.8/0.6), half-life 240 days:
 
 | strength | Hit@10 | MRR | nDCG@10 |
 |---:|---:|---:|---:|
@@ -87,27 +87,86 @@ that index is undated, `newest` is `None`, and no spec is baked at all
 date)"). Any site indexed with `--cms html` gets nothing from this feature
 until dates are parsed out of the markup.
 
+## The gate: it only applies to browse queries
+
+Both sets above are question sets. That was the flaw in the first round of
+tuning: "when did Jason start at Kagi" has one right answer and it is
+whichever page states the fact, however old, so a date can only do damage.
+"java" is a different animal -- it names a topic, has no single right
+answer, and of two pages that mention Java about equally the recent one is
+usually the one worth reading.
+
+So the boost is gated on `search::looks_like_question`, the same rule the
+widget uses to decide whether to show a FAQ answer: a question mark, an
+opening question word, or five or more words. A question gets no boost at
+all.
+
+That makes the question sets unaffected *by construction*, and the numbers
+confirm it -- jason-grey.com's 45 cases score identically at every strength
+tried, because all 45 are questions:
+
+| strength (half-life 1460 d) | Hit@10 | MRR | nDCG@10 |
+|---:|---:|---:|---:|
+| 0 | 0.978 | 0.814 | 0.774 |
+| 0.15 | 0.978 | 0.814 | 0.774 |
+| 0.30 | 0.978 | 0.814 | 0.774 |
+| 0.60 | 0.978 | 0.814 | 0.774 |
+
+## Tuning on browse queries
+
+The corpus spans 2006 to 2026, so the half-life has to be years. At
+strength 0.15 and a four-year half-life, `java` on jason-grey.com:
+
+| # | before | after |
+|---|---|---|
+| 1 | Google+ Java API Launched (2011) | Google+ Java API Launched (2011) |
+| 2 | Algorithms & Techniques (undated) | Web and API - Enterprise Rust (2023) |
+| 3 | Watching Tech Trends (2009) | Algorithms & Techniques (undated) |
+| 4 | Web and API - Enterprise Rust (2023) | Watching Tech Trends (2009) |
+| 5 | Search (undated) | Eddie: Hybrid Search (2026) |
+| 6 | Object Oriented Programming (2006) | Core Components - Enterprise Rust (2023) |
+
+The most on-topic page -- a post that is literally about a Java API -- keeps
+first place, while the 2009 and 2006 posts that merely mention Java are
+pushed down and out. That is the intended shape: demote stale tangential
+matches, do not overrule topical ones.
+
+Stronger settings overshoot. At 0.35 the 2011 Java post falls to third
+behind two Rust posts, which is worse: they mention Java in passing and it
+is *about* Java. `rust`, `ai`, `python` and `hugo` barely move at any
+setting, because their best matches are already recent.
+
+Defaults: **strength 0.15, half-life 1460 days**, on, gated.
+
+## What this does not fix
+
+`java` is flat: the top eight results span 0.0439 to 0.0380, a 13 % spread
+across pages of very different relevance, and
+`/skills/programming-languages/` -- the page that actually lists Java among
+the languages he knows -- sits eighth. A single common term gives all three
+arms a weak, similar signal and RRF flattens what is left, so the order
+among near-ties is decided by whatever tips the balance, age included.
+
+The recency boost improves that ordering but does not address the cause. The
+real fix for broad single-term queries is upstream in retrieval, not in the
+final sort.
+
 ## Decision
 
-Shipped, tunable, and **off unless a site asks for it**. `eddie index`
-without `--recency` bakes no spec, and an index that carries no spec ranks on
-relevance alone. A site whose freshness genuinely matters -- a news or
-release-notes corpus, where the 2019 answer is wrong rather than merely old
--- turns it on with `--recency 0.12` and tunes it with
-`eddie eval --recency`.
+Shipped **on by default** at strength 0.15 with a four-year half-life,
+gated to browse-style queries. `--no-recency` leaves it out of the index
+entirely; `--recency 0` does the same thing at query time. An index built
+before this exists carries no spec and ranks on relevance alone.
 
-This is deliberately not what was asked for ("on by default"). The same
-request asked for the accuracy check, and the accuracy check says one of the
-two corpora is made worse at every setting tried and the other cannot use
-the feature at all. The knob, the sweep and this page are here so that
-judgement can be revisited per site rather than guessed at.
+On by default is defensible only because of the gate: question answering
+cannot be affected, and the browse-query change demotes stale tangential
+matches without overruling topical ones. Without the gate it was worse on
+every setting tried, which is what the first half of this page measured.
 
-Two things that would change the answer, neither of them this change:
+Two things still worth doing, neither of them this change:
 
-- **Dates from `--cms html`.** Half the reason the feature looks useless is
-  that a rendered-HTML corpus has no dates to rank by.
-- **A signal other than age.** What went wrong on jason-grey.com is that a
-  blog post outranks a reference page, and "newer" is a poor proxy for
-  "the kind of page that answers this question". A page-type or
-  query-intent signal would address the original complaint without
-  demoting `/about/`.
+- **Dates from `--cms html`.** A rendered-HTML corpus has no dates to rank
+  by, so the feature is inert on any site indexed that way.
+- **Broad single-term retrieval.** See "What this does not fix": the
+  scores for `java` are nearly flat and the most relevant page is eighth.
+  That is where the original complaint really comes from.

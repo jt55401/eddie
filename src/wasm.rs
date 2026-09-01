@@ -470,7 +470,13 @@ pub fn search(
         let retrieval =
             rank::retrieve(&engine.index, &q).map_err(|e| js_err("search failed", e))?;
         let terms = rank::query_terms(query);
-        let results = rank::group_pages(&engine.index, &retrieval.ranked, &terms, top_k);
+        let results = rank::group_pages_with(
+            &engine.index,
+            &retrieval.ranked,
+            &terms,
+            top_k,
+            rank::Recency::for_query(&engine.index, query),
+        );
         // When this module already explained why the dense arm is missing,
         // retrieve()'s generic "no query vector" note describes the same
         // cause; keep one entry per cause.

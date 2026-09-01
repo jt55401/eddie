@@ -1815,11 +1815,14 @@ impl RecencyChoice {
 }
 
 /// Boost a page dated as recently as the newest page in the corpus gets, and
-/// the days after which that is halved. Chosen by sweeping
-/// `eddie eval --recency` over the labelled sets; see
+/// the days after which that is halved. The boost only ever applies to
+/// browse-style queries (`search::looks_like_question`), so these were
+/// chosen on broad terms rather than on the question sets, which are
+/// unaffected by construction. Four years suits a corpus that spans two
+/// decades; a site publishing weekly wants far less. See
 /// docs/reviews/2026-09-01-recency-boost.md.
-const DEFAULT_RECENCY_STRENGTH: f64 = 0.12;
-const DEFAULT_RECENCY_HALF_LIFE_DAYS: f64 = 240.0;
+const DEFAULT_RECENCY_STRENGTH: f64 = 0.15;
+const DEFAULT_RECENCY_HALF_LIFE_DAYS: f64 = 1460.0;
 
 /// The most recent `YYYY-MM-DD` any chunk carries, which ages are measured
 /// from. `None` when nothing in the corpus is dated.
@@ -1936,7 +1939,7 @@ fn run_query(
         &retrieval.ranked,
         &query_terms(text),
         top_k,
-        options.recency_for(index),
+        options.recency_for(index).gate(text),
     );
     Ok((pages, retrieval))
 }
