@@ -293,7 +293,7 @@ bundle() {
 }
 
 bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "$ASSET_VERSION_DEFINE" boot.js
-bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "$ASSET_VERSION_DEFINE" config.js urls.js copy.js agent.js transport.js warm.js
+bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "$ASSET_VERSION_DEFINE" config.js settings.js urls.js copy.js agent.js transport.js warm.js
 bundle "$DIST/eddie-worker.js"       worker.js             plain "$ASSET_VERSION_DEFINE" urls.js lanes.js copy.js download.js search-engine.js
 bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "$ASSET_VERSION_DEFINE" agent.js agent-llm.js agent-engine.js
 

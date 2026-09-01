@@ -73,14 +73,16 @@ mkdir -p "$DIST_DIR"
 
 cat "$REPORT_MD"
 
-# Budgets (bytes), tightened to the pass-2 measurements plus about 10 %, so a
-# regression is caught rather than absorbed. Measured 2026-09-01,
-# opt-level=s, no wasm-opt: boot 3,330 br, widget 25,943 br (26,149 with the
-# asset-version stamp), worker 15,056 br, lite wasm 200,086 br, dense wasm
-# 3,596,914 raw / 1,068,449 gzip / 731,823 br, sw-gpu 16,622 br, sw-agent
-# 8,724 br.
+# Budgets (bytes), set to the measurement plus about 10 %, so a regression is
+# caught rather than absorbed. Measured 2026-09-01, opt-level=s, no wasm-opt:
+# boot 3,332 br, worker 15,837 br, lite wasm 200,086 br, dense wasm 3,596,914
+# raw / 1,068,449 gzip / 731,823 br, sw-gpu 17,435 br, sw-agent 8,819 br.
+#
+# eddie-widget.js is the file features land in, so its budget is tighter
+# (31,094 measured, about 4.5 % of room): it should fail on a feature that
+# was not budgeted for, not absorb it.
 BOOT_BROTLI_BUDGET_BYTES="${BOOT_BROTLI_BUDGET_BYTES:-3700}"
-WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-28500}"
+WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-32500}"
 WORKER_BROTLI_BUDGET_BYTES="${WORKER_BROTLI_BUDGET_BYTES:-16500}"
 LITE_WASM_BROTLI_BUDGET_BYTES="${LITE_WASM_BROTLI_BUDGET_BYTES:-215000}"
 WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3700000}"

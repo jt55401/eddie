@@ -38,7 +38,10 @@
 
   /**
    * Choose the WebLLM model id.
-   * opts: { mode: "auto"|"quality"|<id>, maxBufferSize, isMobile, hasF16 }
+   * opts: { mode: "auto"|"light"|"quality"|<id>, maxBufferSize, isMobile, hasF16 }
+   *
+   * "light" and "quality" are the two sizes the settings panel offers by
+   * name; "auto" picks between them from the adapter's buffer limit.
    */
   function selectAgentModel(opts) {
     const o = opts || {};
@@ -50,6 +53,8 @@
       base = big ? "Qwen3.5-2B" : "Qwen3.5-0.8B";
     } else if (mode === "quality") {
       base = "Qwen3.5-2B";
+    } else if (mode === "light") {
+      base = "Qwen3.5-0.8B";
     } else {
       return { id: mode, base: baseModelId(mode), sizeBytes: agentModelBytes(mode), explicit: true };
     }

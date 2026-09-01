@@ -81,7 +81,7 @@ harmless (the second mount is skipped).
         data-answer-top-k="5"            <!-- qa_lookup hits requested (capped at 3 shown) -->
         data-agent-mode="auto"           <!-- off | auto -->
         data-agent-model="auto"          <!-- auto | quality | <WebLLM model id> -->
-        data-dense-runtime="auto"        <!-- auto | wasm | webgpu -->
+        data-dense-runtime="auto"        <!-- auto | wasm | webgpu | off: off is keyword + sparse, no model -->
         data-consent-text=""             <!-- override of the download consent copy; {size}, {model} and {origin} are substituted -->
         data-persist="auto"              <!-- auto | off: keep the engines in a service worker across navigations -->
         data-warm="auto"                 <!-- auto | off | always: initialise search before the modal opens (auto: returning visitors only) -->
@@ -113,6 +113,39 @@ Every asset URL is versioned, so `/eddie/*` can be served with a one-year
 Pages / Netlify example that does that while keeping `eddie-boot.js` (the
 one URL the page names without a `?v=`) revalidating. When `data-index-url`
 is absent the index is `index.ed` next to the widget script.
+
+## Settings (the gear)
+
+The modal's gear opens a panel where a visitor chooses what to download and
+which models to run. Four preferences, stored together in `localStorage`
+under `eddie.settings`:
+
+| Group | Values | Effect |
+|---|---|---|
+| Search model | `none`, or a lane id from the index | `none` runs keyword + sparse and downloads no model; a lane id pins that lane |
+| Answers | `off`, `light`, `quality` (or the site's pinned model id) | `off` hides the Ask button; the two levels are the Qwen3.5 0.8B and 2B builds |
+| Preload | the `data-warm` values up to the site's | when search initialises relative to the modal opening |
+| Between pages | the `data-persist` values up to the site's | whether the engines live in a service worker |
+
+Below them, the quota-managed storage this origin holds (the model cache,
+WebLLM's weights, whatever the service worker cached) and a button that
+deletes it. While a search transport exists the engine owns the database, so
+the deletion goes through it (`cache_clear`); otherwise the widget deletes
+the database itself. Either way WebLLM's caches go too.
+
+**The site config is the ceiling.** The panel offers a lane only if the index
+carries it, this browser can run it, and `data-dense-runtime` allows it; the
+agent only if `data-agent-mode` is not `off` and a WebGPU adapter exists;
+`data-warm="off"` leaves `off` as the only preload option. A visitor can
+always choose less than the site asks for, and can choose among what the site
+left open, but cannot switch on what the owner turned off. A stored
+preference that is no longer on offer -- a re-indexed site, a different
+browser, a changed attribute -- falls back to the site default rather than
+breaking the widget (`widget/src/lib/settings.js`).
+
+Changing the search model re-initialises the engine, moving it to the tier
+the new lane needs, and is remembered for the next page: a service worker
+still running the previous lane is not adopted.
 
 ## What is fetched when
 

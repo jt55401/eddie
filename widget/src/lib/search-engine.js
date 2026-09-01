@@ -85,6 +85,7 @@
       indexUrl: null,
       loadedIndexUrl: null,
       denseRuntime: "auto",
+      laneId: null, // visitor-pinned dense lane (settings panel), or null
       consent: Object.create(null), // lane id -> true
       wasmReady: false,
       indexLoaded: false,
@@ -116,6 +117,8 @@
           return handleInit(m, out);
         case "cache_check":
           return handleCacheCheck(m, out);
+        case "cache_clear":
+          return handleCacheClear(m, out);
         case "search":
           return handleSearch(m, out);
         case "page":
@@ -130,6 +133,18 @@
       }
     }
 
+    /**
+     * The degraded list as reported to the host: design choices dropped
+     * (copy.js), and the dense arm's entries dropped entirely when the
+     * visitor turned the dense arm off -- they asked for keyword and sparse,
+     * so nothing is missing.
+     */
+    function reportedDegraded(list) {
+      const filtered = lib.filterDesignDegraded(unique(list));
+      if (state.denseRuntime !== "off") return filtered;
+      return filtered.filter((d) => !String(d).startsWith("dense:"));
+    }
+
     /** Snapshot for the service worker's `state` reply. */
     function snapshot() {
       return {
@@ -140,7 +155,7 @@
         lane: state.dense ? state.dense.lane.id : null,
         runtime: state.dense ? state.dense.kind : null,
         arms: state.indexLoaded ? { dense: !!state.dense, sparse: state.sparse, bm25: true } : null,
-        degraded: lib.filterDesignDegraded(unique(state.degraded)),
+        degraded: reportedDegraded(state.degraded),
         manifest: state.manifest ? manifestSummary() : null,
         lanes: laneList(),
         hostSkippedLanes: state.hostSkipped.slice(),
@@ -158,7 +173,11 @@
       if (msg.indexUrl) state.indexUrl = String(msg.indexUrl);
       if (msg.baseUrl != null) state.baseUrl = String(msg.baseUrl);
       if (msg.version != null) state.version = msg.version ? String(msg.version) : null;
+      const wasRuntime = state.denseRuntime;
+      const wasLane = state.laneId;
       if (msg.denseRuntime) state.denseRuntime = String(msg.denseRuntime);
+      if (msg.laneId !== undefined) state.laneId = msg.laneId ? String(msg.laneId) : null;
+      if (state.denseRuntime !== wasRuntime || state.laneId !== wasLane) resetDenseSelection();
       if (msg.consent === true) {
         const lane = currentCandidate();
         if (lane) state.consent[lane.id] = true;
@@ -179,6 +198,7 @@
         await ensureIndex();
         await ensureDb();
         await ensureGpu();
+        chooseLanes();
         await ensureSparse();
         const outcome = await ensureDense();
         if (outcome === "consent") {
@@ -300,7 +320,7 @@
       state.laneIndex = 0;
       state.gpu = null;
       state.siteSizes = Object.create(null);
-      postStatus("index_ready", { manifest: manifestSummary(), lanes: laneList() });
+      postStatus("index_ready", { manifest: manifestSummary(), lanes: laneList(), hostSkippedLanes: state.hostSkipped.slice() });
     }
 
     async function ensureGpu() {
@@ -321,8 +341,17 @@
         console.warn("eddie: WebGPU adapter probe failed", err);
         state.gpu = false;
       }
+    }
+
+    /**
+     * Pick the dense lanes to try, in order. Runs on every init, not just the
+     * first: the visitor can change `denseRuntime` or pin a lane from the
+     * settings panel at any time, and the answer has to change with it.
+     */
+    function chooseLanes() {
       const choice = lib.chooseDenseLanes(state.manifest, {
         denseRuntime: state.denseRuntime,
+        laneId: state.laneId,
         hasWebGpu: !!state.gpu && canRunWebGpuLane,
       });
       state.candidates = choice.candidates;
@@ -333,6 +362,22 @@
       for (const { lane, reason } of choice.skipped) {
         console.warn(`eddie: dense lane ${lane.id} skipped: ${reason}`);
         state.degraded.push(`dense: lane ${lane.id} skipped: ${reason}`);
+      }
+    }
+
+    /**
+     * Forget which dense lane is running so the next init picks again. Called
+     * when the visitor changes the lane or turns the dense arm off.
+     */
+    function resetDenseSelection() {
+      state.dense = null;
+      state.laneIndex = 0;
+      state.degraded = state.degraded.filter((d) => !String(d).startsWith("dense:"));
+      // The hand-over bytes are dropped once no wasm-candle lane is in play
+      // (releaseHandoverBytes). A visitor who then picks the CPU lane needs
+      // them back: re-read the index, which is an immutable-cached fetch.
+      if (!state.indexBytes && !(caps && caps.dense_wasm)) {
+        state.indexLoaded = false;
       }
     }
 
@@ -381,7 +426,10 @@
         try {
           const cached = await laneCached(lane);
           if (!cached && !state.consent[lane.id]) {
-            postStatus("consent_required", await consentDetails(lane));
+            postStatus("consent_required", Object.assign(await consentDetails(lane), {
+              lanes: laneList(),
+              hostSkippedLanes: state.hostSkipped.slice(),
+            }));
             return "consent";
           }
           await ensureSidecar(lane, "chunks");
@@ -593,7 +641,7 @@
         lane: state.dense ? state.dense.lane.id : null,
         runtime: state.dense ? state.dense.kind : null,
         arms: { dense: !!state.dense, sparse: state.sparse, bm25: true },
-        degraded: lib.filterDesignDegraded(unique(state.degraded)),
+        degraded: reportedDegraded(state.degraded),
         manifest: manifestSummary(),
         hostSkippedLanes: state.hostSkipped.slice(),
         wasm: caps && caps.dense_wasm ? "dense" : "lite",
@@ -613,16 +661,19 @@
         if (msg.baseUrl != null) state.baseUrl = String(msg.baseUrl);
         if (msg.version != null) state.version = msg.version ? String(msg.version) : null;
         if (msg.denseRuntime) state.denseRuntime = String(msg.denseRuntime);
+        if (msg.laneId !== undefined) state.laneId = msg.laneId ? String(msg.laneId) : null;
         await ensureWasm();
         await ensureIndex();
         await ensureDb();
         await ensureGpu();
+        chooseLanes();
         const lane = currentCandidate();
         const cached = lane ? await laneCached(lane) : true;
         reply({
           type: "cache_result",
           requestId: msg.requestId,
           cached,
+          lanes: laneList(),
           lane: lane ? laneSummary(lane) : null,
           sizeBytes: lane ? await laneDownloadBytes(lane) : 0,
           origin: lane ? lib.laneOrigin(lane) : null,
@@ -634,6 +685,31 @@
         if (isFatal(err)) state.phase = "dead";
         postError(reply, msg.requestId, describe(err), isFatal(err));
       }
+    }
+
+    /**
+     * Delete every cached model file. The engine keeps whatever it has
+     * already loaded into memory for this session; the files come back on the
+     * next visit that needs them.
+     */
+    async function handleCacheClear(msg, reply) {
+      let freedBytes = 0;
+      try {
+        await ensureDb();
+        const keys = (await idbRequest(IDB_FILES, "readonly", (s) => s.getAllKeys())) || [];
+        for (const key of keys) {
+          const value = await idbGet(key);
+          freedBytes += value ? (typeof value.size === "number" ? value.size : value.byteLength || 0) : 0;
+          await idbDelete(key);
+        }
+        const metaKeys = (await idbRequest(IDB_META, "readonly", (s) => s.getAllKeys())) || [];
+        for (const key of metaKeys) {
+          await idbRequest(IDB_META, "readwrite", (s) => s.delete(key));
+        }
+      } catch (err) {
+        console.warn("eddie: could not clear the model cache", err);
+      }
+      reply({ type: "cache_clear_result", requestId: msg.requestId, freedBytes });
     }
 
     async function laneCached(lane) {
@@ -719,7 +795,7 @@
           requestId,
           results,
           arms: res.arms,
-          degraded: lib.filterDesignDegraded(unique((res.degraded || []).concat(state.degraded))),
+          degraded: reportedDegraded((res.degraded || []).concat(state.degraded)),
           mode: res.mode,
           lane: res.dense_lane || null,
           qa,

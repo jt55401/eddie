@@ -36,7 +36,7 @@
 
 const lib = EddieLib;
 
-const SEARCH_TYPES = new Set(["init", "cache_check", "search", "page", "chunk", "qa"]);
+const SEARCH_TYPES = new Set(["init", "cache_check", "cache_clear", "search", "page", "chunk", "qa"]);
 const AGENT_TYPES = new Set(["load", "plan", "ask", "abort"]);
 const startedAt = Date.now();
 const hasGpu = !!(self.navigator && navigator.gpu && typeof navigator.gpu.requestAdapter === "function");

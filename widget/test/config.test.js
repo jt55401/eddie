@@ -52,6 +52,10 @@ test("reads every documented attribute", () => {
   assert.equal(c.consentText, "Download {size}?");
 });
 
+test("data-dense-runtime accepts off, for a site that wants keyword and sparse only", () => {
+  assert.equal(from({ "data-dense-runtime": "off" }).denseRuntime, "off");
+});
+
 test("invalid values fall back", () => {
   const c = from({
     "data-position": "middle",

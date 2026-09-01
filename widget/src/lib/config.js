@@ -55,7 +55,7 @@
       answerTopK: intAttr(get("data-answer-top-k"), 5),
       agentMode: oneOf(get("data-agent-mode"), ["off", "auto"], "auto"),
       agentModel: agentModelRaw === "" ? "auto" : agentModelRaw,
-      denseRuntime: oneOf(get("data-dense-runtime"), ["auto", "wasm", "webgpu"], "auto"),
+      denseRuntime: oneOf(get("data-dense-runtime"), ["auto", "wasm", "webgpu", "off"], "auto"),
       consentText: (get("data-consent-text") || "").trim(),
       persist: oneOf(get("data-persist"), ["auto", "off"], "auto"),
       warm: oneOf(get("data-warm"), ["auto", "off", "always"], "auto"),

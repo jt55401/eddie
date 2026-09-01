@@ -24,7 +24,18 @@
   if (document.getElementById("eddie-host")) return;
   const lib = EddieLib;
 
-  const config = lib.parseWidgetConfig((name) => scriptEl.getAttribute(name));
+  // The site's data-* config is the ceiling; the visitor's stored
+  // preferences (gear menu) are applied on top of it. The lane list and the
+  // WebGPU probe are not available yet, so this first pass only enforces the
+  // ceiling -- the panel corrects any stale preference once the engine
+  // reports what the index actually offers.
+  const siteConfig = lib.parseWidgetConfig((name) => scriptEl.getAttribute(name));
+  let settings = lib.readSettings(localStore());
+  let config = lib.effectiveConfig(
+    siteConfig,
+    settings,
+    lib.settingsChoices({ config: siteConfig, lanes: null })
+  );
   const scriptHref = new URL(scriptEl.src, location.href).href;
   const baseUrl = lib.baseUrlOf(scriptHref);
   const indexUrl = config.indexUrl
@@ -56,7 +67,18 @@
   // worker before the widget checks whether the worker is still alive.
   const SW_CALL_TIMEOUT_MS = 60000;
 
+  /** `localStorage`, or null where reading it throws (some privacy modes). */
+  function localStore() {
+    try {
+      return window.localStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // -- State --
+  let laneInfo = null; // { lanes, hostSkipped } once the engine has read the index
+  let settingsOpen = false;
   let search = null; // search transport (lib/transport.js), null until needed
   let workerState = "idle"; // idle | loading | index_ready | awaiting_consent | ready | error | dead
   let searchable = false;
@@ -276,6 +298,24 @@
       transition: border-color 0.1s;
     }
     .sa-close:hover { border-color: var(--sa-text-muted); }
+    .sa-gear svg { width: 15px; height: 15px; display: block; }
+    .sa-gear[aria-expanded="true"] { border-color: var(--sa-accent); color: var(--sa-accent); }
+
+    .sa-set-body { display: flex; flex-direction: column; gap: 12px; }
+    .sa-set-group { display: flex; flex-direction: column; gap: 4px; }
+    .sa-set-group > .sa-set-legend {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--sa-text-muted);
+      font-family: var(--sa-font-mono);
+    }
+    .sa-set-opt { display: flex; align-items: baseline; gap: 8px; cursor: pointer; padding: 2px 0; }
+    .sa-set-opt input { margin: 0; flex-shrink: 0; accent-color: var(--sa-accent); }
+    .sa-set-opt-main { font-size: 13px; }
+    .sa-set-opt-detail { font-size: 12px; color: var(--sa-text-muted); }
+    .sa-set-note { font-size: 12px; color: var(--sa-text-muted); }
+    .sa-set-storage { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
 
     .sa-heart { flex-shrink: 0; width: 14px; height: 8px; image-rendering: pixelated; image-rendering: crisp-edges; opacity: 0.95; display: block; }
 
@@ -513,6 +553,14 @@
   askBtn.hidden = true;
   header.appendChild(askBtn);
 
+  const gearBtn = button("sa-close sa-gear", "", toggleSettings, {
+    "aria-label": "Settings",
+    "aria-expanded": "false",
+    title: "Settings",
+  });
+  gearBtn.appendChild(createGearSvg());
+  header.appendChild(gearBtn);
+
   const closeBtn = button("sa-close", "esc", closeModal, { "aria-label": "Close (Esc)" });
   header.appendChild(closeBtn);
 
@@ -557,6 +605,22 @@
   consentCard.appendChild(consentText);
   consentCard.appendChild(consentActions);
   modal.appendChild(consentCard);
+
+  // Settings panel (gear): visitor preferences over the site's data-* config.
+  const settingsCard = el("div", "sa-card sa-settings");
+  settingsCard.setAttribute("role", "group");
+  settingsCard.setAttribute("aria-label", "Search settings");
+  const settingsLabel = el("div", "sa-card-label", "Settings");
+  const settingsBody = el("div", "sa-set-body");
+  const settingsActions = el("div", "sa-card-actions");
+  const settingsReset = button("sa-btn", "Use this site's defaults", resetSettings);
+  const settingsDone = button("sa-btn sa-btn-primary", "Done", () => setSettingsOpen(false));
+  settingsActions.appendChild(settingsDone);
+  settingsActions.appendChild(settingsReset);
+  settingsCard.appendChild(settingsLabel);
+  settingsCard.appendChild(settingsBody);
+  settingsCard.appendChild(settingsActions);
+  modal.appendChild(settingsCard);
 
   // Error area
   const errorEl = el("div", "sa-error");
@@ -692,7 +756,9 @@
   modal.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      closeModal();
+      // Esc backs out of the settings panel first, then closes the modal.
+      if (settingsOpen) setSettingsOpen(false);
+      else closeModal();
       return;
     }
     if (e.key !== "Tab") return;
@@ -936,9 +1002,25 @@
       host.dataset.runtime = "";
       if (isOpen) postInit(false);
     });
-    if (t.kind === "sw" && plan && plan.hello && lib.canReuseSearch(plan.hello.search, indexUrl)) {
-      adoptReadyState(plan.hello.search);
+    if (t.kind === "sw" && plan && plan.hello && plan.hello.search) {
+      // A worker that already holds the index does not re-post index_ready on
+      // a second init, so its snapshot is where a fresh page learns the lanes.
+      rememberLanes(plan.hello.search);
+      if (lib.canReuseSearch(plan.hello.search, indexUrl) && runsPreferredLane(plan.hello.search)) {
+        adoptReadyState(plan.hello.search);
+      }
     }
+  }
+
+  /**
+   * Is a ready engine running the lane this visitor asked for? A worker left
+   * over from before a settings change is ready for the right index but the
+   * wrong lane, and adopting it would silently ignore the preference.
+   */
+  function runsPreferredLane(st) {
+    if (config.denseRuntime === "off") return !st.lane;
+    if (config.laneId) return st.lane === config.laneId;
+    return true;
   }
 
   /** The service worker already holds a ready engine for this index: mirror it. */
@@ -977,6 +1059,16 @@
     if (!initSent) postInit(false);
   }
 
+  /** The "Search model" group is built from this; every engine message that carries a lane list refreshes it. */
+  function rememberLanes(msg) {
+    if (!msg || !Array.isArray(msg.lanes)) return;
+    laneInfo = {
+      lanes: msg.lanes,
+      hostSkipped: Array.isArray(msg.hostSkippedLanes) ? msg.hostSkippedLanes : [],
+    };
+    if (settingsOpen) currentChoices().then(renderSettings);
+  }
+
   function postInit(consent) {
     if (!search) return;
     initSent = true;
@@ -988,6 +1080,7 @@
       baseUrl,
       version,
       denseRuntime: config.denseRuntime,
+      laneId: config.laneId || null,
       consent: !!consent,
       consentLane: consent ? pendingConsentLane : undefined,
     });
@@ -1092,6 +1185,7 @@
         break;
       case "index_ready":
         manifestInfo = msg.manifest || null;
+        rememberLanes(msg);
         setWorkerState("index_ready");
         searchable = true;
         if (initSent) setStatus("Loading search model…", null);
@@ -1113,6 +1207,7 @@
         break;
       case "consent_required":
         setWorkerState("awaiting_consent");
+        rememberLanes(msg);
         showStatus(false);
         pendingConsentLane = msg.lane && msg.lane.id ? msg.lane.id : null;
         pendingConsentKind = msg.lane && msg.lane.kind ? msg.lane.kind : null;
@@ -1150,6 +1245,7 @@
     setWorkerState("ready");
     searchable = true;
     manifestInfo = msg.manifest || manifestInfo;
+    rememberLanes(msg);
     const arms = msg.arms || {};
     host.dataset.arms = Object.keys(arms).filter((k) => arms[k]).join(",");
     host.dataset.lane = msg.lane || "";
@@ -1256,6 +1352,16 @@
     }
   }
 
+  /** The tier the next page should register directly. "lite" is the default, so it clears the key. */
+  function rememberSearchTier(tier) {
+    try {
+      if (tier && tier !== "lite") localStorage.setItem(SEARCH_TIER_KEY, tier);
+      else localStorage.removeItem(SEARCH_TIER_KEY);
+    } catch (_) {
+      // storage unavailable: the next page works it out again
+    }
+  }
+
   function rememberSearchConsent(laneId, tier) {
     try {
       localStorage.setItem(SEARCH_CONSENT_KEY, String(laneId));
@@ -1284,6 +1390,7 @@
       consentText: config.consentText,
     });
     consentAccept.textContent = msg.sizeBytes == null ? "Download" : `Download ${lib.formatBytes(msg.sizeBytes)}`;
+    if (settingsOpen) setSettingsOpen(false);
     show(consentCard);
     announce("Semantic search needs a model download. " + consentText.textContent);
   }
@@ -1300,6 +1407,244 @@
     await switchSearchTier(tier);
     if (!search) return;
     postInit(true);
+  }
+
+  // -- Settings (gear) --
+  // Four preferences in one localStorage entry (lib/settings.js), each
+  // bounded by the site's data-* config.
+
+  function createGearSvg() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.3");
+    svg.setAttribute("stroke-linecap", "round");
+    const circle = document.createElementNS(ns, "circle");
+    circle.setAttribute("cx", "8");
+    circle.setAttribute("cy", "8");
+    circle.setAttribute("r", "2.4");
+    const teeth = document.createElementNS(ns, "path");
+    teeth.setAttribute(
+      "d",
+      "M8 1v1.8M8 13.2V15M1 8h1.8M13.2 8H15M3.05 3.05l1.27 1.27M11.68 11.68l1.27 1.27M12.95 3.05l-1.27 1.27M4.32 11.68l-1.27 1.27"
+    );
+    svg.appendChild(circle);
+    svg.appendChild(teeth);
+    return svg;
+  }
+
+  /** What the panel may offer: needs the lane list and an adapter probe. */
+  async function currentChoices() {
+    const gpu = await probePageGpu();
+    return lib.settingsChoices({
+      config: siteConfig,
+      lanes: laneInfo ? laneInfo.lanes : null,
+      hostSkipped: laneInfo ? laneInfo.hostSkipped : [],
+      hasWebGpu: !!gpu,
+    });
+  }
+
+  function toggleSettings() {
+    setSettingsOpen(!settingsOpen);
+  }
+
+  async function setSettingsOpen(open) {
+    settingsOpen = !!open;
+    gearBtn.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
+    if (!settingsOpen) {
+      hide(settingsCard);
+      input.focus();
+      return;
+    }
+    show(settingsCard);
+    renderSettings(await currentChoices());
+    const first = settingsCard.querySelector("input, button");
+    if (first) first.focus();
+  }
+
+  /** One radio group, or a muted line when the site and the browser leave only one answer. */
+  function settingsGroup(legend, name, options, current, onPick) {
+    if (!options || options.length === 0) return null;
+    const group = el("div", "sa-set-group");
+    group.appendChild(el("div", "sa-set-legend", legend));
+    if (options.length === 1) {
+      const only = options[0];
+      group.appendChild(el("div", "sa-set-note", `${only.label} — ${only.detail}`));
+      return group;
+    }
+    for (const opt of options) {
+      const row = el("label", "sa-set-opt");
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "eddie-" + name;
+      radio.value = opt.value;
+      radio.checked = opt.value === current;
+      radio.addEventListener("change", () => {
+        if (radio.checked) onPick(opt.value);
+      });
+      const text = el("span");
+      text.appendChild(el("span", "sa-set-opt-main", opt.label));
+      if (opt.detail) {
+        text.appendChild(document.createTextNode(" "));
+        text.appendChild(el("span", "sa-set-opt-detail", opt.detail));
+      }
+      row.appendChild(radio);
+      row.appendChild(text);
+      group.appendChild(row);
+    }
+    return group;
+  }
+
+  function renderSettings(choices) {
+    const sel = lib.currentSelection(choices, settings, {
+      config: siteConfig,
+      activeLane: host.dataset.lane || null,
+      activeAgent: agentModel ? (/-0\.8B$/i.test(agentModel.base) ? "light" : "quality") : null,
+    });
+    settingsBody.textContent = "";
+    const groups = [
+      settingsGroup("Search model", "searchLane", choices.search, sel.searchLane, pickSearchLane),
+      settingsGroup("Answers", "agentLevel", choices.agent, sel.agentLevel, pickAgentLevel),
+      settingsGroup("Preload", "warm", choices.warm, sel.warm, (v) => pickSimple("warm", v)),
+      settingsGroup("Between pages", "persist", choices.persist, sel.persist, (v) => pickSimple("persist", v)),
+    ];
+    for (const g of groups) {
+      if (g) settingsBody.appendChild(g);
+    }
+    settingsBody.appendChild(storageSection());
+  }
+
+  /**
+   * Quota-managed storage this origin holds: the model cache, WebLLM's
+   * weights, whatever the service worker cached. Not the HTTP cache.
+   */
+  function storageSection() {
+    const wrap = el("div", "sa-set-group");
+    wrap.appendChild(el("div", "sa-set-legend", "Downloads on this device"));
+    const row = el("div", "sa-set-storage");
+    const size = el("span", "sa-set-opt-detail", "measuring…");
+    const clear = button("sa-btn", "Delete downloads", () => clearDownloads(size));
+    row.appendChild(size);
+    row.appendChild(clear);
+    wrap.appendChild(row);
+    showStorageUsage(size);
+    return wrap;
+  }
+
+  async function showStorageUsage(target) {
+    let text = "size unavailable in this browser";
+    try {
+      if (navigator.storage && navigator.storage.estimate) {
+        const { usage } = await navigator.storage.estimate();
+        text = Number(usage) > 0 ? lib.formatBytes(Number(usage)) : "nothing stored";
+      }
+    } catch (_) {
+      // leave the fallback text
+    }
+    target.textContent = text;
+  }
+
+  /**
+   * Delete every downloaded model. While a transport exists the engine holds
+   * the database open and deleteDatabase would block, so ask the engine;
+   * otherwise delete it here.
+   */
+  async function clearDownloads(target) {
+    target.textContent = "deleting…";
+    try {
+      if (search) {
+        await search.call("cache_clear", {}, { requestId: ++requestSeq, timeoutMs: 60000 });
+      } else if (window.indexedDB) {
+        await new Promise((resolve) => {
+          const req = indexedDB.deleteDatabase("eddie-models");
+          req.onsuccess = req.onerror = req.onblocked = () => resolve();
+        });
+      }
+      if (window.caches && caches.keys) {
+        for (const name of await caches.keys()) {
+          if (/webllm|mlc/i.test(name)) await caches.delete(name);
+        }
+      }
+      try {
+        localStorage.removeItem(AGENT_CONSENT_KEY);
+      } catch (_) {
+        // nothing to forget
+      }
+    } catch (err) {
+      console.warn("eddie: could not delete downloads", err);
+    }
+    showStorageUsage(target);
+    announce("Downloads deleted.");
+  }
+
+  function saveSetting(patch) {
+    settings = lib.writeSettings(localStore(), patch);
+    return settings;
+  }
+
+  /** Re-derive the effective config after a preference changed. */
+  async function applySettings() {
+    config = lib.effectiveConfig(siteConfig, settings, await currentChoices());
+  }
+
+  async function pickSearchLane(value) {
+    saveSetting({ searchLane: value });
+    await applySettings();
+    consentDeclined = false;
+    if (value === "none") {
+      // Forget the remembered lane so a later page does not warm it up again.
+      try {
+        localStorage.removeItem(SEARCH_CONSENT_KEY);
+      } catch (_) {
+        // nothing to forget
+      }
+    }
+    // The chosen lane may need a different tier than the one hosting search,
+    // and the next page should register that tier rather than the old one.
+    const lane = (laneInfo ? laneInfo.lanes : []).find((l) => l.id === value) || null;
+    const tier = lib.searchTierFor({ laneKind: lane ? lane.kind : null });
+    rememberSearchTier(tier);
+    if (!search) return;
+    await switchSearchTier(tier);
+    if (!search) return;
+    pendingConsentLane = value === "none" ? null : value;
+    pendingConsentKind = lane ? lane.kind : null;
+    postInit(value !== "none");
+  }
+
+  /** Forget the chosen agent so the next Ask re-detects it at the new level. */
+  async function reselectAgent() {
+    agentInfo = null;
+    agentModel = null;
+    askBtn.hidden = true;
+    askHint.hidden = true;
+    if (agent) {
+      agent.terminate();
+      agent = null;
+    }
+    await detectAgent();
+  }
+
+  async function pickAgentLevel(value) {
+    saveSetting({ agentLevel: value });
+    await applySettings();
+    await reselectAgent();
+  }
+
+  async function pickSimple(field, value) {
+    saveSetting({ [field]: value });
+    await applySettings();
+  }
+
+  async function resetSettings() {
+    settings = lib.clearSettings(localStore());
+    await applySettings();
+    await reselectAgent();
+    renderSettings(await currentChoices());
+    announce("Settings reset to this site's defaults.");
   }
 
   function declineConsent() {
@@ -1971,6 +2316,7 @@
   function closeModal() {
     if (!isOpen) return;
     isOpen = false;
+    if (settingsOpen) setSettingsOpen(false);
     clearTimeout(searchTimer);
     abortAgent("closed");
     backdrop.classList.remove("sa-open");

@@ -10,6 +10,7 @@
 - Inline retrieval answer blend requirement, split out from the (now agent-specific) Ask button story (0400-widget-ui/0400-qa-mode/0420).
 - Persistent-engine / tiered service-worker requirement covering `data-persist`, `data-warm`, the lite/dense/gpu service worker tiers, transport fallback to page-side workers, and state reuse across navigation (0400-widget-ui/0500-persistent-runtime/0510).
 - Runtime asset versioning requirement covering the build-derived `EDDIE_ASSET_VERSION` stamp, its separation from the index's `?v=`, and the `immutable` caching that follows (0400-widget-ui/0500-persistent-runtime/0520).
+- Visitor settings panel requirement: the gear menu, the four remembered preferences, the site config as a ceiling, `data-dense-runtime="off"`, lane pinning through `init`, and deleting downloaded models (0400-widget-ui/0500-persistent-runtime/0530).
 
 ### Changed
 

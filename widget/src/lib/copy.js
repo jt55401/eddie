@@ -55,8 +55,15 @@
    * Drop degraded notes that describe the index design rather than a failure
    * (an index without a dense lane or sparse arm is not "degraded").
    */
+  /**
+   * Drop the "degraded" entries that describe how the index or the visitor
+   * chose to run, not something going wrong: an index built without a lane,
+   * and a visitor who picked keyword-only search in the settings panel.
+   */
   function filterDesignDegraded(degraded) {
-    return (degraded || []).filter((d) => !/index has no (dense lane|sparse arm)/.test(d));
+    return (degraded || []).filter(
+      (d) => !/index has no (dense lane|sparse arm)|dense search is turned off/.test(d)
+    );
   }
 
   /** Human notice when a semantic arm is missing, or null when nothing to say. */

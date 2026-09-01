@@ -149,3 +149,24 @@ test("laneDownloadBytes prefers the manifest's runtime.bytes over the table esti
   assert.equal(L.laneDownloadBytes({ model: "BAAI/bge-small-en-v1.5", runtime: { kind: "wasm-candle" } }), 134e6, "no bytes: table estimate");
   assert.equal(L.laneDownloadBytes({ model: "x/unknown", runtime: { kind: "wasm-candle", bytes: 0 } }), null, "zero or absent bytes and unknown repo: unknown");
 });
+
+test("chooseDenseLanes: turned off, and pinned to one lane", () => {
+  const manifest = {
+    dense: [
+      { id: "minilm", model: "m", family: "bert", runtime: { kind: "wasm-candle", files: ["config.json", "tokenizer.json", "model.safetensors"] } },
+      { id: "bge", model: "b", runtime: { kind: "webgpu-onnx", repo: "x/y", dtype: "q4" } },
+    ],
+  };
+  const off = L.chooseDenseLanes(manifest, { denseRuntime: "off", hasWebGpu: true });
+  assert.deepEqual(off.candidates, []);
+  assert.match(off.reason, /turned off/);
+
+  const pinned = L.chooseDenseLanes(manifest, { denseRuntime: "auto", hasWebGpu: true, laneId: "minilm" });
+  assert.deepEqual(pinned.candidates.map((l) => l.id), ["minilm"]);
+
+  // Pinning a lane this host cannot run is no dense arm, not a silent swap
+  // to the other lane.
+  const unrunnable = L.chooseDenseLanes(manifest, { denseRuntime: "auto", hasWebGpu: false, laneId: "bge" });
+  assert.deepEqual(unrunnable.candidates, []);
+  assert.match(unrunnable.reason, /lane bge cannot run here/);
+});

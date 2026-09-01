@@ -136,6 +136,11 @@
     const lanes = (manifest && Array.isArray(manifest.dense)) ? manifest.dense : [];
     const runtime = (opts && opts.denseRuntime) || "auto";
     const hasWebGpu = !!(opts && opts.hasWebGpu);
+    // A pinned lane id (the visitor picked one in the settings panel, or the
+    // site set data-dense-lane): the choice narrows to that lane, and if it
+    // is not runnable here the result is no dense arm rather than a silently
+    // different model.
+    const pinned = (opts && opts.laneId) ? String(opts.laneId) : null;
     const webgpu = lanes.filter(isWebGpuLane);
     const skipped = [];
     const wasm = lanes.filter(isWasmLane).filter((lane) => {
@@ -146,6 +151,9 @@
     if (lanes.length === 0) {
       return { candidates: [], skipped, reason: "index has no dense lane" };
     }
+    if (runtime === "off") {
+      return { candidates: [], skipped, reason: "dense search is turned off" };
+    }
     let candidates;
     if (runtime === "wasm") {
       candidates = wasm;
@@ -154,9 +162,11 @@
     } else {
       candidates = hasWebGpu ? webgpu.concat(wasm) : wasm;
     }
+    if (pinned) candidates = candidates.filter((lane) => lane.id === pinned);
     let reason = null;
     if (candidates.length === 0) {
-      if (runtime === "wasm") reason = skipped.length ? "no wasm-candle lane the WASM loader can run" : "index has no wasm-candle lane";
+      if (pinned) reason = `lane ${pinned} cannot run here`;
+      else if (runtime === "wasm") reason = skipped.length ? "no wasm-candle lane the WASM loader can run" : "index has no wasm-candle lane";
       else if (!hasWebGpu && webgpu.length && !wasm.length) reason = "no WebGPU adapter";
       else if (runtime === "webgpu" && !hasWebGpu) reason = "no WebGPU adapter";
       else if (runtime === "webgpu") reason = "index has no webgpu-onnx lane";
