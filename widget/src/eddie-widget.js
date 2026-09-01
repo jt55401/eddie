@@ -770,7 +770,7 @@
       await legacyCleanup;
       registration = await lib.registerServiceWorker({
         container: navigator.serviceWorker,
-        url: lib.assetUrl(baseUrl, lib.swScriptName(tier), version),
+        url: lib.assetUrl(baseUrl, lib.swScriptName(tier), lib.ASSET_VERSION),
         scope: lib.swScope(baseUrl, tier),
       });
       sw = new lib.ServiceWorkerTransport(registration, { kind: channelKind, version });
@@ -860,7 +860,7 @@
     if (t && t.closed) t = null;
     if (!t) {
       try {
-        t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-worker.js", version));
+        t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-worker.js", lib.ASSET_VERSION));
       } catch (err) {
         showInitError("Couldn't start the search worker: " + (err && err.message ? err.message : err), false);
         return null;
@@ -1679,7 +1679,7 @@
         console.info("eddie: agent falls back to a page worker");
         plan.sw.terminate();
       }
-      if (!t) t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-agent-worker.js", version), { type: "module" });
+      if (!t) t = new lib.DedicatedWorkerTransport(lib.assetUrl(baseUrl, "eddie-agent-worker.js", lib.ASSET_VERSION), { type: "module" });
       attachAgent(t);
       return t;
     })().finally(() => {

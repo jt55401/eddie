@@ -69,14 +69,20 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  /** Runtime-asset `?v=`, stamped by widget/build.sh; see lib/urls.js. */
+  const ASSET_VERSION =
+    typeof EDDIE_ASSET_VERSION === "string" && EDDIE_ASSET_VERSION ? EDDIE_ASSET_VERSION : null;
+
   /**
-   * URL of the full widget next to the boot script, carrying the boot
-   * script's `?v=` (or the index URL's when the script has none).
+   * URL of the full widget next to the boot script, versioned by the asset
+   * hash so a content rebuild does not re-download it. An explicit `?v=` on
+   * the boot script's own URL wins (a site pinning a build); the index's
+   * `?v=` is the last resort, for a bundle without the stamp.
    */
   function widgetScriptUrl(scriptHref, indexUrl) {
     const base = scriptHref.split(/[?#]/)[0];
     const dir = base.substring(0, base.lastIndexOf("/") + 1);
-    const v = bootVersionOf(scriptHref) || bootVersionOf(indexUrl);
+    const v = bootVersionOf(scriptHref) || ASSET_VERSION || bootVersionOf(indexUrl);
     return dir + "eddie-widget.js" + (v ? "?v=" + encodeURIComponent(v) : "");
   }
 

@@ -70,15 +70,15 @@ function configureTransformers(tf) {
 }
 
 const wasmInits = {}; // variant -> Promise
-function loadWasm(baseUrl, version, variant) {
+function loadWasm(baseUrl, variant) {
   const v = variant || "lite";
   if (v === "lite") {
-    if (!wasmInits.lite) wasmInits.lite = initLiteWasm({ module_or_path: lib.assetUrl(baseUrl, EDDIE_LITE_WASM, version) }).then(() => liteWasmApi);
+    if (!wasmInits.lite) wasmInits.lite = initLiteWasm({ module_or_path: lib.assetUrl(baseUrl, EDDIE_LITE_WASM, lib.ASSET_VERSION) }).then(() => liteWasmApi);
     return wasmInits.lite;
   }
   if (v === "dense") {
     if (!initDenseWasm) return Promise.reject(tierError("dense", "CPU embedder"));
-    if (!wasmInits.dense) wasmInits.dense = initDenseWasm({ module_or_path: lib.assetUrl(baseUrl, EDDIE_DENSE_WASM, version) }).then(() => denseWasmApi);
+    if (!wasmInits.dense) wasmInits.dense = initDenseWasm({ module_or_path: lib.assetUrl(baseUrl, EDDIE_DENSE_WASM, lib.ASSET_VERSION) }).then(() => denseWasmApi);
     return wasmInits.dense;
   }
   return Promise.reject(new Error(`unknown wasm variant ${String(variant)}`));

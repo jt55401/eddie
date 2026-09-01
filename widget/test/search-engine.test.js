@@ -245,7 +245,7 @@ function makeVariantEngine(manifest, opts) {
   const engine = SE.createSearchEngine({
     lib,
     post: (m) => posted.push(m),
-    loadWasm: async (baseUrl, version, variant) => {
+    loadWasm: async (baseUrl, variant) => {
       loads.push(variant);
       if (variant === "dense" && o.noDense) throw new Error("no dense module in this host");
       return variant === "dense" ? v.dense : v.lite;

@@ -88,18 +88,31 @@ harmless (the second mount is skipped).
         defer></script>
 ```
 
-`?v=` on the script `src` (or, failing that, on `data-index-url`) is also
-appended to `eddie-widget.js`, `eddie-worker.js`, `eddie-lite.js`,
-`eddie-lite.wasm`, `eddie-dense.js`, `eddie-dense.wasm`,
-`eddie-agent-worker.js`, `eddie-sw-*.js`, the index sidecars and bundled
-model files, so a redeploy never pairs cached glue with a new binary (the
-service workers are registered with `updateViaCache: "none"`, so their
-static imports bypass the HTTP cache at install). With every asset URL
-versioned, `/eddie/*` can be served with a one-year `immutable`
-Cache-Control; `hugo-module/example/_headers` is a Cloudflare Pages /
-Netlify example that does that while keeping the two unversioned loader
-URLs revalidating. When `data-index-url` is absent the index is `index.ed`
-next to the widget script.
+There are two `?v=` values, and they move on different schedules.
+
+The **asset version** is a hash of the sources and binaries that produced
+`dist/`, stamped into every bundle by `widget/build.sh` as
+`EDDIE_ASSET_VERSION` and used for `eddie-widget.js`, `eddie-worker.js`,
+`eddie-agent-worker.js`, `eddie-sw-*.js`, both wasm modules and their glue
+(and for the service workers' own static imports, which build.sh writes
+with the same value). It changes when Eddie is upgraded. An explicit `?v=`
+on the boot script's `src` overrides it for `eddie-widget.js`, which is how
+a site pins a build.
+
+The **index version** is the `?v=` on `data-index-url`, which the Hugo
+partial derives from the index's content (or the build time). It reaches
+the index, its `index.<lane>.ed` sidecars and any site-bundled model files:
+what one `eddie index` run writes together.
+
+Sharing one value between them re-downloaded the whole engine, and
+reinstalled the service worker, on every content deploy. Keeping them apart
+means a rebuilt site fetches a new index and nothing else.
+
+Every asset URL is versioned, so `/eddie/*` can be served with a one-year
+`immutable` Cache-Control; `hugo-module/example/_headers` is a Cloudflare
+Pages / Netlify example that does that while keeping `eddie-boot.js` (the
+one URL the page names without a `?v=`) revalidating. When `data-index-url`
+is absent the index is `index.ed` next to the widget script.
 
 ## What is fetched when
 
@@ -253,9 +266,10 @@ downloads an uncached lane without asking (the site owner's choice; still
 not under Data Saver). `off` waits for the first search. A service worker
 that already reports `ready` is adopted without any of this.
 
-**Redeploys.** `?v=` changes the service worker URL, so the browser
-installs a new worker; an `init` with a different index URL reloads the
-index inside a live worker. A trapped WASM panic leaves the engine dead
+**Redeploys.** A new asset version changes the service worker URL, so the
+browser installs a new worker; a content-only deploy leaves that URL alone
+and the running worker just reloads the index (an `init` with a different
+index URL). A trapped WASM panic leaves the engine dead
 until the browser restarts the worker: the page falls back to page-side
 workers for the rest of its life (Retry) and the next page gets a fresh
 worker once Chrome has stopped the old one.

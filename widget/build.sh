@@ -229,6 +229,33 @@ if grep -q 'from "onnxruntime' "$DIST/eddie-transformers-sw.js"; then
   exit 1
 fi
 
+# Asset version: a hash of everything that produced dist/, stamped into every
+# bundle as EDDIE_ASSET_VERSION and used as the `?v=` of every runtime asset
+# URL (widget, workers, wasm, glue, service workers). Deliberately not the
+# index's `?v=`: that changes on every content rebuild, and hanging the
+# engine off it re-downloaded the whole runtime -- and reinstalled the
+# service worker -- for every returning visitor on every deploy. The inputs
+# are sources and built binaries, never dist/ itself, so the value does not
+# depend on what it is stamped into.
+ASSET_VERSION="$(
+  {
+    find "$SCRIPT_DIR/src" -type f -name '*.js' -print0 | sort -z | xargs -0 cat
+    cat "$SCRIPT_DIR/build.sh" "$TF_WEB"
+    for variant in lite dense; do
+      for target in no-modules web; do
+        d="$(pkg_dir "$variant" "$target")"
+        cat "$d/$(out_name "$variant")_bg.wasm" "$d/$(out_name "$variant").js"
+      done
+    done
+    printf '%s\n' "$TRANSFORMERS_VERSION" "$ORT_VERSION" "$WEBLLM_URL"
+  } | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | cut -c1-12
+)"
+echo "==> Asset version $ASSET_VERSION"
+ASSET_VERSION_DEFINE="const EDDIE_ASSET_VERSION = \"$ASSET_VERSION\";"
+# The service workers' static imports are literal specifiers, so they carry
+# the same `?v=` directly.
+V="?v=$ASSET_VERSION"
+
 # Each JS entry point is the concatenation of the pure modules it uses
 # (widget/src/lib/*.js, exposed as `EddieLib`) and its main file. No bundler:
 # the lib files attach to a lexical `EddieLib` when one is in scope.
@@ -265,32 +292,45 @@ bundle() {
   fi
 }
 
-bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "" boot.js
-bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js copy.js agent.js transport.js warm.js
-bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js copy.js download.js search-engine.js
-bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-llm.js agent-engine.js
+bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "$ASSET_VERSION_DEFINE" boot.js
+bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "$ASSET_VERSION_DEFINE" config.js urls.js copy.js agent.js transport.js warm.js
+bundle "$DIST/eddie-worker.js"       worker.js             plain "$ASSET_VERSION_DEFINE" urls.js lanes.js copy.js download.js search-engine.js
+bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "$ASSET_VERSION_DEFINE" agent.js agent-llm.js agent-engine.js
 
 # The agent (agent.js, agent-llm.js, agent-engine.js) is bundled into the
 # agent tier only; the gpu tier hosts WebGPU search and never imports WebLLM.
 SW_LIBS=(urls.js lanes.js copy.js download.js search-engine.js)
 SW_AGENT_LIBS=(agent.js agent-llm.js agent-engine.js)
-SW_LITE_IMPORTS="import initLiteWasm, * as liteWasmApi from \"./eddie-lite-esm.js\";
+SW_LITE_IMPORTS="$ASSET_VERSION_DEFINE
+import initLiteWasm, * as liteWasmApi from \"./eddie-lite-esm.js$V\";
 const EDDIE_LITE_WASM = \"$LITE_WASM_FILE\";"
 bundle "$DIST/eddie-sw-lite.js" eddie-sw.js module "$SW_LITE_IMPORTS
 const EDDIE_SW_TIER = \"lite\";
 const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, webllm = null, transformers = null;" "${SW_LIBS[@]}"
 bundle "$DIST/eddie-sw-dense.js" eddie-sw.js module "$SW_LITE_IMPORTS
-import initDenseWasm, * as denseWasmApi from \"./eddie-dense-esm.js\";
+import initDenseWasm, * as denseWasmApi from \"./eddie-dense-esm.js$V\";
 const EDDIE_SW_TIER = \"dense\";
 const EDDIE_DENSE_WASM = \"$DENSE_WASM_FILE\", webllm = null, transformers = null;" "${SW_LIBS[@]}"
 bundle "$DIST/eddie-sw-gpu.js" eddie-sw.js module "$SW_LITE_IMPORTS
-import * as transformers from \"./eddie-transformers-sw.js\";
+import * as transformers from \"./eddie-transformers-sw.js$V\";
 const EDDIE_SW_TIER = \"gpu\";
 const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, webllm = null;" "${SW_LIBS[@]}"
-bundle "$DIST/eddie-sw-agent.js" eddie-sw.js module "import * as webllm from \"$WEBLLM_URL\";
+bundle "$DIST/eddie-sw-agent.js" eddie-sw.js module "$ASSET_VERSION_DEFINE
+import * as webllm from \"$WEBLLM_URL\";
 const EDDIE_SW_TIER = \"agent\";
 const initLiteWasm = null, liteWasmApi = null, EDDIE_LITE_WASM = null,
       initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, transformers = null;" "${SW_AGENT_LIBS[@]}"
+
+# Every bundle that builds a runtime asset URL must carry the stamp: a
+# bundle call that forgot the define would silently fall back to no `?v=`
+# and serve a stale engine out of the HTTP cache after an upgrade.
+for f in eddie-boot.js eddie-widget.js eddie-worker.js eddie-agent-worker.js \
+         eddie-sw-lite.js eddie-sw-dense.js eddie-sw-gpu.js eddie-sw-agent.js; do
+  grep -q "const EDDIE_ASSET_VERSION = \"$ASSET_VERSION\";" "$DIST/$f" || {
+    echo "dist/$f is missing the EDDIE_ASSET_VERSION stamp (its bundle call needs \$ASSET_VERSION_DEFINE)" >&2
+    exit 1
+  }
+done
 
 # widget/assets.list is the single source of truth for dist/'s file list;
 # every other piece of release/integration plumbing reads it instead of

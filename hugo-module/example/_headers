@@ -1,18 +1,28 @@
 # Cache-Control for the Eddie runtime on Cloudflare Pages or Netlify: copy
 # this file to your site's static/ directory (it is served as /_headers).
 #
-# Every runtime asset the widget fetches carries ?v=<index hash> (the Hugo
-# partial derives it from the index), so a new deploy uses new URLs and the
-# files themselves can be cached for a year: eddie-lite.wasm, eddie-dense.wasm,
-# eddie-worker.js, eddie-sw-*.js, index.ed and its index.<lane>.ed sidecars,
-# models/<lane>/*. Both hosts match rules on the path only; the query string
-# is part of the browser's and the CDN's cache key, which is what makes ?v=
-# work with `immutable`.
+# Two independent `?v=` values, so a content deploy does not re-download the
+# engine:
 #
-# The two scripts the page references without ?v= (eddie-boot.js by default,
-# eddie-widget.js with loader = "full") must keep revalidating, or a widget
-# update would wait a year. Later rules override earlier ones for the same
-# header on both hosts.
+#   the runtime assets (eddie-widget.js, eddie-worker.js, eddie-sw-*.js,
+#   eddie-lite.wasm, eddie-dense.wasm and the wasm glue) carry
+#   ?v=<asset hash>, stamped into every bundle by widget/build.sh from the
+#   files that produced them. It changes when Eddie is upgraded, not when
+#   the site is rebuilt.
+#
+#   index.ed, its index.<lane>.ed sidecars and models/<lane>/* carry
+#   ?v=<index hash> from the Hugo partial. Those really are rebuilt together.
+#
+# Both hosts match rules on the path only; the query string is part of the
+# browser's and the CDN's cache key, which is what makes ?v= work with
+# `immutable`.
+#
+# eddie-boot.js is the one URL the page references without a ?v=, so it is
+# also the one that has to keep revalidating: it carries the asset hash the
+# rest of the runtime is fetched with. 300 seconds bounds how long a browser
+# can keep serving an old build's hash after an upgrade; the revalidation
+# itself is a 304 with no body. Later rules override earlier ones for the
+# same header on both hosts.
 
 /eddie/*
   Cache-Control: public, max-age=31536000, immutable
@@ -20,5 +30,10 @@
 /eddie/eddie-boot.js
   Cache-Control: public, max-age=300, must-revalidate
 
-/eddie/eddie-widget.js
-  Cache-Control: public, max-age=300, must-revalidate
+# With `loader = "full"` the page references eddie-widget.js directly, again
+# without a ?v=, so it needs the same treatment -- and then it revalidates on
+# every visit instead of being fetched once. That is the trade the boot
+# loader exists to avoid; uncomment only if you set loader = "full".
+#
+# /eddie/eddie-widget.js
+#   Cache-Control: public, max-age=300, must-revalidate

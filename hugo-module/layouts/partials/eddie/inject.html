@@ -37,6 +37,13 @@
   the build timestamp, which busts the cache on every build instead of
   only on content changes -- acceptable since static/eddie/index.ed is
   typically rebuilt only when the site itself is rebuilt.
+
+  This value reaches only the index, its index.<lane>.ed sidecars and any
+  site-bundled model files: things one `eddie index` run writes together.
+  The runtime assets (eddie-widget.js, the workers, the wasm and its glue,
+  the service workers) carry their own `?v=`, a hash of the files that
+  built them, stamped into every bundle by widget/build.sh. Sharing this
+  one with them re-downloaded the whole engine on every deploy.
 */}}
 {{- $cacheBust := now.Unix -}}
 {{- with resources.Get $indexRelPath -}}

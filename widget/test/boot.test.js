@@ -36,6 +36,9 @@ test("the full widget URL sits next to the boot script and carries its ?v= (or t
   assert.equal(B.widgetScriptUrl("https://x.test/eddie/eddie-boot.js?v=abc", "/eddie/index.ed?v=zzz"), "https://x.test/eddie/eddie-widget.js?v=abc");
   assert.equal(B.widgetScriptUrl("https://x.test/eddie/eddie-boot.js", "/eddie/index.ed?v=1a2b"), "https://x.test/eddie/eddie-widget.js?v=1a2b");
   assert.equal(B.widgetScriptUrl("https://x.test/assets/e/eddie-boot.js#frag", ""), "https://x.test/assets/e/eddie-widget.js");
+  // Without a stamp (loaded from src/) the index version is still the last
+  // resort, so a deployment that predates the asset hash keeps working; in a
+  // real bundle EDDIE_ASSET_VERSION sits between those two.
   assert.equal(B.bootVersionOf("/eddie/index.ed?x=1&v=a%2Fb"), "a/b");
   assert.equal(B.bootVersionOf("/eddie/index.ed"), null);
 });

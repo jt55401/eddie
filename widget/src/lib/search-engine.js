@@ -9,7 +9,7 @@
 //
 //   createSearchEngine({
 //     post(message)                 broadcast sink: status and ready events
-//     loadWasm(baseUrl, version, variant)
+//     loadWasm(baseUrl, variant)
 //                                   -> Promise of the wasm-bindgen API object;
 //                                   variant is "lite" (always first) or
 //                                   "dense" (only when a wasm-candle lane is
@@ -215,7 +215,7 @@
       }
       let api;
       try {
-        api = await env.loadWasm(state.baseUrl, state.version, variant);
+        api = await env.loadWasm(state.baseUrl, variant);
       } catch (err) {
         if (typeof WebAssembly === "object" && (err instanceof WebAssembly.CompileError || err instanceof WebAssembly.LinkError)) {
           throw unsupported("This browser can't run the search engine (WebAssembly SIMD is required).");

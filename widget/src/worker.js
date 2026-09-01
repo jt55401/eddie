@@ -19,15 +19,15 @@ const lib = EddieLib;
 
 const loaded = {}; // variant -> Promise of the wasm-bindgen API object
 
-function loadVariant(baseUrl, version, variant) {
+function loadVariant(baseUrl, variant) {
   if (variant !== "lite" && variant !== "dense") throw new Error(`unknown wasm variant ${String(variant)}`);
   if (!loaded[variant]) {
     loaded[variant] = (async () => {
-      importScripts(lib.assetUrl(baseUrl, `eddie-${variant}.js`, version));
+      importScripts(lib.assetUrl(baseUrl, `eddie-${variant}.js`, lib.ASSET_VERSION));
       // eddie-dense.js is renamed by build.sh so both glues can share this
       // global scope (a second `let wasm_bindgen` would be a SyntaxError).
       const api = variant === "dense" ? wasm_bindgen_dense : wasm_bindgen;
-      await api({ module_or_path: lib.assetUrl(baseUrl, `eddie-${variant}.wasm`, version) });
+      await api({ module_or_path: lib.assetUrl(baseUrl, `eddie-${variant}.wasm`, lib.ASSET_VERSION) });
       return api;
     })();
     loaded[variant].catch(() => {
@@ -39,7 +39,7 @@ function loadVariant(baseUrl, version, variant) {
 
 const engine = lib.createSearchEngine({
   post: (message) => self.postMessage(message),
-  loadWasm: (baseUrl, version, variant) => loadVariant(baseUrl, version, variant || "lite"),
+  loadWasm: (baseUrl, variant) => loadVariant(baseUrl, variant || "lite"),
   loadTransformers: () => import(TRANSFORMERS_URL),
   canRunWebGpuLane: true,
 });
