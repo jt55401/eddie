@@ -83,6 +83,30 @@ test("init: loads wasm and index, reports statuses, then asks consent for the fi
   assert.deepEqual(st.lanes.map((l) => l.id), ["bge", "qwen3e"]);
 });
 
+test("a second init on a warm engine re-announces index_ready", async () => {
+  // A service worker that already holds the index does no fetching, so
+  // without this the page that has just connected to it never learns the
+  // index is there, never becomes searchable, and its search box silently
+  // does nothing while the engine sits in awaiting_consent.
+  const { engine, posted } = makeEngine();
+  await engine.handle(INIT);
+  assert.equal(engine.phase, "awaiting_consent");
+  assert.ok(posted.some((m) => m.state === "loading_index"), "the first init fetches the index");
+
+  posted.length = 0;
+  await engine.handle(INIT);
+  assert.equal(posted.filter((m) => m.state === "loading_index").length, 0, "the index is not re-fetched");
+  const ready = posted.find((m) => m.state === "index_ready");
+  assert.ok(ready, "index_ready is re-announced to the newly connected host");
+  assert.equal(ready.manifest.chunks, 3);
+  assert.deepEqual(ready.lanes.map((l) => l.id), ["bge", "qwen3e"]);
+
+  // And it is still searchable on that second init.
+  const replies = [];
+  await engine.handle({ type: "search", requestId: 9, query: "alpha" }, (m) => replies.push(m));
+  assert.equal(replies[0].type, "search_result");
+});
+
 test("keyword search works from index_ready on; requests before init get the not-loaded error", async () => {
   const { engine, posted } = makeEngine();
   const replies = [];

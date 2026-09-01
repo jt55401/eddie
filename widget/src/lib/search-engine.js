@@ -195,7 +195,13 @@
       try {
         state.phase = "loading";
         await ensureWasm();
-        await ensureIndex();
+        const reload = await ensureIndex();
+        // A worker that already holds this index does no fetching and posts
+        // nothing, but a page that has just connected to it still has to be
+        // told the index is there: `index_ready` is what makes the host
+        // searchable, and without it a second page's search box does nothing
+        // while the engine sits in awaiting_consent.
+        if (!reload) postIndexReady();
         await ensureDb();
         await ensureGpu();
         chooseLanes();
@@ -290,9 +296,10 @@
       state.sidecarBytes = Object.create(null);
     }
 
+    /** Loads the index if this host does not already hold it. True when it fetched. */
     async function ensureIndex() {
       if (!state.indexUrl) throw new Error("init: indexUrl is required");
-      if (state.indexLoaded && state.loadedIndexUrl === state.indexUrl) return;
+      if (state.indexLoaded && state.loadedIndexUrl === state.indexUrl) return false;
       postStatus("loading_index", { progress: null });
       let last = 0;
       const bytes = await lib.fetchBytes(state.indexUrl, {
@@ -320,7 +327,17 @@
       state.laneIndex = 0;
       state.gpu = null;
       state.siteSizes = Object.create(null);
-      postStatus("index_ready", { manifest: manifestSummary(), lanes: laneList(), hostSkippedLanes: state.hostSkipped.slice() });
+      postIndexReady();
+      return true;
+    }
+
+    function postIndexReady() {
+      if (!state.indexLoaded) return;
+      postStatus("index_ready", {
+        manifest: manifestSummary(),
+        lanes: laneList(),
+        hostSkippedLanes: state.hostSkipped.slice(),
+      });
     }
 
     async function ensureGpu() {

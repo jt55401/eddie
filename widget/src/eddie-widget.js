@@ -1208,6 +1208,13 @@
       case "consent_required":
         setWorkerState("awaiting_consent");
         rememberLanes(msg);
+        // The index is loaded whenever consent is asked for, so keyword and
+        // sparse search work right now, whatever the visitor decides about
+        // the model. Belt and braces with the engine's index_ready: a host
+        // that never became searchable has a search box that silently does
+        // nothing.
+        searchable = true;
+        resolveInitWaiters();
         showStatus(false);
         pendingConsentLane = msg.lane && msg.lane.id ? msg.lane.id : null;
         pendingConsentKind = msg.lane && msg.lane.kind ? msg.lane.kind : null;
