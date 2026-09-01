@@ -18,37 +18,37 @@
 # `immutable`.
 #
 # eddie-boot.js is the one URL the page references without a ?v=, so it is
-# the one that has to keep revalidating: it carries the asset hash the rest
-# of the runtime is fetched with. It is deliberately NOT covered by a
-# `/eddie/*` wildcard -- Cloudflare Pages merges the directives of every
-# matching rule rather than letting a later rule replace an earlier one, so
-# a wildcard that says `immutable` makes eddie-boot.js immutable too and the
-# site cannot ship an upgrade until the browser's cache expires. Naming the
-# long-lived files explicitly is longer, but it is the version that works.
+# the one that should keep revalidating: it carries the asset hash the rest
+# of the runtime is fetched with.
+#
+# Two things measured on Cloudflare Pages (www.jason-grey.com, 2026-09-01)
+# that the rules below cannot get around:
+#
+#   Pages MERGES the directives of every matching rule rather than letting a
+#   later rule replace an earlier one, so `immutable` from the wildcard
+#   reaches eddie-boot.js too. Naming the long-lived files one per line
+#   instead of using the wildcard was worse: `immutable` was then dropped
+#   from all of them.
+#
+#   The zone's Browser Cache TTL wins over a smaller max-age here, so the
+#   300 below came back as 14400.
+#
+# The result on that zone is `max-age=14400, immutable, must-revalidate` for
+# the loader: an Eddie upgrade reaches a returning visitor within four hours
+# rather than five minutes. Everything else is correctly immutable, which is
+# the part that matters. Set Browser Cache TTL to "Respect Existing Headers"
+# in the Cloudflare dashboard if you want the five minutes.
 
-/eddie/eddie-widget.js
-/eddie/eddie-worker.js
-/eddie/eddie-agent-worker.js
-/eddie/eddie-sw-lite.js
-/eddie/eddie-sw-dense.js
-/eddie/eddie-sw-gpu.js
-/eddie/eddie-sw-agent.js
-/eddie/eddie-transformers-sw.js
-/eddie/eddie-lite.js
-/eddie/eddie-lite-esm.js
-/eddie/eddie-lite.wasm
-/eddie/eddie-dense.js
-/eddie/eddie-dense-esm.js
-/eddie/eddie-dense.wasm
-/eddie/index.ed
-/eddie/index.*.ed
-/eddie/models/*
+/eddie/*
   Cache-Control: public, max-age=31536000, immutable
 
 /eddie/eddie-boot.js
   Cache-Control: public, max-age=300, must-revalidate
 
 # With `loader = "full"` the page references eddie-widget.js directly, again
-# without a ?v=. Move it out of the list above and give it the boot script's
-# rule instead; it then revalidates on every visit rather than being fetched
-# once, which is the trade the boot loader exists to avoid.
+# without a ?v=, so it needs the same treatment -- and then it revalidates on
+# every visit instead of being fetched once. That is the trade the boot
+# loader exists to avoid; uncomment only if you set loader = "full".
+#
+# /eddie/eddie-widget.js
+#   Cache-Control: public, max-age=300, must-revalidate
