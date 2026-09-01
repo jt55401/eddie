@@ -80,11 +80,15 @@ comments explaining the two versions. It buys the redeploy row below.
 
 ## Measurements
 
-Microsoft Edge 141 headless, driven by Playwright against a local static
+Microsoft Edge headless, driven by Playwright against a local static
 server that brotli-compresses what Cloudflare Pages would (JS, wasm; `.ed`
 and model files travel raw) and serves `hugo-module/example/_headers`'s
-cache policy. Bytes are counted at the server for site assets and from
-response headers for external origins. The site is www.jason-grey.com built
+cache policy. Site bytes are counted at that server. External bytes are
+counted at a logging proxy the browser is pointed at, not from the page's
+own network events: a service worker's `fetch` never surfaces in the page
+context, so a page-level listener would have reported "no external
+traffic" whether or not the worker was downloading a model. The site is
+www.jason-grey.com built
 by Hugo 0.165 against this branch's `hugo-module`, with an index built by
 this branch's CLI:
 
@@ -102,8 +106,22 @@ eddie index --content-dir .../content --cms hugo \
 shadow root, so the harness reopens it via `attachShadow` to click the real
 consent buttons; nothing else about the page is instrumented.
 
-Every number below is `/eddie/*` only. The rest of the page (HTML, CSS,
-fonts, images) is 447 KB on a first visit and is unchanged by any of this.
+Site numbers below are `/eddie/*` only. The rest of the page (HTML, CSS,
+fonts, images) is 447 KB on a first visit and is unchanged by any of this;
+so is the browser's own telemetry, which the proxy also sees and which is
+excluded here.
+
+The tiers' import graphs, which is what the whole split comes down to:
+
+```
+eddie-sw-lite.js   ./eddie-lite-esm.js
+eddie-sw-dense.js  ./eddie-lite-esm.js  ./eddie-dense-esm.js
+eddie-sw-gpu.js    ./eddie-lite-esm.js  ./eddie-transformers-sw.js
+eddie-sw-agent.js  https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.84/+esm
+```
+
+The gpu worker has no WebLLM import at all, so a WebGPU search consent
+cannot fetch it; the agent worker has no wasm and no transformers.js.
 
 | Scenario | Site bytes | External |
 |---|---:|---:|
