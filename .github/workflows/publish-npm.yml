@@ -146,6 +146,11 @@ jobs:
         working-directory: ${{ matrix.path }}
         env:
           IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+          # setup-node's registry-url writes an .npmrc that reads this. Empty
+          # when the secret is not set, and npm then falls back to the OIDC
+          # trusted publisher configured for each package -- so whichever of
+          # the two is in place, publishing works.
+          NODE_AUTH_TOKEN: ${{ secrets.NODE_AUTH_TOKEN }}
         run: |
           set -euo pipefail
           if [[ "$IS_DRY_RUN" == "true" ]]; then
