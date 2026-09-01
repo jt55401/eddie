@@ -152,17 +152,20 @@ jobs:
         run: bash widget/build.sh
 
       - name: Report artifact sizes and enforce budgets
-        # Default-path budgets (brotli) plus the opt-in dense module; the
-        # numbers are the script's defaults, repeated here so a change is a
-        # visible diff in the workflow (docs/plans/2026-08-30-efficient-defaults.md).
+        # Default-path budgets (brotli) plus the opt-in dense module and the
+        # two tier guards; the numbers are the script's defaults, repeated
+        # here so a change is a visible diff in the workflow
+        # (docs/plans/2026-09-01-efficient-defaults-pass2.md).
         env:
-          BOOT_BROTLI_BUDGET_BYTES: "4096"
-          WIDGET_BROTLI_BUDGET_BYTES: "33500"
+          BOOT_BROTLI_BUDGET_BYTES: "3700"
+          WIDGET_BROTLI_BUDGET_BYTES: "28500"
           WORKER_BROTLI_BUDGET_BYTES: "16500"
-          LITE_WASM_BROTLI_BUDGET_BYTES: "230000"
+          LITE_WASM_BROTLI_BUDGET_BYTES: "215000"
           WASM_RAW_BUDGET_BYTES: "3700000"
           WASM_GZIP_BUDGET_BYTES: "1150000"
-          WASM_BROTLI_BUDGET_BYTES: "820000"
+          WASM_BROTLI_BUDGET_BYTES: "780000"
+          SW_GPU_BROTLI_BUDGET_BYTES: "18500"
+          SW_AGENT_BROTLI_BUDGET_BYTES: "10000"
         run: bash scripts/report-asset-sizes.sh
 
       - name: Verify widget artifacts

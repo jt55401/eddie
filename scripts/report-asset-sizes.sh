@@ -73,16 +73,24 @@ mkdir -p "$DIST_DIR"
 
 cat "$REPORT_MD"
 
-# Budgets (bytes). Measured 2026-08-30, opt-level=s, no wasm-opt:
-#   boot 3.2 KB br, widget 29.2 KB br, worker 14.5 KB br, lite wasm 200 KB br,
-#   dense wasm 3.60 MB raw / 1.05 MB gzip / 725 KB br.
-BOOT_BROTLI_BUDGET_BYTES="${BOOT_BROTLI_BUDGET_BYTES:-4096}"
-WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-33500}"
+# Budgets (bytes), tightened to the pass-2 measurements plus about 10 %, so a
+# regression is caught rather than absorbed. Measured 2026-09-01,
+# opt-level=s, no wasm-opt: boot 3,330 br, widget 25,943 br (26,149 with the
+# asset-version stamp), worker 15,056 br, lite wasm 200,086 br, dense wasm
+# 3,596,914 raw / 1,068,449 gzip / 731,823 br, sw-gpu 16,622 br, sw-agent
+# 8,724 br.
+BOOT_BROTLI_BUDGET_BYTES="${BOOT_BROTLI_BUDGET_BYTES:-3700}"
+WIDGET_BROTLI_BUDGET_BYTES="${WIDGET_BROTLI_BUDGET_BYTES:-28500}"
 WORKER_BROTLI_BUDGET_BYTES="${WORKER_BROTLI_BUDGET_BYTES:-16500}"
-LITE_WASM_BROTLI_BUDGET_BYTES="${LITE_WASM_BROTLI_BUDGET_BYTES:-230000}"
+LITE_WASM_BROTLI_BUDGET_BYTES="${LITE_WASM_BROTLI_BUDGET_BYTES:-215000}"
 WASM_RAW_BUDGET_BYTES="${WASM_RAW_BUDGET_BYTES:-3700000}"
 WASM_GZIP_BUDGET_BYTES="${WASM_GZIP_BUDGET_BYTES:-1150000}"
-WASM_BROTLI_BUDGET_BYTES="${WASM_BROTLI_BUDGET_BYTES:-820000}"
+WASM_BROTLI_BUDGET_BYTES="${WASM_BROTLI_BUDGET_BYTES:-780000}"
+# The gpu tier's budget is really a structural guard: it is what fails if
+# WebLLM (or anything else belonging to another tier) is imported into the
+# WebGPU *search* worker again. It was 21,187 when it did.
+SW_GPU_BROTLI_BUDGET_BYTES="${SW_GPU_BROTLI_BUDGET_BYTES:-18500}"
+SW_AGENT_BROTLI_BUDGET_BYTES="${SW_AGENT_BROTLI_BUDGET_BYTES:-10000}"
 
 col() { grep "^$1," "$REPORT_CSV" | cut -d, -f"$2"; }
 
@@ -106,6 +114,8 @@ if [[ "$has_brotli" -eq 1 ]]; then
   check "eddie-worker.js brotli" "$(col eddie-worker.js 4)" "$WORKER_BROTLI_BUDGET_BYTES"
   check "eddie-lite.wasm brotli" "$(col eddie-lite.wasm 4)" "$LITE_WASM_BROTLI_BUDGET_BYTES"
   check "eddie-dense.wasm brotli" "$(col eddie-dense.wasm 4)" "$WASM_BROTLI_BUDGET_BYTES"
+  check "eddie-sw-gpu.js brotli" "$(col eddie-sw-gpu.js 4)" "$SW_GPU_BROTLI_BUDGET_BYTES"
+  check "eddie-sw-agent.js brotli" "$(col eddie-sw-agent.js 4)" "$SW_AGENT_BROTLI_BUDGET_BYTES"
 else
   echo "brotli CLI not available; the brotli budgets were not checked." >&2
 fi

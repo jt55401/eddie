@@ -9,8 +9,12 @@
 - Model-download consent requirement, split out from download progress (0400-widget-ui/0300-download-progress/0320).
 - Inline retrieval answer blend requirement, split out from the (now agent-specific) Ask button story (0400-widget-ui/0400-qa-mode/0420).
 - Persistent-engine / tiered service-worker requirement covering `data-persist`, `data-warm`, the lite/dense/gpu service worker tiers, transport fallback to page-side workers, and state reuse across navigation (0400-widget-ui/0500-persistent-runtime/0510).
+- Runtime asset versioning requirement covering the build-derived `EDDIE_ASSET_VERSION` stamp, its separation from the index's `?v=`, and the `immutable` caching that follows (0400-widget-ui/0500-persistent-runtime/0520).
 
 ### Changed
+
+- Tiered service-worker requirement updated from three tiers to four: the agent moves out of the gpu tier into its own `sw/agent` scope, so accepting a WebGPU search lane no longer fetches WebLLM and accepting the agent no longer fetches transformers.js (0400-widget-ui/0500-persistent-runtime/0510).
+- Hugo integration requirement updated to say that the partial's `?v=` reaches only the index, its sidecars and site-bundled model files; runtime assets carry their own build-derived version (0500-integration/0100-hugo/0110).
 
 - Indexing, search-runtime, and configuration requirements rewritten for three-arm hybrid retrieval (BM25 + learned sparse + dense), repeatable dense lanes, presets, and index format v5; all `--model`-flag and single-model-index language removed.
 - Chunking requirement rewritten for `--chunk-strategy heading|semantic` and per-lane tokenizer token budgets.

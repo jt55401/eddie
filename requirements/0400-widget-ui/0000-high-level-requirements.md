@@ -16,3 +16,4 @@ inline retrieval-based answer blend, and an optional in-browser agent.
 - [0410 Agent Ask Button and Answer Card](0400-qa-mode/0410-qa-mode.md)
 - [0420 Inline Retrieval Answer Blend](0400-qa-mode/0420-inline-retrieval-answer-blend.md)
 - [0510 Persistent Engines and Tiered Service Workers](0500-persistent-runtime/0510-tiered-service-workers.md)
+- [0520 Runtime Asset Versioning and Caching](0500-persistent-runtime/0520-asset-versioning.md)
