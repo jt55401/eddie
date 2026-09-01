@@ -111,3 +111,44 @@ fonts, images) is 447 KB on a first visit and is unchanged by any of this.
 | (b) first open + one keyword/sparse search, no consent | **791,841** (index 541,846, lite wasm 200,086, widget 26,149, `eddie-sw-lite.js` 16,616, glue 3,814, boot 3,330) | 0 |
 | (c) CPU dense lane accepted, browser without WebGPU | **47,216,790** (f16 weights 45,441,912, `eddie-dense.wasm` 731,823, tokenizer 148,046, `index.minilm.ed` 82,172, `eddie-sw-dense.js` 16,612, dense glue 4,081, config 303, on top of (b) minus the sidecar) | 0 |
 
+### Caching: what a returning visitor pays
+
+Same profile across all three rows: a visitor who has already opened the
+search once (row (b)'s browser state), then comes back.
+
+| Event | Site bytes |
+|---|---:|
+| content-only redeploy (new index `?v=`, `dist/` unchanged) | **541,846** — the new index, and nothing else: `eddie-boot.js` answers 304, the widget, the wasm, the glue and the service worker are all cache hits and the worker is not reinstalled |
+| Eddie upgrade (new asset version, index unchanged) | **268,967** — the runtime, and *not* the index |
+| both at once (an upgrade shipped with a content deploy) | 810,813 |
+
+Before this change every redeploy was the third row: the index `?v=` drove
+every URL, so a content deploy invalidated the engine too. The upgrade row
+includes 18,973 bytes of page-worker path (`eddie-worker.js` 15,044 +
+`eddie-lite.js` 3,929) that the service-worker path does not normally
+fetch: while the new worker installs, the widget's 3-second transport
+deadline expires and that page falls back to a page-side worker. It is a
+one-page, once-per-upgrade cost and the fix (waiting longer) would make the
+first search after an upgrade slower, so it stands.
+
+### Progressive enhancement
+
+## Follow-ups
+
+- The five pass-1 follow-ups are all closed: service worker imports now
+  carry a `?v=`, the gpu tier no longer bundles the agent, the widget is
+  back under its 0.4.1 size, the `serde_json` cut is measured and declined
+  (see 2026-08-30-wasm-size.md), and the index `?v=` no longer busts the
+  runtime.
+- The index is now the dominant cost of a first search (541 KB of 792 KB on
+  this site) and it is content, not overhead. The one part of it that is
+  not site-specific is the 108 KB embedded WordPiece vocabulary; it exists
+  to replace a 711 KB per-visitor fetch from huggingface.co, so it stays,
+  but a site with several indexes pays for it in each.
+- An upgraded service worker costs the first page 19 KB of page-worker
+  path while it installs (see the caching table). Waiting longer instead
+  would trade bytes for latency on the first search after an upgrade.
+- `eddie-boot.js` is the only asset with no `?v=`, so it revalidates every
+  300 s: a conditional request per page view for an unchanged 3.3 KB file.
+  `stale-while-revalidate` would remove even that round trip on hosts that
+  support it.
