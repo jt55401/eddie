@@ -57,12 +57,16 @@ skips navigation, headers and footers, and ignores pages marked `noindex`.
 **Which `--preset` to use.** A preset chooses the models so you do not have
 to:
 
-| Preset | Good for | Visitor download |
+| Preset | Good for | Model a visitor downloads |
 |---|---|---|
-| `fast` | Small sites, lowest cost to visitors | about 45 MB |
-| `balanced` | Most sites. Start here | about 45 MB |
-| `quality` | Large sites, best results on browsers with WebGPU | 45 MB, or about 900 MB on WebGPU |
+| `fast` | Small sites, smallest download | about 91 MB |
+| `balanced` | Most sites. Start here | about 134 MB |
+| `quality` | Best results, if visitors have WebGPU | 134 MB, or about 900 MB on WebGPU |
 | `gpu` | Same as `quality`, but indexes faster on a CUDA machine | same as `quality` |
+
+`eddie index --bundle-model <model>` writes a half-precision copy next to
+your index, which roughly halves those downloads and serves them from your
+domain instead of HuggingFace. Check your host's file size limit first.
 
 Rebuild the index whenever your content changes. It is part of your site
 build, like generating HTML.

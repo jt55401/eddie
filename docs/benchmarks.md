@@ -47,6 +47,46 @@ dataset.
 Quality numbers only mean something relative to each other. Compare two runs
 on the same dataset, not one run against a number from another project.
 
+## Search quality against keyword-only search
+
+Eddie's reason to exist is that merging three ways of searching beats any
+one of them. Here is that claim measured, on two sites with graded
+relevance judgements written by hand.
+
+**Personal site**, 75 pages, 45 questions:
+
+| Mode | Hit@10 | MRR | nDCG@10 |
+|---|---:|---:|---:|
+| **Hybrid (all three)** | **0.978** | **0.814** | **0.774** |
+| Meaning only | 0.956 | 0.811 | 0.750 |
+| Learned terms only | 0.956 | 0.804 | 0.745 |
+| Keywords only | 0.956 | 0.733 | 0.658 |
+
+**Product site**, 22 pages, 35 questions:
+
+| Mode | Hit@10 | MRR | nDCG@10 |
+|---|---:|---:|---:|
+| **Hybrid (all three)** | **1.000** | 0.732 | **0.722** |
+| Meaning only | 0.914 | 0.711 | 0.674 |
+| Learned terms only | 1.000 | **0.788** | 0.725 |
+| Keywords only | 0.857 | 0.699 | 0.629 |
+
+Hybrid ranks 18% and 15% better than keyword-only by nDCG@10. On the product
+site, keyword-only found no correct page at all for 14% of the questions.
+
+Two honest notes. On the product site, the learned-terms arm alone beats
+hybrid on MRR (0.788 against 0.732), so hybrid is not the best setting for
+every corpus, which is why `eddie eval --sweep` and
+`eddie index --weights` exist. And these are two small sites with
+self-written judgements: they show the shape of the difference, not a
+league table.
+
+Reproduce them with:
+
+```bash
+eddie eval --index index.ed --labels labels.toml --graded --all-modes
+```
+
 ## How Eddie compares
 
 | Tool | Runs on | Search | Answers | Server | Cost |

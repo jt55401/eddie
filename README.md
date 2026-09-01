@@ -6,13 +6,17 @@
 
 **Your site's shipboard computer.**
 
-Eddie adds search to a static site. It runs in your visitor's browser, so
-there is no server to host, no API key to manage, and no monthly bill.
+Eddie is site search that finds what people meant, not only what they typed.
 
-You run one command at build time. It reads your content and writes a
-single index file next to your pages. You add one script tag. Visitors get
-a search box that understands what they meant, not only the words they
-typed.
+Measured against keyword-only search on the same content and the same
+questions, it ranks the right page **15–18% better** (nDCG@10). On one of
+the two sites, keyword search failed to find any correct page at all for one
+question in seven. Eddie found one for every question.
+
+It runs in your visitor's browser. No server to host, no API key, no monthly
+bill, and no search queries leaving their device.
+
+You run one command at build time and add one script tag.
 
 > *"I'm just so happy to be doing this for you."*
 > Eddie, the Heart of Gold's shipboard computer
@@ -38,12 +42,16 @@ Search runs on the visitor's device, so their browser does the work.
 |---|---|---|
 | Loader script | Every page | 3 KB |
 | Search engine | First time they open search | about 250 KB |
-| Your index | First time they open search | depends on your site |
-| Search model | Only if they agree to it | 45 MB and up |
+| Your index | First time they open search | 500 KB for a 75-page site |
+| Search model | Only if they agree to it | 91 MB or 134 MB, depending on preset |
 
-Nothing downloads until someone opens the search box. The model is the only
-large download, it is cached after the first time, and Eddie asks first and
-names the size. A visitor who declines still gets keyword results.
+Nothing downloads until someone opens the search box.
+
+The model is the one large download. It is cached after the first time, and
+Eddie asks before fetching it and names the size. A visitor who says no
+still gets results, from the two arms that need no model at all. You can
+also ship a half-size copy of the model from your own domain instead of
+sending visitors to HuggingFace.
 
 ## Quick start
 
@@ -93,14 +101,32 @@ flowchart LR
 - **Meaning** compares the sense of the query with the sense of each
   passage. This is the part that needs a model.
 
-Merging three imperfect rankings beats trusting any one of them. If the
-browser cannot run the model, the first two still work and results are
-still useful.
+Merging three imperfect rankings beats trusting any one of them. Measured on
+two sites, with graded relevance judgements written by hand:
 
-There is one more thing Eddie can do. On a browser with a modern graphics
-API (WebGPU), a small language model can read the top results and write a
-short answer with citations. It is optional, it asks before downloading,
-and everywhere else Eddie is a search box.
+| | Keyword only | Eddie |
+|---|---:|---:|
+| Personal site, 45 questions | nDCG 0.658 | **0.774** |
+| Product site, 35 questions | nDCG 0.629 | **0.722** |
+| Questions with no correct result, product site | 14% | **0%** |
+
+If the browser cannot run the model, the first two arms still work and
+results are still useful. [How this is measured](docs/benchmarks.md).
+
+## Answers, from the same search
+
+Search and question answering are usually two products. In Eddie they are
+one, and the answer is built from the search you already ran.
+
+On a browser with a modern graphics API (WebGPU), a small language model
+reads the top results and writes a short answer with citations back to your
+pages. It runs in the browser like everything else, so questions never
+reach a server either. It asks before downloading, and everywhere else
+Eddie is still a search box.
+
+There is a lighter version that needs no model at all: index with `--qa` and
+Eddie writes question-and-answer pairs into the index at build time, then
+shows the best match above the results.
 
 ## Documentation
 
