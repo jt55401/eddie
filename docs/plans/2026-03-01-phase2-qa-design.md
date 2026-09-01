@@ -14,18 +14,23 @@ Layer WebLLM (JavaScript library with TVM-compiled WebGPU shaders) on top of the
 
 ## Architecture
 
-```
-User types query
-  → search-as-you-type via WASM (existing, instant)
-  → results displayed (existing)
-
-User clicks Ask / Shift+Enter
-  → Worker grabs top-5 chunk texts from current search results
-  → Worker constructs RAG prompt (system + context chunks + question)
-  → Worker calls WebLLM engine.chat.completions.create({ stream: true })
-  → Tokens posted to main thread via postMessage
-  → Widget renders answer card above results with streaming text
-  → Final answer includes "Sources:" with clickable links
+```mermaid
+sequenceDiagram
+    actor V as Visitor
+    participant W as Widget
+    participant K as Worker
+    participant L as WebLLM
+    V->>W: types a query
+    W->>K: search as you type
+    K-->>W: results (WASM, instant)
+    V->>W: Ask, or Shift+Enter
+    W->>K: ask, with the top 5 chunk texts
+    K->>K: build the RAG prompt<br/>system + context chunks + question
+    K->>L: chat.completions.create, streaming
+    L-->>K: tokens
+    K-->>W: postMessage per token
+    W-->>V: answer card above the results, streaming
+    W-->>V: Sources, as clickable links
 ```
 
 ### Key decisions

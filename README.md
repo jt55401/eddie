@@ -55,10 +55,16 @@ visitor's browser can run. See the model table below.
 
 ## Retrieval architecture
 
-```
-query ─┬─ BM25: in-index tokenizer, no model ────────────────────┐
-       ├─ sparse: WordPiece(query) × IDF, no model ───────────────┤ weighted RRF → page grouping → snippets
-       └─ dense: WASM candle (bert) or transformers.js (WebGPU) ──┘
+```mermaid
+flowchart LR
+  Q[query] --> B["BM25<br/>in-index tokenizer, no model"]
+  Q --> S["learned sparse<br/>WordPiece(query) × IDF, no model"]
+  Q --> D["dense<br/>WASM candle (bert) or transformers.js (WebGPU)"]
+  B --> R[weighted RRF]
+  S --> R
+  D --> R
+  R --> G[page grouping]
+  G --> N[snippets]
 ```
 
 - **BM25** (`k1=1.2`, `b=0.75`) always runs; it costs nothing extra since the

@@ -987,16 +987,14 @@ git commit -m "feat: Phase 2 Q&A integration complete"
 
 ## Dependency graph
 
-```
-Task 0 (WASM export) ─→ Task 3 (worker LLM) ─→ Task 4 (widget orchestration)
-                                                        │
-Task 1 (Ask button + detection) ──────────────────→ Task 4
-                                                        │
-Task 2 (answer card DOM) ─────────────────────────→ Task 4
-                                                        │
-                                                   Task 5 (build)
-                                                        │
-                                                   Task 6 (integration test)
+```mermaid
+flowchart LR
+  T0["Task 0<br/>WASM export"] --> T3["Task 3<br/>worker LLM"]
+  T3 --> T4["Task 4<br/>widget orchestration"]
+  T1["Task 1<br/>Ask button + detection"] --> T4
+  T2["Task 2<br/>answer card DOM"] --> T4
+  T4 --> T5["Task 5<br/>build"]
+  T5 --> T6["Task 6<br/>integration test"]
 ```
 
 Tasks 0, 1, and 2 can be developed in parallel. Task 3 depends on Task 0. Task 4 depends on Tasks 1, 2, and 3. Tasks 5 and 6 are sequential after Task 4.
