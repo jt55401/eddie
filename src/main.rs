@@ -81,6 +81,18 @@ enum Command {
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
+        /// Recency boost baked into the index: how much a page dated as recently as the newest page is lifted in the final ranking [default: 0.12]
+        #[arg(long, value_name = "STRENGTH")]
+        recency: Option<f64>,
+
+        /// Days after which the recency boost is halved [default: 240]
+        #[arg(long, value_name = "DAYS")]
+        recency_half_life: Option<f64>,
+
+        /// Leave the recency boost out: pages rank on relevance alone, whatever their date
+        #[arg(long, conflicts_with_all = ["recency", "recency_half_life"])]
+        no_recency: bool,
+
         /// Output path for the index file.
         #[arg(long, default_value = "index.ed")]
         output: PathBuf,
@@ -285,6 +297,14 @@ enum Command {
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
 
+        /// Override the index's recency boost strength (0 turns it off).
+        #[arg(long, value_name = "STRENGTH")]
+        recency: Option<f64>,
+
+        /// Override the index's recency half-life in days.
+        #[arg(long, value_name = "DAYS")]
+        recency_half_life: Option<f64>,
+
         /// Candidates fetched per arm before fusion (default max(3·top_k, 30)).
         #[arg(long)]
         fetch_k: Option<usize>,
@@ -334,6 +354,14 @@ enum Command {
         /// RRF weights as dense,sparse,bm25 (default 1,1.2,1).
         #[arg(long, value_name = "D,S,B")]
         weights: Option<String>,
+
+        /// Override the index's recency boost strength (0 turns it off).
+        #[arg(long, value_name = "STRENGTH")]
+        recency: Option<f64>,
+
+        /// Override the index's recency half-life in days.
+        #[arg(long, value_name = "DAYS")]
+        recency_half_life: Option<f64>,
 
         /// Candidates fetched per arm before fusion (default max(3·top_k, 30)).
         #[arg(long)]
@@ -584,6 +612,9 @@ fn main() -> Result<()> {
             cms,
             include_noindex,
             weights,
+            recency,
+            recency_half_life,
+            no_recency,
             output,
             dense_model,
             model,
@@ -626,6 +657,7 @@ fn main() -> Result<()> {
             cms,
             include_noindex,
             weights.as_deref(),
+            RecencyChoice::new(recency, recency_half_life, no_recency)?,
             output,
             &resolve_index_models(
                 preset,
@@ -676,6 +708,8 @@ fn main() -> Result<()> {
             weights,
             fetch_k,
             rrf_k,
+            recency,
+            recency_half_life,
         } => cmd_search(
             index,
             &query,
@@ -684,7 +718,13 @@ fn main() -> Result<()> {
             lane.as_deref(),
             json,
             explain,
-            ranking_options(weights.as_deref(), fetch_k, rrf_k)?,
+            ranking_options(
+                weights.as_deref(),
+                fetch_k,
+                rrf_k,
+                recency,
+                recency_half_life,
+            )?,
         ),
         Command::Stats { index, json } => cmd_stats(index, json),
         Command::Eval {
@@ -697,6 +737,8 @@ fn main() -> Result<()> {
             weights,
             fetch_k,
             rrf_k,
+            recency,
+            recency_half_life,
             sweep,
             graded,
             all_modes,
@@ -708,7 +750,13 @@ fn main() -> Result<()> {
             lane.as_deref(),
             json,
             EvalOptions {
-                ranking: ranking_options(weights.as_deref(), fetch_k, rrf_k)?,
+                ranking: ranking_options(
+                    weights.as_deref(),
+                    fetch_k,
+                    rrf_k,
+                    recency,
+                    recency_half_life,
+                )?,
                 sweep,
                 graded,
                 all_modes,
@@ -784,6 +832,7 @@ fn cmd_index(
     cms: Cms,
     include_noindex: bool,
     fusion_weights: Option<&str>,
+    recency: RecencyChoice,
     output: PathBuf,
     model_opts: &IndexModelOptions,
     chunk_size: usize,
@@ -1187,9 +1236,35 @@ fn cmd_index(
     // builder has nothing to strip.
     let overlap_words: Vec<u16> = vec![0; n];
 
+    // Ages are measured from the newest date in the corpus, so the ranking a
+    // built index produces never depends on when it is searched.
+    let newest = metadata
+        .iter()
+        .filter_map(|m| m.date.as_deref())
+        .filter(|d| d.len() >= 10 && d.is_char_boundary(10))
+        .map(|d| d[..10].to_string())
+        .max();
+
     let mut builder = IndexBuilder::new();
     builder.add_chunks_indexed(metadata, chunk_texts, index_texts, overlap_words)?;
     builder.title_context(title_context);
+    if recency.on && recency.strength > 0.0 {
+        if newest.is_none() {
+            eprintln!("  Recency boost: off (nothing in this content has a date)");
+        } else {
+            eprintln!(
+                "  Recency boost: {} at {}, halving every {} days",
+                recency.strength,
+                newest.as_deref().unwrap_or("?"),
+                recency.half_life_days
+            );
+        }
+        builder.recency(newest.as_ref().map(|n| eddie::manifest::RecencySpec {
+            strength: recency.strength,
+            half_life_days: recency.half_life_days,
+            newest: Some(n.clone()),
+        }));
+    }
     if let Some(spec) = fusion_weights {
         let w = Weights::parse(spec)?;
         builder.fusion(Some(eddie::manifest::FusionWeights {
@@ -1644,14 +1719,29 @@ struct RankingOptions {
     weights: Option<Weights>,
     fetch_k: Option<usize>,
     rrf_k: Option<f64>,
+    /// `--recency` / `--recency-half-life`: strength and half-life to use
+    /// instead of the ones the index carries. Either may be given alone.
+    recency: (Option<f64>, Option<f64>),
 }
 
 fn ranking_options(
     weights: Option<&str>,
     fetch_k: Option<usize>,
     rrf_k: Option<f64>,
+    recency: Option<f64>,
+    recency_half_life: Option<f64>,
 ) -> Result<RankingOptions> {
     let weights = weights.map(Weights::parse).transpose()?;
+    if let Some(s) = recency
+        && !(s.is_finite() && s >= 0.0)
+    {
+        bail!("--recency must be a finite number >= 0");
+    }
+    if let Some(h) = recency_half_life
+        && !(h.is_finite() && h > 0.0)
+    {
+        bail!("--recency-half-life must be a finite number > 0");
+    }
     if fetch_k == Some(0) {
         bail!("--fetch-k must be > 0");
     }
@@ -1664,7 +1754,86 @@ fn ranking_options(
         weights,
         fetch_k,
         rrf_k,
+        recency: (recency, recency_half_life),
     })
+}
+
+impl RankingOptions {
+    /// The recency boost to rank with: the index's, with any `--recency` /
+    /// `--recency-half-life` override applied on top. An override given for
+    /// an index that carries no spec still works, measuring ages from the
+    /// newest date in the corpus.
+    fn recency_for(&self, index: &SearchIndex) -> eddie::search::Recency {
+        let (strength, half_life) = self.recency;
+        if strength.is_none() && half_life.is_none() {
+            return eddie::search::Recency::for_index(index);
+        }
+        let base = index
+            .manifest
+            .recency
+            .clone()
+            .unwrap_or_else(|| eddie::manifest::RecencySpec {
+                strength: DEFAULT_RECENCY_STRENGTH,
+                half_life_days: DEFAULT_RECENCY_HALF_LIFE_DAYS,
+                newest: newest_date(index),
+            });
+        eddie::search::Recency::from_spec(&eddie::manifest::RecencySpec {
+            strength: strength.unwrap_or(base.strength),
+            half_life_days: half_life.unwrap_or(base.half_life_days),
+            newest: base.newest.clone().or_else(|| newest_date(index)),
+        })
+    }
+}
+
+/// What `eddie index` should bake in: the boost with its strength and
+/// half-life, or nothing at all for `--no-recency`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RecencyChoice {
+    on: bool,
+    strength: f64,
+    half_life_days: f64,
+}
+
+impl RecencyChoice {
+    fn new(strength: Option<f64>, half_life: Option<f64>, off: bool) -> Result<RecencyChoice> {
+        if let Some(s) = strength
+            && !(s.is_finite() && s >= 0.0)
+        {
+            bail!("--recency must be a finite number >= 0");
+        }
+        if let Some(h) = half_life
+            && !(h.is_finite() && h > 0.0)
+        {
+            bail!("--recency-half-life must be a finite number > 0");
+        }
+        Ok(RecencyChoice {
+            on: !off,
+            strength: strength.unwrap_or(DEFAULT_RECENCY_STRENGTH),
+            half_life_days: half_life.unwrap_or(DEFAULT_RECENCY_HALF_LIFE_DAYS),
+        })
+    }
+}
+
+/// Boost a page dated as recently as the newest page in the corpus gets, and
+/// the days after which that is halved. The boost only ever applies to
+/// browse-style queries (`search::looks_like_question`), so these were
+/// chosen on broad terms rather than on the question sets, which are
+/// unaffected by construction. Four years suits a corpus that spans two
+/// decades; a site publishing weekly wants far less. See
+/// docs/reviews/2026-09-01-recency-boost.md.
+const DEFAULT_RECENCY_STRENGTH: f64 = 0.15;
+const DEFAULT_RECENCY_HALF_LIFE_DAYS: f64 = 1460.0;
+
+/// The most recent `YYYY-MM-DD` any chunk carries, which ages are measured
+/// from. `None` when nothing in the corpus is dated.
+fn newest_date(index: &SearchIndex) -> Option<String> {
+    index
+        .metadata
+        .iter()
+        .filter_map(|m| m.date.as_deref())
+        .filter(|d| d.len() >= 10 && d.is_char_boundary(10))
+        .map(|d| d[..10].to_string())
+        .max()
 }
 
 /// The per-query arm inputs, embedded once so several fusion settings can
@@ -1765,7 +1934,13 @@ fn run_query(
         rrf_k: options.rrf_k,
     };
     let retrieval = retrieve(index, &q)?;
-    let pages = group_pages(index, &retrieval.ranked, &query_terms(text), top_k);
+    let pages = eddie::search::group_pages_with(
+        index,
+        &retrieval.ranked,
+        &query_terms(text),
+        top_k,
+        options.recency_for(index).gate(text),
+    );
     Ok((pages, retrieval))
 }
 
@@ -3657,7 +3832,7 @@ mod tests {
 
     #[test]
     fn ranking_options_parse_and_validate() {
-        let o = ranking_options(Some("1.2,0.8,0.6"), Some(40), Some(30.0)).unwrap();
+        let o = ranking_options(Some("1.2,0.8,0.6"), Some(40), Some(30.0), None, None).unwrap();
         assert_eq!(
             o.weights,
             Some(Weights {
@@ -3669,13 +3844,13 @@ mod tests {
         assert_eq!(o.fetch_k, Some(40));
         assert_eq!(o.rrf_k, Some(30.0));
         assert_eq!(
-            ranking_options(None, None, None).unwrap(),
+            ranking_options(None, None, None, None, None).unwrap(),
             RankingOptions::default()
         );
-        assert!(ranking_options(Some("1,2"), None, None).is_err());
-        assert!(ranking_options(None, Some(0), None).is_err());
-        assert!(ranking_options(None, None, Some(-1.0)).is_err());
-        assert!(ranking_options(None, None, Some(f64::INFINITY)).is_err());
+        assert!(ranking_options(Some("1,2"), None, None, None, None).is_err());
+        assert!(ranking_options(None, Some(0), None, None, None).is_err());
+        assert!(ranking_options(None, None, Some(-1.0), None, None).is_err());
+        assert!(ranking_options(None, None, Some(f64::INFINITY), None, None).is_err());
     }
 
     #[test]

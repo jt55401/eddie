@@ -373,11 +373,154 @@ pub fn retrieve(index: &SearchIndex, q: &Query) -> Result<Retrieval> {
 /// AGREEMENT_BONUS × (best other chunk of a different granularity)`. Ties are
 /// broken by date (newest first, undated last) and then URL, so the order is
 /// deterministic and recency never reorders pages with different scores.
+/// Days from 1970-01-01 for the `YYYY-MM-DD` prefix of a date string, or
+/// `None` when there is not one. Anything after the day (a time, a zone) is
+/// ignored: the boost has no use for sub-day resolution.
+fn days_from_date(raw: &str) -> Option<i64> {
+    let b = raw.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let num = |s: &str| s.parse::<i64>().ok();
+    let (y, m, d) = (num(&raw[0..4])?, num(&raw[5..7])?, num(&raw[8..10])?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // days_from_civil (Howard Hinnant): exact for any proleptic Gregorian date.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+/// Does this query ask something, rather than name a topic to browse?
+///
+/// The same rule the widget uses to decide whether to show a FAQ answer
+/// (`looksFactualQuery` in eddie-widget.js): a question mark, an opening
+/// question word, or five or more words.
+///
+/// The two kinds of query want opposite things from a date. "when did jason
+/// start at kagi" has one right answer and it is whichever page states the
+/// fact, however old. "java" has no right answer -- it names a topic, the
+/// scores bunch up, and of two pages that mention Java about equally the
+/// recent one is nearly always the one worth reading. So the recency boost
+/// applies to the second kind only.
+pub fn looks_like_question(text: &str) -> bool {
+    let q = text.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    if q.contains('?') {
+        return true;
+    }
+    const OPENERS: [&str; 13] = [
+        "who", "what", "when", "where", "why", "how", "does", "do", "is", "are", "can", "could",
+        "should",
+    ];
+    let mut words = q.split_whitespace();
+    if let Some(first) = words.next()
+        && OPENERS.contains(&first.trim_matches(|c: char| !c.is_alphanumeric()))
+    {
+        return true;
+    }
+    q.split_whitespace().count() >= 5
+}
+
+/// The recency boost in force for a search: how much a page's age moves it
+/// in the final ranking. Built from the index's [`RecencySpec`], or
+/// overridden for tuning (`eddie eval --recency`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Recency {
+    pub strength: f64,
+    pub half_life_days: f64,
+    /// Day number the ages are measured from; `None` disables the boost.
+    newest_day: Option<i64>,
+}
+
+impl Recency {
+    /// No boost: every page ranks on its fused score alone.
+    pub const OFF: Recency = Recency {
+        strength: 0.0,
+        half_life_days: 1.0,
+        newest_day: None,
+    };
+
+    /// What the index asks for, or [`Recency::OFF`] for an index that carries
+    /// no spec (anything built before the boost existed).
+    pub fn for_index(index: &SearchIndex) -> Recency {
+        index
+            .manifest
+            .recency
+            .as_ref()
+            .map(Recency::from_spec)
+            .unwrap_or(Recency::OFF)
+    }
+
+    /// The boost as it applies to one query: what the index asks for on a
+    /// browse-style query, and nothing at all on a question (see
+    /// [`looks_like_question`]).
+    pub fn for_query(index: &SearchIndex, text: &str) -> Recency {
+        if looks_like_question(text) {
+            return Recency::OFF;
+        }
+        Recency::for_index(index)
+    }
+
+    /// This boost, silenced on a question.
+    pub fn gate(self, text: &str) -> Recency {
+        if looks_like_question(text) {
+            Recency::OFF
+        } else {
+            self
+        }
+    }
+
+    pub fn from_spec(spec: &crate::manifest::RecencySpec) -> Recency {
+        Recency {
+            strength: spec.strength,
+            half_life_days: spec.half_life_days.max(f64::MIN_POSITIVE),
+            newest_day: spec.newest.as_deref().and_then(days_from_date),
+        }
+    }
+
+    /// Multiplier for a page's fused score. 1.0 when the boost is off, when
+    /// the page has no usable date, or when the page is far older than the
+    /// half-life. A page newer than `newest` (a future date) is clamped to
+    /// the full boost rather than being extrapolated past it.
+    pub fn multiplier(&self, date: Option<&str>) -> f64 {
+        if self.strength == 0.0 {
+            return 1.0;
+        }
+        let (Some(newest), Some(day)) = (self.newest_day, date.and_then(days_from_date)) else {
+            return 1.0;
+        };
+        let age_days = (newest - day).max(0) as f64;
+        1.0 + self.strength * 0.5f64.powf(age_days / self.half_life_days)
+    }
+}
+
+/// Group and rank with the index's recency boost ungated. Callers that have
+/// the raw query text should use [`group_pages_with`] and [`Recency::for_query`]
+/// so a question is not reordered by date.
 pub fn group_pages(
     index: &SearchIndex,
     ranked: &[RankedChunk],
     query_terms: &[String],
     top_k: usize,
+) -> Vec<PageResult> {
+    group_pages_with(index, ranked, query_terms, top_k, Recency::for_index(index))
+}
+
+/// [`group_pages`] with an explicit recency boost, for tuning.
+pub fn group_pages_with(
+    index: &SearchIndex,
+    ranked: &[RankedChunk],
+    query_terms: &[String],
+    top_k: usize,
+    recency: Recency,
 ) -> Vec<PageResult> {
     struct Page {
         best: usize,
@@ -427,7 +570,8 @@ pub fn group_pages(
                 section: meta.section.clone(),
                 chunk: page.best,
                 chunks: page.chunks,
-                score: page.best_score + AGREEMENT_BONUS * page.bonus_source,
+                score: (page.best_score + AGREEMENT_BONUS * page.bonus_source)
+                    * recency.multiplier(meta.date.as_deref()),
                 snippet: snippet(text, 0, query_terms, SNIPPET_MAX_CHARS),
                 date: meta.date.clone(),
             }
@@ -1470,5 +1614,138 @@ mod tests {
             ..Query::default()
         };
         assert!(retrieve(&index, &q).is_err());
+    }
+}
+
+#[cfg(test)]
+mod recency_tests {
+    use super::*;
+    use crate::manifest::RecencySpec;
+
+    fn spec(strength: f64, half_life_days: f64, newest: &str) -> RecencySpec {
+        RecencySpec {
+            strength,
+            half_life_days,
+            newest: Some(newest.to_string()),
+        }
+    }
+
+    #[test]
+    fn days_from_date_reads_the_day_and_ignores_the_rest() {
+        assert_eq!(days_from_date("1970-01-01"), Some(0));
+        assert_eq!(days_from_date("1970-01-02"), Some(1));
+        assert_eq!(days_from_date("2026-03-18"), Some(20530));
+        // A leap day, and a full RFC 3339 stamp with a zone.
+        assert_eq!(
+            days_from_date("2024-02-29T10:00:00-06:00"),
+            days_from_date("2024-02-29")
+        );
+        assert_eq!(
+            days_from_date("2026-03-19").unwrap() - days_from_date("2026-03-18").unwrap(),
+            1
+        );
+        for bad in [
+            "",
+            "2026",
+            "2026-03",
+            "not-a-date",
+            "2026/03/18",
+            "2026-13-01",
+        ] {
+            assert_eq!(days_from_date(bad), None, "{bad:?} is not a date");
+        }
+    }
+
+    #[test]
+    fn the_boost_halves_every_half_life_and_leaves_undated_pages_alone() {
+        let r = Recency::from_spec(&spec(0.2, 180.0, "2026-03-18"));
+        assert!(
+            (r.multiplier(Some("2026-03-18")) - 1.2).abs() < 1e-12,
+            "newest page gets the full strength"
+        );
+        assert!(
+            (r.multiplier(Some("2025-09-19")) - 1.1).abs() < 1e-9,
+            "one half-life older gets half"
+        );
+        assert!(
+            (r.multiplier(Some("2025-03-23")) - 1.05).abs() < 1e-9,
+            "two half-lives older gets a quarter"
+        );
+        assert_eq!(r.multiplier(None), 1.0, "a page with no date is not moved");
+        assert_eq!(
+            r.multiplier(Some("undated")),
+            1.0,
+            "an unparseable date is not moved"
+        );
+        // The boost only ever lifts, and decays to nothing: a page 27 years
+        // older is left exactly where its relevance put it.
+        assert!(r.multiplier(Some("2023-03-18")) > 1.0);
+        assert!(r.multiplier(Some("2023-03-18")) < 1.005);
+        assert_eq!(r.multiplier(Some("1999-01-01")), 1.0);
+        // A date after `newest` is clamped, not extrapolated.
+        assert_eq!(
+            r.multiplier(Some("2030-01-01")),
+            r.multiplier(Some("2026-03-18"))
+        );
+    }
+
+    #[test]
+    fn strength_zero_and_a_missing_spec_are_both_off() {
+        assert_eq!(Recency::OFF.multiplier(Some("2026-03-18")), 1.0);
+        let off = Recency::from_spec(&spec(0.0, 180.0, "2026-03-18"));
+        assert_eq!(off.multiplier(Some("2026-03-18")), 1.0);
+        // A spec with no `newest` cannot measure age, so it does nothing.
+        let no_newest = Recency::from_spec(&RecencySpec {
+            strength: 0.2,
+            half_life_days: 180.0,
+            newest: None,
+        });
+        assert_eq!(no_newest.multiplier(Some("2026-03-18")), 1.0);
+    }
+
+    #[test]
+    fn the_boost_can_reorder_two_close_pages_but_not_a_clear_winner() {
+        let r = Recency::from_spec(&spec(0.1, 180.0, "2026-03-18"));
+        // Two pages a hair apart, the lower one much newer: it wins.
+        let (old_hi, new_lo) = (0.0456_f64, 0.0454_f64);
+        assert!(
+            new_lo * r.multiplier(Some("2026-03-18")) > old_hi * r.multiplier(Some("2025-01-01"))
+        );
+        // A page that is far ahead on relevance keeps its place.
+        assert!(0.30 * r.multiplier(Some("2020-01-01")) > 0.05 * r.multiplier(Some("2026-03-18")));
+    }
+}
+
+#[cfg(test)]
+mod query_kind_tests {
+    use super::looks_like_question;
+
+    #[test]
+    fn questions_and_topics_are_told_apart() {
+        for q in [
+            "how long has jason been programming?",
+            "When did Jason start consulting for Kagi?",
+            "what programming languages does Jason know",
+            "Where is Jason located",
+            "has jason ever spoke anywhere or given talks lol",
+            "does eddie support mkdocs",
+            "java?",
+        ] {
+            assert!(looks_like_question(q), "{q:?} should read as a question");
+        }
+        for q in [
+            "java",
+            "rust",
+            "kagi",
+            "enterprise rust",
+            "common crawl checker",
+            "hugo module",
+            "  Python  ",
+        ] {
+            assert!(!looks_like_question(q), "{q:?} should read as a topic");
+        }
+        // Empty is neither; the boost has nothing to act on anyway.
+        assert!(!looks_like_question(""));
+        assert!(!looks_like_question("   "));
     }
 }

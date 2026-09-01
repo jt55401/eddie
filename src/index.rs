@@ -1331,6 +1331,7 @@ pub struct IndexBuilder {
     index_texts: Option<Vec<String>>,
     title_context: bool,
     fusion: Option<FusionWeights>,
+    recency: Option<crate::manifest::RecencySpec>,
     overlap_words: Vec<u16>,
     bm25_params: Bm25Params,
     sparse: Option<(SparseIndex, SparseSpec)>,
@@ -1415,6 +1416,13 @@ impl IndexBuilder {
     /// Bake fusion weights into the manifest (`eddie index --weights`).
     pub fn fusion(&mut self, weights: Option<FusionWeights>) -> &mut Self {
         self.fusion = weights;
+        self
+    }
+
+    /// Recency boost to bake into the manifest (`eddie index --recency`).
+    /// `None` leaves the index ranking on relevance alone.
+    pub fn recency(&mut self, spec: Option<crate::manifest::RecencySpec>) -> &mut Self {
+        self.recency = spec;
         self
     }
 
@@ -1534,6 +1542,7 @@ impl IndexBuilder {
         manifest.built_at = self.built_at;
         manifest.title_context = self.title_context;
         manifest.fusion = self.fusion;
+        manifest.recency = self.recency.clone();
         let (sparse, mut sparse_spec) = match self.sparse {
             Some((idx, spec)) => (Some(idx), Some(spec)),
             None => (None, None),

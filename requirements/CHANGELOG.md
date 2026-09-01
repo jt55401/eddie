@@ -14,6 +14,8 @@
 
 ### Changed
 
+- Result-ranking requirement: recency goes from "a tie-breaker only, never a ranking multiplier" to a real multiplier on **browse-style queries only**, gated by `search::looks_like_question`. Ungated it made every question worse at every setting tried; gated, question answering is unaffected by construction (0200-search-runtime/0200-vector-search/0220).
+
 - Tiered service-worker requirement updated from three tiers to four: the agent moves out of the gpu tier into its own `sw/agent` scope, so accepting a WebGPU search lane no longer fetches WebLLM and accepting the agent no longer fetches transformers.js (0400-widget-ui/0500-persistent-runtime/0510).
 - Hugo integration requirement updated to say that the partial's `?v=` reaches only the index, its sidecars and site-bundled model files; runtime assets carry their own build-derived version (0500-integration/0100-hugo/0110).
 

@@ -216,6 +216,30 @@ pub struct FusionWeights {
     pub bm25: f64,
 }
 
+/// How much a page's age moves it in the final ranking, baked into an index
+/// by `eddie index --recency` (on by default; `--no-recency` leaves it out).
+/// Absent means no recency boost at all, which is what an index built before
+/// this existed gets.
+///
+/// The boost is `strength * 0.5^(age_days / half_life_days)` applied as a
+/// multiplier `1 + boost` on the fused page score, so a page published on
+/// `newest` gets the full `strength` and one `half_life_days` older gets
+/// half of it. A page with no date is not moved either way.
+///
+/// Age is measured from `newest` -- the most recent date in the corpus --
+/// rather than from the clock, so the same index and query always rank the
+/// same way, whether it is searched the day it was built or a year later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecencySpec {
+    /// Boost applied to a page dated `newest`. 0 disables the feature.
+    pub strength: f64,
+    /// Days after which the boost is halved.
+    pub half_life_days: f64,
+    /// The most recent `YYYY-MM-DD` in the corpus; ages are measured from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newest: Option<String>,
+}
+
 /// One dense lane section stored in its own `.ed` file next to the core
 /// index (`eddie index --sidecar-lanes`). A lane's sections for several
 /// scopes share one file; each scope has its own entry.
@@ -252,6 +276,9 @@ pub struct Manifest {
     /// Fusion weights chosen for this index (see [`FusionWeights`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fusion: Option<FusionWeights>,
+    /// Recency boost chosen for this index (see [`RecencySpec`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recency: Option<RecencySpec>,
     /// Whether the indexed text of every chunk (dense, sparse and BM25
     /// inputs) was prefixed with the page title and section
     /// (`crate::index::context_prefix`). Stored texts stay clean either way.
@@ -285,6 +312,7 @@ impl Manifest {
             sections: Vec::new(),
             built_at: None,
             fusion: None,
+            recency: None,
             title_context: false,
             sidecars: Vec::new(),
             index_id: None,
