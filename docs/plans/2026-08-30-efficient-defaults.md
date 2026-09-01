@@ -65,8 +65,12 @@ lane fetched 134 MB of f32 weights from huggingface.co.
    extra). `sparse_ready()` true after `init_index` skips the
    `tokenizer.json` download. `runtime.base_url` on a wasm-candle lane
    fetches the bundled files next to the index (cache name `@site/<file>`
-   so the f16 copy never collides with a repo download; a HEAD per file
-   gives the consent card the real size). A webgpu-onnx lane with a
+   so the f16 copy never collides with a repo download). `eddie index
+   --bundle-model` now writes the bundle's exact byte count into the
+   manifest (`runtime.bytes`, optional and serde-defaulted); the consent
+   card shows it directly, with one HEAD per file as the fallback for
+   indexes that predate the field (the download-size table is never used
+   for a bundle: it describes the f32 originals, twice the f16 copy). A webgpu-onnx lane with a
    `base_url` sets transformers.js `env.remoteHost` to that directory and
    `env.remotePathTemplate = "."` (the URL parser folds `./` away; the
    model id stays a valid HF id so transformers.js does not refuse it);

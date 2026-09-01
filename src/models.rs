@@ -61,6 +61,7 @@ impl ModelDefaults {
 pub fn runtime_spec(kind: RuntimeKind) -> RuntimeSpec {
     match kind {
         RuntimeKind::WasmCandle => RuntimeSpec::WasmCandle {
+            bytes: None,
             files: WASM_CANDLE_FILES.iter().map(|s| s.to_string()).collect(),
             base_url: None,
         },

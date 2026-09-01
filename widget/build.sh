@@ -24,12 +24,13 @@
 #   eddie-worker.js        search engine in a classic dedicated worker (fallback host)
 #   eddie-agent-worker.js  agent in a module worker (fallback host)
 #
-# Service workers, one source (widget/src/eddie-sw.js) built three times
+# Service workers, one source (widget/src/eddie-sw.js) built four times
 # with different static imports (import() is not allowed in a service
 # worker), each registered in its own scope by lib/transport.js:
 #   eddie-sw-lite.js        lite wasm (keyword + sparse search)
 #   eddie-sw-dense.js       lite + dense wasm (CPU dense lane)
-#   eddie-sw-gpu.js         lite wasm + transformers.js (WebGPU lane) + WebLLM (agent)
+#   eddie-sw-gpu.js         lite wasm + transformers.js (WebGPU search lane)
+#   eddie-sw-agent.js       WebLLM + the agent engine (no search)
 #   eddie-transformers-sw.js transformers.js copy the gpu tier imports
 #
 # Usage: widget/build.sh [--js-only] [--sizes]
@@ -265,13 +266,14 @@ bundle() {
 }
 
 bundle "$DIST/eddie-boot.js"         eddie-boot.js         iife  "" boot.js
-bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js lanes.js agent.js transport.js warm.js
-bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js download.js search-engine.js
-bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-engine.js
+bundle "$DIST/eddie-widget.js"       eddie-widget.js       iife  "" config.js urls.js copy.js agent.js transport.js warm.js
+bundle "$DIST/eddie-worker.js"       worker.js             plain "" urls.js lanes.js copy.js download.js search-engine.js
+bundle "$DIST/eddie-agent-worker.js" eddie-agent-worker.js plain "" agent.js agent-llm.js agent-engine.js
 
-# The agent (agent.js, agent-engine.js) is bundled into the gpu tier only.
-SW_LIBS=(urls.js lanes.js download.js search-engine.js)
-SW_GPU_LIBS=("${SW_LIBS[@]}" agent.js agent-engine.js)
+# The agent (agent.js, agent-llm.js, agent-engine.js) is bundled into the
+# agent tier only; the gpu tier hosts WebGPU search and never imports WebLLM.
+SW_LIBS=(urls.js lanes.js copy.js download.js search-engine.js)
+SW_AGENT_LIBS=(agent.js agent-llm.js agent-engine.js)
 SW_LITE_IMPORTS="import initLiteWasm, * as liteWasmApi from \"./eddie-lite-esm.js\";
 const EDDIE_LITE_WASM = \"$LITE_WASM_FILE\";"
 bundle "$DIST/eddie-sw-lite.js" eddie-sw.js module "$SW_LITE_IMPORTS
@@ -282,10 +284,13 @@ import initDenseWasm, * as denseWasmApi from \"./eddie-dense-esm.js\";
 const EDDIE_SW_TIER = \"dense\";
 const EDDIE_DENSE_WASM = \"$DENSE_WASM_FILE\", webllm = null, transformers = null;" "${SW_LIBS[@]}"
 bundle "$DIST/eddie-sw-gpu.js" eddie-sw.js module "$SW_LITE_IMPORTS
-import * as webllm from \"$WEBLLM_URL\";
 import * as transformers from \"./eddie-transformers-sw.js\";
 const EDDIE_SW_TIER = \"gpu\";
-const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null;" "${SW_GPU_LIBS[@]}"
+const initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, webllm = null;" "${SW_LIBS[@]}"
+bundle "$DIST/eddie-sw-agent.js" eddie-sw.js module "import * as webllm from \"$WEBLLM_URL\";
+const EDDIE_SW_TIER = \"agent\";
+const initLiteWasm = null, liteWasmApi = null, EDDIE_LITE_WASM = null,
+      initDenseWasm = null, denseWasmApi = null, EDDIE_DENSE_WASM = null, transformers = null;" "${SW_AGENT_LIBS[@]}"
 
 # widget/assets.list is the single source of truth for dist/'s file list;
 # every other piece of release/integration plumbing reads it instead of

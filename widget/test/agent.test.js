@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const A = require("../src/lib/agent.js");
+const A = Object.assign({}, require("../src/lib/agent.js"), require("../src/lib/agent-llm.js"));
 
 const GIB = 1024 * 1024 * 1024;
 

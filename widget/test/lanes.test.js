@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const L = require("../src/lib/lanes.js");
+const L = Object.assign({}, require("../src/lib/lanes.js"), require("../src/lib/copy.js"));
 
 const minilm = {
   id: "minilm", model: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1", family: "bert", dim: 384,
@@ -141,4 +141,11 @@ test("consent copy names the size, the origin and the sidecar bytes", () => {
   );
   assert.match(L.consentCopy({ sizeBytes: null, model: "m" }), /a one-time download \(size unknown\) from huggingface\.co/);
   assert.equal(L.consentCopy({ sizeBytes: 1e6, model: "m", origin: "site", consentText: "{model}: {size} from {origin}" }), "m: 1 MB from this site");
+});
+
+test("laneDownloadBytes prefers the manifest's runtime.bytes over the table estimate", () => {
+  const bundled = { model: "BAAI/bge-small-en-v1.5", runtime: { kind: "wasm-candle", base_url: "models/bge/", bytes: 67458275 } };
+  assert.equal(L.laneDownloadBytes(bundled), 67458275);
+  assert.equal(L.laneDownloadBytes({ model: "BAAI/bge-small-en-v1.5", runtime: { kind: "wasm-candle" } }), 134e6, "no bytes: table estimate");
+  assert.equal(L.laneDownloadBytes({ model: "x/unknown", runtime: { kind: "wasm-candle", bytes: 0 } }), null, "zero or absent bytes and unknown repo: unknown");
 });

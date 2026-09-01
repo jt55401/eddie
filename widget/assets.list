@@ -40,6 +40,7 @@ eddie-dense-esm.js
 eddie-sw-lite.js
 eddie-sw-dense.js
 eddie-sw-gpu.js
+eddie-sw-agent.js
 eddie-transformers-sw.js
 ?eddie-lite-esm.wasm
 ?eddie-dense-esm.wasm

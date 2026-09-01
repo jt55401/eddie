@@ -2039,6 +2039,7 @@ pub(crate) mod testutil {
                     "model.safetensors".into(),
                 ],
                 base_url: None,
+                bytes: None,
             },
         }
     }
