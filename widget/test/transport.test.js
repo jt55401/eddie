@@ -173,6 +173,13 @@ test("registerServiceWorker resolves once a worker is active, rejects on redunda
     T.registerServiceWorker({ container: { register: () => Promise.reject(new TypeError("ServiceWorker cannot be started")) }, url: "/x", scope: "/", timeoutMs: 20 }),
     /cannot be started/
   );
+  // Some privacy modes and test harnesses resolve register() with nothing
+  // instead of rejecting; that is a registration failure like any other, not
+  // a TypeError on undefined.
+  await assert.rejects(
+    T.registerServiceWorker({ container: { register: () => Promise.resolve(undefined) }, url: "/x", scope: "/", timeoutMs: 20 }),
+    /refused/
+  );
 });
 
 test("service worker tiers: script names, scopes under the asset directory, tier per lane kind", () => {

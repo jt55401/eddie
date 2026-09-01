@@ -172,6 +172,21 @@ first search after an upgrade slower, so it stands.
 
 ### Progressive enhancement
 
+Same site, same build, one capability removed at a time.
+
+| Missing | Page view | First search |
+|---|---|---|
+| JavaScript | nothing from `/eddie/` at all; no trigger, no worker | the site is a plain static site, as it was before Eddie |
+| service workers (registration blocked) | `eddie-boot.js`, trigger drawn | falls back to page-side workers -- `eddie-widget.js`, `eddie-worker.js`, `eddie-lite.js`, `eddie-lite.wasm`, `index.ed` -- and returns the same results. One log line says so |
+| WebGPU | `eddie-boot.js`, trigger drawn | the `webgpu-onnx` lane is skipped and the CPU `wasm-candle` lane is offered instead (scenario (c)); with neither, keyword + sparse results and a "keyword-only" notice |
+| nothing (Data Saver / `prefers-reduced-data`) | `eddie-boot.js`, trigger drawn, **nothing else** -- no warm-up, no idle widget fetch, no service worker | a search still works; only the automatic downloads are withheld |
+
+The service-worker rung turned up one rough edge, now fixed: a container
+that resolves `register()` with `undefined` rather than rejecting (some
+privacy modes, and Playwright's `serviceWorkers: "block"`) produced
+"Cannot read properties of undefined (reading 'active')" in the fallback
+message. It falls back either way; it now says "registration was refused".
+
 ## Follow-ups
 
 - The five pass-1 follow-ups are all closed: service worker imports now

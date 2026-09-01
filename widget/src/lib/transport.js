@@ -346,6 +346,14 @@
       Promise.resolve()
         .then(() => container.register(o.url, { type: "module", scope: o.scope, updateViaCache: "none" }))
         .then((registration) => {
+          // A container that resolves register() with nothing at all: some
+          // privacy modes and test harnesses do this rather than rejecting.
+          // Treated as a plain registration failure, so the caller falls
+          // back to page workers with a message that says so.
+          if (!registration) {
+            finish(() => reject(new Error("service worker registration was refused")));
+            return;
+          }
           if (registration.active) {
             finish(() => resolve(registration));
             return;
