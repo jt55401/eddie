@@ -121,6 +121,27 @@ If you want to build the search experience yourself, Orama gives you more
 room. If you want search on a Hugo site this afternoon, Eddie does more of
 the work.
 
+## Measured against Pagefind and Orama
+
+The comparison table above says what each tool does. This says how they
+score on the same content and the same questions:
+
+| Tool | nDCG@10, full questions | nDCG@10, 2-word queries | KB to first result |
+|---|---:|---:|---:|
+| **Eddie** | **0.774** | **0.644** | 738 |
+| Orama, full-text | 0.512 | 0.418 | 254 |
+| Pagefind | 0.143 | 0.372 | **113** |
+
+Eddie ranks better on every query shape tested and costs about six times
+more to reach a first result than Pagefind. Those are the same trade seen
+from two sides: Eddie loads its engine and index once and answers
+everything after that from memory, Pagefind fetches a small index chunk per
+query.
+
+The full write-up has three query shapes, the browser-measured byte
+timeline, generator coverage, and the ways this benchmark is unfair:
+[Eddie against Pagefind and Orama](reviews/2026-09-01-competitive-benchmark.md).
+
 ## Papers and references
 
 Retrieval:
